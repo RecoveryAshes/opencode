@@ -110,6 +110,42 @@ export namespace File {
     return false
   }
 
+  /**
+   * Detect if a file is a binary executable by checking for null bytes.
+   * This is used to prevent the desktop app from freezing when trying to
+   * preview large binary files like compiled executables.
+   *
+   * Only reads the first 4KB of the file to avoid memory issues.
+   */
+  async function isBinaryFile(filepath: string, bunFile: BunFile): Promise<boolean> {
+    const stat = await bunFile.stat()
+    if (stat.size === 0) return false
+
+    // Only read first 4KB to check for binary content
+    const bufferSize = Math.min(4096, stat.size)
+    const buffer = await bunFile.slice(0, bufferSize).arrayBuffer()
+    if (buffer.byteLength === 0) return false
+
+    const bytes = new Uint8Array(buffer)
+
+    // Check for null bytes - text files never contain null bytes
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes[i] === 0) return true
+    }
+
+    // Count non-printable characters
+    let nonPrintableCount = 0
+    for (let i = 0; i < bytes.length; i++) {
+      // Characters below TAB (9) or between CR (13) and SPACE (32) are non-printable
+      if (bytes[i] < 9 || (bytes[i] > 13 && bytes[i] < 32)) {
+        nonPrintableCount++
+      }
+    }
+
+    // If more than 30% non-printable characters, consider it binary
+    return nonPrintableCount / bytes.length > 0.3
+  }
+
   export const Event = {
     Edited: BusEvent.define(
       "file.edited",
@@ -300,6 +336,12 @@ export namespace File {
       const content = Buffer.from(buffer).toString("base64")
       const mimeType = bunFile.type || "application/octet-stream"
       return { type: "text", content, mimeType, encoding: "base64" }
+    }
+
+    // Check for binary files that weren't caught by shouldEncode (e.g., executables without extensions)
+    // This prevents the app from freezing when trying to preview large binary files
+    if (await isBinaryFile(full, bunFile)) {
+      throw new Error(`Cannot preview binary file: ${file}`)
     }
 
     const content = await bunFile
