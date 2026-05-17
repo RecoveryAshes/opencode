@@ -109,6 +109,43 @@ func TestSessionCreateListGetUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestSessionCreateListMetadataHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
+	defer server.Close()
+
+	body := `{"title":"metadata","agent":"build","model":{"id":"gpt","providerID":"openai","variant":"fast"},"tokens":{"input":1,"output":2,"reasoning":3,"cache":{"read":4,"write":5}}}`
+	resp, err := http.Post(server.URL+"/session?projectID=proj_1&workspaceID=wrk_1&directory=%2Ftmp%2Fproject&path=packages%2Fopencode", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session metadata error = %v", err)
+	}
+	defer closeBody(t, resp)
+
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created metadata: %v", err)
+	}
+	if created.ProjectID != "proj_1" || created.WorkspaceID != "wrk_1" || created.Directory != "/tmp/project" || created.Path != "packages/opencode" {
+		t.Fatalf("created metadata = %#v", created)
+	}
+	if created.Model == nil || created.Model.ID != "gpt" || created.Model.ProviderID != "openai" || created.Tokens.Input != 1 {
+		t.Fatalf("created model/tokens = %#v", created)
+	}
+
+	resp, err = http.Get(server.URL + "/session?workspaceID=wrk_1&path=packages")
+	if err != nil {
+		t.Fatalf("GET /session metadata error = %v", err)
+	}
+	defer closeBody(t, resp)
+
+	var sessions []session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
+		t.Fatalf("decode metadata sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != created.ID {
+		t.Fatalf("metadata sessions = %#v, want created session", sessions)
+	}
+}
+
 func TestSessionMessageHTTPAPI(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
 	defer server.Close()

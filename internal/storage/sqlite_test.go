@@ -52,6 +52,60 @@ func TestSQLiteSessionStoreCreateListUpdateRemove(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionMetadataAndFilters(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	created, err := store.Create(ctx, session.CreateInput{
+		Title:       "Metadata",
+		ProjectID:   "proj_1",
+		WorkspaceID: "wrk_1",
+		Directory:   "/tmp/project",
+		Path:        "packages/opencode",
+		Agent:       "build",
+		Model:       &session.SessionModel{ProviderID: "openai", ID: "gpt", Variant: "fast"},
+		Version:     "v1",
+		Cost:        1.25,
+		Tokens:      &session.TokenUsage{Input: 10, Output: 20, Reasoning: 3, Cache: session.CacheUsage{Read: 4, Write: 5}},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.ProjectID != "proj_1" || created.WorkspaceID != "wrk_1" || created.Path != "packages/opencode" {
+		t.Fatalf("created metadata = %#v", created)
+	}
+
+	list, err := store.List(ctx, session.ListFilter{ProjectID: "proj_1", WorkspaceID: "wrk_1", Directory: "/tmp/project"})
+	if err != nil {
+		t.Fatalf("List(metadata) error = %v", err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("metadata list = %#v, want created session", list)
+	}
+	pathPrefix := "packages"
+	list, err = store.List(ctx, session.ListFilter{Path: &pathPrefix})
+	if err != nil {
+		t.Fatalf("List(path) error = %v", err)
+	}
+	if len(list) != 1 || list[0].Model == nil || list[0].Model.ProviderID != "openai" || list[0].Model.ID != "gpt" || list[0].Tokens.Input != 10 {
+		t.Fatalf("path list = %#v, want model/tokens metadata", list)
+	}
+
+	nextWorkspace := "wrk_2"
+	nextProject := "proj_2"
+	updated, err := store.Update(ctx, created.ID, session.UpdateInput{ProjectID: &nextProject, WorkspaceID: &nextWorkspace})
+	if err != nil {
+		t.Fatalf("Update(projectID/workspaceID) error = %v", err)
+	}
+	if updated.ProjectID != "proj_2" || updated.WorkspaceID != "wrk_2" {
+		t.Fatalf("updated project/workspace = %q/%q, want proj_2/wrk_2", updated.ProjectID, updated.WorkspaceID)
+	}
+}
+
 func TestSQLiteSessionSchemaMatchesCoreLegacyColumns(t *testing.T) {
 	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
 	if err != nil {

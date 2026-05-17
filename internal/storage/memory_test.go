@@ -45,6 +45,55 @@ func TestMemorySessionStoreCreateListUpdateRemove(t *testing.T) {
 	}
 }
 
+func TestMemorySessionStoreMetadataAndFilters(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemorySessionStore()
+
+	created, err := store.Create(ctx, session.CreateInput{
+		Title:       "Metadata",
+		ProjectID:   "proj_1",
+		WorkspaceID: "wrk_1",
+		Directory:   "/tmp/project",
+		Path:        "packages/opencode",
+		Agent:       "build",
+		Model:       &session.SessionModel{ProviderID: "openai", ID: "gpt", Variant: "fast"},
+		Version:     "v1",
+		Cost:        1.25,
+		Tokens:      &session.TokenUsage{Input: 10, Output: 20, Reasoning: 3, Cache: session.CacheUsage{Read: 4, Write: 5}},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Slug != "metadata" || created.ProjectID != "proj_1" || created.WorkspaceID != "wrk_1" || created.Path != "packages/opencode" {
+		t.Fatalf("created metadata = %#v", created)
+	}
+
+	list, err := store.List(ctx, session.ListFilter{ProjectID: "proj_1", WorkspaceID: "wrk_1", Directory: "/tmp/project"})
+	if err != nil {
+		t.Fatalf("List(metadata) error = %v", err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("metadata list = %#v, want created session", list)
+	}
+	pathPrefix := "packages"
+	list, err = store.List(ctx, session.ListFilter{Path: &pathPrefix})
+	if err != nil {
+		t.Fatalf("List(path) error = %v", err)
+	}
+	if len(list) != 1 || list[0].Model == nil || list[0].Model.ID != "gpt" || list[0].Tokens.Input != 10 {
+		t.Fatalf("path list = %#v, want model/tokens metadata", list)
+	}
+
+	nextWorkspace := "wrk_2"
+	updated, err := store.Update(ctx, created.ID, session.UpdateInput{WorkspaceID: &nextWorkspace})
+	if err != nil {
+		t.Fatalf("Update(workspaceID) error = %v", err)
+	}
+	if updated.WorkspaceID != "wrk_2" {
+		t.Fatalf("updated workspace = %q, want wrk_2", updated.WorkspaceID)
+	}
+}
+
 func TestMemorySessionStoreMessages(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemorySessionStore()

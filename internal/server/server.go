@@ -534,6 +534,14 @@ func loadRequestConfig(r *http.Request) (config.LoadResult, error) {
 	})
 }
 
+func optionalQueryString(r *http.Request, key string) *string {
+	if !r.URL.Query().Has(key) {
+		return nil
+	}
+	value := r.URL.Query().Get(key)
+	return &value
+}
+
 func tools() http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		if r.Method != http.MethodGet {
@@ -582,8 +590,12 @@ func sessions(repo session.Repository, events *eventBus) http.HandlerFunc {
 				return nil, http.StatusBadRequest, err
 			}
 			result, err := repo.List(r.Context(), session.ListFilter{
-				Search: r.URL.Query().Get("search"),
-				Limit:  limit,
+				Search:      r.URL.Query().Get("search"),
+				Limit:       limit,
+				ProjectID:   r.URL.Query().Get("projectID"),
+				WorkspaceID: workspaceIDFromRequest(r),
+				Directory:   r.URL.Query().Get("directory"),
+				Path:        optionalQueryString(r, "path"),
 			})
 			return result, http.StatusOK, err
 		case http.MethodPost:
@@ -592,6 +604,12 @@ func sessions(repo session.Repository, events *eventBus) http.HandlerFunc {
 				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 					return nil, http.StatusBadRequest, err
 				}
+			}
+			input.ProjectID = defaultString(input.ProjectID, r.URL.Query().Get("projectID"))
+			input.WorkspaceID = defaultString(input.WorkspaceID, workspaceIDFromRequest(r))
+			input.Directory = defaultString(input.Directory, r.URL.Query().Get("directory"))
+			if input.Path == "" {
+				input.Path = r.URL.Query().Get("path")
 			}
 			result, err := repo.Create(r.Context(), input)
 			if err == nil {

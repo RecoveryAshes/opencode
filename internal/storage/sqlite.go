@@ -43,12 +43,36 @@ func (store *SQLiteSessionStore) Close() error {
 
 // List returns sessions sorted by update time descending.
 func (store *SQLiteSessionStore) List(ctx context.Context, filter session.ListFilter) ([]session.Info, error) {
-	query := `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
+	query := sessionSelectColumns + `
 FROM session`
 	args := []any{}
+	conditions := []string{}
 	if filter.Search != "" {
-		query += " WHERE lower(title) LIKE ?"
+		conditions = append(conditions, "lower(title) LIKE ?")
 		args = append(args, "%"+strings.ToLower(filter.Search)+"%")
+	}
+	if filter.ProjectID != "" {
+		conditions = append(conditions, "project_id = ?")
+		args = append(args, filter.ProjectID)
+	}
+	if filter.WorkspaceID != "" {
+		conditions = append(conditions, "workspace_id = ?")
+		args = append(args, filter.WorkspaceID)
+	}
+	if filter.Directory != "" {
+		conditions = append(conditions, "directory = ?")
+		args = append(args, filter.Directory)
+	}
+	if filter.Path != nil {
+		if *filter.Path == "" {
+			conditions = append(conditions, "(path IS NULL OR path = '')")
+		} else {
+			conditions = append(conditions, "(path = ? OR path LIKE ?)")
+			args = append(args, *filter.Path, *filter.Path+"/%")
+		}
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += " ORDER BY time_updated DESC, id DESC"
 	if filter.Limit > 0 {
@@ -85,14 +109,26 @@ func (store *SQLiteSessionStore) Create(ctx context.Context, input session.Creat
 		return session.Info{}, err
 	}
 	now := session.NowMillis()
-	if err := store.ensureProject(ctx, now); err != nil {
+	projectID := defaultString(input.ProjectID, defaultProjectID)
+	directory := defaultString(input.Directory, ".")
+	if err := store.ensureProject(ctx, projectID, directory, now); err != nil {
 		return session.Info{}, err
 	}
 
 	info := session.Info{
-		ID:       id,
-		ParentID: input.ParentID,
-		Title:    input.Title,
+		ID:          id,
+		Slug:        slug(input.Title),
+		ProjectID:   projectID,
+		WorkspaceID: input.WorkspaceID,
+		Directory:   directory,
+		Path:        input.Path,
+		ParentID:    input.ParentID,
+		Title:       input.Title,
+		Agent:       input.Agent,
+		Model:       cloneModel(input.Model),
+		Version:     defaultString(input.Version, "go-migration"),
+		Cost:        input.Cost,
+		Tokens:      cloneTokens(input.Tokens),
 		Time: session.TimeInfo{
 			Created: now,
 			Updated: now,
@@ -102,17 +138,33 @@ func (store *SQLiteSessionStore) Create(ctx context.Context, input session.Creat
 	if input.ParentID != nil {
 		parentID = sql.NullString{String: string(*input.ParentID), Valid: true}
 	}
+	modelJSON, err := optionalJSON(info.Model)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("encode model: %w", err)
+	}
+	tokens := emptyTokens(info.Tokens)
 	_, err = store.db.ExecContext(ctx, `INSERT INTO session (
-id, project_id, parent_id, slug, directory, title, version, permission, time_created, time_updated
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+id, project_id, workspace_id, parent_id, slug, directory, path, title, version, permission, agent, model, cost,
+tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, time_created, time_updated
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
-		defaultProjectID,
+		info.ProjectID,
+		nullableString(info.WorkspaceID, info.WorkspaceID != ""),
 		parentID,
-		slug(input.Title),
-		"",
+		info.Slug,
+		info.Directory,
+		nullableString(info.Path, info.Path != ""),
 		input.Title,
-		"go-migration",
+		info.Version,
 		"[]",
+		nullableString(info.Agent, info.Agent != ""),
+		nullableString(modelJSON, info.Model != nil),
+		info.Cost,
+		tokens.Input,
+		tokens.Output,
+		tokens.Reasoning,
+		tokens.Cache.Read,
+		tokens.Cache.Write,
 		now,
 		now,
 	)
@@ -124,7 +176,7 @@ id, project_id, parent_id, slug, directory, title, version, permission, time_cre
 
 // Get returns one session.
 func (store *SQLiteSessionStore) Get(ctx context.Context, id session.ID) (session.Info, error) {
-	row := store.db.QueryRowContext(ctx, `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
+	row := store.db.QueryRowContext(ctx, sessionSelectColumns+`
 FROM session WHERE id = ?`, id)
 	return scanSession(row)
 }
@@ -137,6 +189,34 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 	}
 	if input.Title != nil {
 		current.Title = *input.Title
+		current.Slug = slug(*input.Title)
+	}
+	if input.ProjectID != nil {
+		current.ProjectID = *input.ProjectID
+	}
+	if input.WorkspaceID != nil {
+		current.WorkspaceID = *input.WorkspaceID
+	}
+	if input.Directory != nil {
+		current.Directory = *input.Directory
+	}
+	if input.Path != nil {
+		current.Path = *input.Path
+	}
+	if input.Agent != nil {
+		current.Agent = *input.Agent
+	}
+	if input.Model != nil {
+		current.Model = cloneModel(input.Model)
+	}
+	if input.Version != nil {
+		current.Version = *input.Version
+	}
+	if input.Cost != nil {
+		current.Cost = *input.Cost
+	}
+	if input.Tokens != nil {
+		current.Tokens = cloneTokens(input.Tokens)
 	}
 	if input.Archived != nil {
 		current.Time.Archived = input.Archived
@@ -175,6 +255,11 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 	if err != nil {
 		return session.Info{}, fmt.Errorf("encode revert: %w", err)
 	}
+	modelJSON, err := optionalJSON(current.Model)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("encode model: %w", err)
+	}
+	tokens := emptyTokens(current.Tokens)
 	shareURL := sql.NullString{}
 	if current.Share != nil && current.Share.URL != "" {
 		shareURL = sql.NullString{String: current.Share.URL, Valid: true}
@@ -183,13 +268,31 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 	if current.Time.Archived != nil {
 		archived = sql.NullInt64{Int64: *current.Time.Archived, Valid: true}
 	}
+	if err := store.ensureProject(ctx, current.ProjectID, current.Directory, session.NowMillis()); err != nil {
+		return session.Info{}, err
+	}
 	summary := current.Summary
 	result, err := store.db.ExecContext(ctx, `UPDATE session SET
-title = ?, slug = ?, permission = ?, time_updated = ?, time_archived = ?,
-share_url = ?, summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, revert = ?
+title = ?, slug = ?, project_id = ?, workspace_id = ?, directory = ?, path = ?, agent = ?, model = ?, version = ?,
+cost = ?, tokens_input = ?, tokens_output = ?, tokens_reasoning = ?, tokens_cache_read = ?, tokens_cache_write = ?,
+permission = ?, time_updated = ?, time_archived = ?, share_url = ?,
+summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, revert = ?
 WHERE id = ?`,
 		current.Title,
-		slug(current.Title),
+		current.Slug,
+		current.ProjectID,
+		nullableString(current.WorkspaceID, current.WorkspaceID != ""),
+		current.Directory,
+		nullableString(current.Path, current.Path != ""),
+		nullableString(current.Agent, current.Agent != ""),
+		nullableString(modelJSON, current.Model != nil),
+		current.Version,
+		current.Cost,
+		tokens.Input,
+		tokens.Output,
+		tokens.Reasoning,
+		tokens.Cache.Read,
+		tokens.Cache.Write,
 		string(permissionJSON),
 		session.NowMillis(),
 		archived,
@@ -219,7 +322,7 @@ func (store *SQLiteSessionStore) Children(ctx context.Context, parentID session.
 	if _, err := store.Get(ctx, parentID); err != nil {
 		return nil, err
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
+	rows, err := store.db.QueryContext(ctx, sessionSelectColumns+`
 FROM session WHERE parent_id = ? ORDER BY time_updated DESC, id DESC`, parentID)
 	if err != nil {
 		return nil, fmt.Errorf("list children: %w", err)
@@ -247,7 +350,19 @@ func (store *SQLiteSessionStore) Fork(ctx context.Context, parentID session.ID, 
 	if err != nil {
 		return session.Info{}, err
 	}
-	child, err := store.Create(ctx, session.CreateInput{Title: parent.Title, ParentID: &parentID})
+	child, err := store.Create(ctx, session.CreateInput{
+		Title:       parent.Title,
+		ParentID:    &parentID,
+		ProjectID:   parent.ProjectID,
+		WorkspaceID: parent.WorkspaceID,
+		Directory:   parent.Directory,
+		Path:        parent.Path,
+		Agent:       parent.Agent,
+		Model:       cloneModel(parent.Model),
+		Version:     parent.Version,
+		Cost:        parent.Cost,
+		Tokens:      cloneTokens(parent.Tokens),
+	})
 	if err != nil {
 		return session.Info{}, err
 	}
@@ -307,10 +422,11 @@ func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 	return nil
 }
 
-func (store *SQLiteSessionStore) ensureProject(ctx context.Context, now int64) error {
+func (store *SQLiteSessionStore) ensureProject(ctx context.Context, projectID string, directory string, now int64) error {
+	worktree := filepath.Clean(defaultString(directory, "."))
 	_, err := store.db.ExecContext(ctx, `INSERT OR IGNORE INTO project (
 id, worktree, name, time_created, time_updated, sandboxes
-) VALUES (?, ?, ?, ?, ?, ?)`, defaultProjectID, filepath.Clean("."), "Go Migration", now, now, "[]")
+) VALUES (?, ?, ?, ?, ?, ?)`, projectID, worktree, filepath.Base(worktree), now, now, "[]")
 	if err != nil {
 		return fmt.Errorf("ensure project: %w", err)
 	}
@@ -739,10 +855,28 @@ type sessionScanner interface {
 	Scan(...any) error
 }
 
+const sessionSelectColumns = `SELECT id, slug, project_id, workspace_id, directory, path, parent_id, title, agent, model, version,
+cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,
+permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert`
+
 func scanSession(scanner sessionScanner) (session.Info, error) {
 	var id string
+	var slugValue string
+	var projectID string
+	var workspaceID sql.NullString
+	var directory string
+	var pathValue sql.NullString
 	var parentID sql.NullString
 	var title string
+	var agent sql.NullString
+	var modelJSON sql.NullString
+	var version string
+	var cost float64
+	var tokensInput int
+	var tokensOutput int
+	var tokensReasoning int
+	var tokensCacheRead int
+	var tokensCacheWrite int
 	var permissionJSON sql.NullString
 	var created int64
 	var updated int64
@@ -755,8 +889,22 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 	var revertJSON sql.NullString
 	if err := scanner.Scan(
 		&id,
+		&slugValue,
+		&projectID,
+		&workspaceID,
+		&directory,
+		&pathValue,
 		&parentID,
 		&title,
+		&agent,
+		&modelJSON,
+		&version,
+		&cost,
+		&tokensInput,
+		&tokensOutput,
+		&tokensReasoning,
+		&tokensCacheRead,
+		&tokensCacheWrite,
 		&permissionJSON,
 		&created,
 		&updated,
@@ -775,16 +923,44 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 	}
 
 	info := session.Info{
-		ID:    session.ID(id),
-		Title: title,
+		ID:        session.ID(id),
+		Slug:      slugValue,
+		ProjectID: projectID,
+		Directory: directory,
+		Title:     title,
+		Agent:     agent.String,
+		Version:   version,
+		Cost:      cost,
+		Tokens: &session.TokenUsage{
+			Input:     tokensInput,
+			Output:    tokensOutput,
+			Reasoning: tokensReasoning,
+			Cache: session.CacheUsage{
+				Read:  tokensCacheRead,
+				Write: tokensCacheWrite,
+			},
+		},
 		Time: session.TimeInfo{
 			Created: created,
 			Updated: updated,
 		},
 	}
+	if workspaceID.Valid {
+		info.WorkspaceID = workspaceID.String
+	}
+	if pathValue.Valid {
+		info.Path = pathValue.String
+	}
 	if parentID.Valid {
 		parsed := session.ID(parentID.String)
 		info.ParentID = &parsed
+	}
+	if modelJSON.Valid && modelJSON.String != "" {
+		var model session.SessionModel
+		if err := json.Unmarshal([]byte(modelJSON.String), &model); err != nil {
+			return session.Info{}, fmt.Errorf("decode model: %w", err)
+		}
+		info.Model = &model
 	}
 	if archived.Valid {
 		info.Time.Archived = &archived.Int64
@@ -835,6 +1011,13 @@ func optionalJSON(value any) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func emptyTokens(value *session.TokenUsage) session.TokenUsage {
+	if value == nil {
+		return session.TokenUsage{Cache: session.CacheUsage{}}
+	}
+	return *value
 }
 
 func nullableInt[T any](value *T, pick func(*T) int) sql.NullInt64 {

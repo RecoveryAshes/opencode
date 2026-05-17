@@ -54,20 +54,39 @@ type RevertInfo struct {
 
 // Info is the public session DTO used by the HTTP API.
 type Info struct {
-	ID         ID           `json:"id"`
-	ParentID   *ID          `json:"parentID,omitempty"`
-	Summary    *SummaryInfo `json:"summary,omitempty"`
-	Share      *ShareInfo   `json:"share,omitempty"`
-	Title      string       `json:"title,omitempty"`
-	Time       TimeInfo     `json:"time"`
-	Permission []string     `json:"permission,omitempty"`
-	Revert     *RevertInfo  `json:"revert,omitempty"`
+	ID          ID            `json:"id"`
+	Slug        string        `json:"slug,omitempty"`
+	ProjectID   string        `json:"projectID,omitempty"`
+	WorkspaceID string        `json:"workspaceID,omitempty"`
+	Directory   string        `json:"directory,omitempty"`
+	Path        string        `json:"path,omitempty"`
+	ParentID    *ID           `json:"parentID,omitempty"`
+	Summary     *SummaryInfo  `json:"summary,omitempty"`
+	Share       *ShareInfo    `json:"share,omitempty"`
+	Title       string        `json:"title,omitempty"`
+	Agent       string        `json:"agent,omitempty"`
+	Model       *SessionModel `json:"model,omitempty"`
+	Version     string        `json:"version,omitempty"`
+	Cost        float64       `json:"cost,omitempty"`
+	Tokens      *TokenUsage   `json:"tokens,omitempty"`
+	Time        TimeInfo      `json:"time"`
+	Permission  []string      `json:"permission,omitempty"`
+	Revert      *RevertInfo   `json:"revert,omitempty"`
 }
 
 // ModelRef identifies a provider/model pair used by a message.
 type ModelRef struct {
 	ProviderID string `json:"providerID"`
 	ModelID    string `json:"modelID"`
+	Variant    string `json:"variant,omitempty"`
+}
+
+// SessionModel identifies the active provider/model pair stored on a session.
+// The legacy TypeScript session row serializes the model ID as "id", while
+// message DTOs serialize the same value as "modelID".
+type SessionModel struct {
+	ID         string `json:"id"`
+	ProviderID string `json:"providerID"`
 	Variant    string `json:"variant,omitempty"`
 }
 
@@ -222,26 +241,48 @@ type MessageRepository interface {
 
 // CreateInput is the session creation payload accepted by the HTTP API.
 type CreateInput struct {
-	Title    string `json:"title,omitempty"`
-	ParentID *ID    `json:"parentID,omitempty"`
+	Title       string        `json:"title,omitempty"`
+	ParentID    *ID           `json:"parentID,omitempty"`
+	ProjectID   string        `json:"projectID,omitempty"`
+	WorkspaceID string        `json:"workspaceID,omitempty"`
+	Directory   string        `json:"directory,omitempty"`
+	Path        string        `json:"path,omitempty"`
+	Agent       string        `json:"agent,omitempty"`
+	Model       *SessionModel `json:"model,omitempty"`
+	Version     string        `json:"version,omitempty"`
+	Tokens      *TokenUsage   `json:"tokens,omitempty"`
+	Cost        float64       `json:"cost,omitempty"`
 }
 
 // UpdateInput is the mutable subset of a session.
 type UpdateInput struct {
-	Title       *string      `json:"title,omitempty"`
-	Archived    *int64       `json:"-"`
-	Permission  *[]string    `json:"permission,omitempty"`
-	Revert      *RevertInfo  `json:"revert,omitempty"`
-	ClearRevert bool         `json:"-"`
-	Summary     *SummaryInfo `json:"summary,omitempty"`
-	Share       *ShareInfo   `json:"share,omitempty"`
-	ClearShare  bool         `json:"-"`
+	Title       *string       `json:"title,omitempty"`
+	ProjectID   *string       `json:"projectID,omitempty"`
+	WorkspaceID *string       `json:"workspaceID,omitempty"`
+	Directory   *string       `json:"directory,omitempty"`
+	Path        *string       `json:"path,omitempty"`
+	Agent       *string       `json:"agent,omitempty"`
+	Model       *SessionModel `json:"model,omitempty"`
+	Version     *string       `json:"version,omitempty"`
+	Cost        *float64      `json:"cost,omitempty"`
+	Tokens      *TokenUsage   `json:"tokens,omitempty"`
+	Archived    *int64        `json:"-"`
+	Permission  *[]string     `json:"permission,omitempty"`
+	Revert      *RevertInfo   `json:"revert,omitempty"`
+	ClearRevert bool          `json:"-"`
+	Summary     *SummaryInfo  `json:"summary,omitempty"`
+	Share       *ShareInfo    `json:"share,omitempty"`
+	ClearShare  bool          `json:"-"`
 }
 
 // ListFilter represents the currently migrated list query fields.
 type ListFilter struct {
-	Search string
-	Limit  int
+	Search      string
+	Limit       int
+	ProjectID   string
+	WorkspaceID string
+	Directory   string
+	Path        *string
 }
 
 // Repository is the storage boundary for migrated session routes.

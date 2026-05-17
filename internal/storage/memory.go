@@ -38,7 +38,7 @@ func (store *MemorySessionStore) List(_ context.Context, filter session.ListFilt
 	result := make([]session.Info, 0, len(store.order))
 	for _, id := range store.order {
 		info := store.sessions[id]
-		if filter.Search != "" && !strings.Contains(strings.ToLower(info.Title), strings.ToLower(filter.Search)) {
+		if !matchesSessionFilter(info, filter) {
 			continue
 		}
 		result = append(result, info)
@@ -57,9 +57,19 @@ func (store *MemorySessionStore) Create(_ context.Context, input session.CreateI
 	}
 	now := session.NowMillis()
 	info := session.Info{
-		ID:       id,
-		ParentID: input.ParentID,
-		Title:    input.Title,
+		ID:          id,
+		Slug:        slug(input.Title),
+		ProjectID:   defaultString(input.ProjectID, defaultProjectID),
+		WorkspaceID: input.WorkspaceID,
+		Directory:   input.Directory,
+		Path:        input.Path,
+		ParentID:    input.ParentID,
+		Title:       input.Title,
+		Agent:       input.Agent,
+		Model:       cloneModel(input.Model),
+		Version:     defaultString(input.Version, "go-migration"),
+		Cost:        input.Cost,
+		Tokens:      cloneTokens(input.Tokens),
 		Time: session.TimeInfo{
 			Created: now,
 			Updated: now,
@@ -96,6 +106,34 @@ func (store *MemorySessionStore) Update(_ context.Context, id session.ID, input 
 	}
 	if input.Title != nil {
 		info.Title = *input.Title
+		info.Slug = slug(*input.Title)
+	}
+	if input.ProjectID != nil {
+		info.ProjectID = *input.ProjectID
+	}
+	if input.WorkspaceID != nil {
+		info.WorkspaceID = *input.WorkspaceID
+	}
+	if input.Directory != nil {
+		info.Directory = *input.Directory
+	}
+	if input.Path != nil {
+		info.Path = *input.Path
+	}
+	if input.Agent != nil {
+		info.Agent = *input.Agent
+	}
+	if input.Model != nil {
+		info.Model = cloneModel(input.Model)
+	}
+	if input.Version != nil {
+		info.Version = *input.Version
+	}
+	if input.Cost != nil {
+		info.Cost = *input.Cost
+	}
+	if input.Tokens != nil {
+		info.Tokens = cloneTokens(input.Tokens)
 	}
 	if input.Archived != nil {
 		info.Time.Archived = input.Archived
@@ -161,9 +199,19 @@ func (store *MemorySessionStore) Fork(_ context.Context, parentID session.ID, me
 	}
 	now := session.NowMillis()
 	info := session.Info{
-		ID:       id,
-		ParentID: &parentID,
-		Title:    parent.Title,
+		ID:          id,
+		Slug:        parent.Slug,
+		ProjectID:   parent.ProjectID,
+		WorkspaceID: parent.WorkspaceID,
+		Directory:   parent.Directory,
+		Path:        parent.Path,
+		ParentID:    &parentID,
+		Title:       parent.Title,
+		Agent:       parent.Agent,
+		Model:       cloneModel(parent.Model),
+		Version:     parent.Version,
+		Cost:        parent.Cost,
+		Tokens:      cloneTokens(parent.Tokens),
 		Time: session.TimeInfo{
 			Created: now,
 			Updated: now,
@@ -538,6 +586,44 @@ func defaultString(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func matchesSessionFilter(info session.Info, filter session.ListFilter) bool {
+	if filter.Search != "" && !strings.Contains(strings.ToLower(info.Title), strings.ToLower(filter.Search)) {
+		return false
+	}
+	if filter.ProjectID != "" && info.ProjectID != filter.ProjectID {
+		return false
+	}
+	if filter.WorkspaceID != "" && info.WorkspaceID != filter.WorkspaceID {
+		return false
+	}
+	if filter.Directory != "" && info.Directory != filter.Directory {
+		return false
+	}
+	if filter.Path != nil {
+		if *filter.Path == "" {
+			return info.Path == ""
+		}
+		return info.Path == *filter.Path || strings.HasPrefix(info.Path, *filter.Path+"/")
+	}
+	return true
+}
+
+func cloneModel(input *session.SessionModel) *session.SessionModel {
+	if input == nil {
+		return nil
+	}
+	model := *input
+	return &model
+}
+
+func cloneTokens(input *session.TokenUsage) *session.TokenUsage {
+	if input == nil {
+		return nil
+	}
+	tokens := *input
+	return &tokens
 }
 
 // IsNotFound reports whether an error represents a missing record.
