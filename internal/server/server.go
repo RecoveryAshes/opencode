@@ -873,6 +873,9 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			return nil, http.StatusBadRequest, err
 		}
+		if err := cleanupCurrentRevert(r.Context(), sessionID, messages, repo, events); err != nil {
+			return nil, statusFromError(err), err
+		}
 		directory := "."
 		if repo, ok := messages.(session.Repository); ok {
 			info, err := repo.Get(r.Context(), sessionID)
@@ -1016,6 +1019,9 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 				return nil, http.StatusBadRequest, err
 			}
+			if err := cleanupCurrentRevert(r.Context(), sessionID, messages, repo, events); err != nil {
+				return nil, statusFromError(err), err
+			}
 			result, err := messages.CreatePrompt(r.Context(), sessionID, input)
 			if err != nil {
 				return result, statusFromError(err), err
@@ -1040,6 +1046,9 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo
 		var input session.PromptInput
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			return nil, http.StatusBadRequest, err
+		}
+		if err := cleanupCurrentRevert(r.Context(), sessionID, messages, repo, events); err != nil {
+			return nil, statusFromError(err), err
 		}
 		result, err := messages.CreatePrompt(r.Context(), sessionID, input)
 		if err != nil {
@@ -1073,6 +1082,9 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo
 		}
 		if strings.TrimSpace(input.Command) == "" {
 			return nil, http.StatusBadRequest, fmt.Errorf("command is required")
+		}
+		if err := cleanupCurrentRevert(r.Context(), sessionID, messages, repo, events); err != nil {
+			return nil, statusFromError(err), err
 		}
 		result, err := messages.CreatePrompt(r.Context(), sessionID, session.PromptInput{
 			MessageID: input.MessageID,
@@ -1235,6 +1247,14 @@ func createCompactionPrompt(ctx context.Context, sessionID session.ID, providerI
 		"reason":    map[bool]string{true: "auto", false: "manual"}[isAuto],
 	})
 	return created, nil
+}
+
+func cleanupCurrentRevert(ctx context.Context, sessionID session.ID, messages session.MessageRepository, repo session.Repository, events *eventBus) error {
+	info, err := repo.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	return cleanupSessionRevert(ctx, info, messages, repo, events)
 }
 
 func cleanupSessionRevert(ctx context.Context, info session.Info, messages session.MessageRepository, repo session.Repository, events *eventBus) error {

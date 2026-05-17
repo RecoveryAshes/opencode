@@ -788,6 +788,58 @@ func TestSessionSummarizeCleansRevertedParts(t *testing.T) {
 	}
 }
 
+func TestSessionPromptCleansRevertedMessages(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	created, err := store.Create(context.Background(), session.CreateInput{Title: "prompt cleanup"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	keepID := session.MessageID("msg_keep")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &keepID,
+		Parts:     []session.Part{{Type: "text", Data: map[string]any{"text": "keep"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(keep) error = %v", err)
+	}
+	revertID := session.MessageID("msg_revert")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &revertID,
+		Parts:     []session.Part{{Type: "text", Data: map[string]any{"text": "remove"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(revert) error = %v", err)
+	}
+	if _, err := store.Update(context.Background(), created.ID, session.UpdateInput{Revert: &session.RevertInfo{MessageID: revertID}}); err != nil {
+		t.Fatalf("Update(revert) error = %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/session/"+string(created.ID)+"/message", "application/json", strings.NewReader(`{"parts":[{"type":"text","text":"new prompt"}],"noReply":true}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("message status = %d, want 200", resp.StatusCode)
+	}
+
+	messages, err := store.Messages(context.Background(), created.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if len(messages) != 2 || messages[0].Info.ID != keepID || messages[1].Parts[0].Data["text"] != "new prompt" {
+		t.Fatalf("messages = %#v, want old revert cleaned before new prompt", messages)
+	}
+	reloaded, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if reloaded.Revert != nil {
+		t.Fatalf("revert = %#v, want cleared", reloaded.Revert)
+	}
+}
+
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	store := storage.NewMemorySessionStore()
 	client := &serverFakeChatClient{}
