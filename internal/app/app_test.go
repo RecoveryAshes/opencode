@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -611,6 +612,91 @@ func TestRunStatsTextSupportsModelAndToolLimits(t *testing.T) {
 	}
 }
 
+func TestRunDebugFileCommands(t *testing.T) {
+	root := t.TempDir()
+	writeAppFile(t, filepath.Join(root, "README.md"), "hello project\nneedle line\n")
+	writeAppFile(t, filepath.Join(root, "src", "main.go"), "package main\n\nfunc Run() {}\n")
+	writeAppFile(t, filepath.Join(root, "node_modules", "ignored.js"), "needle ignored\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"debug", "file", "read", "--directory", root, "README.md"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("read exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var content map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &content); err != nil {
+		t.Fatalf("decode read JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if content["type"] != "text" || content["content"] != "hello project\nneedle line" {
+		t.Fatalf("read content = %#v, want trimmed text envelope", content)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"debug", "file", "list", "--directory", root, "."}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("list exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var nodes []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &nodes); err != nil {
+		t.Fatalf("decode list JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if len(nodes) < 3 || nodes[0]["type"] != "directory" || nodes[0]["name"] != "node_modules" || nodes[0]["ignored"] != true {
+		t.Fatalf("nodes = %#v, want ignored directory sorted first", nodes)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"debug", "file", "search", "--directory", root, "--type", "file", "main"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("search exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "src/main.go" {
+		t.Fatalf("search stdout = %q, want src/main.go", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"debug", "file", "tree", "--limit", "10", root}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("tree exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "src" {
+		t.Fatalf("tree stdout = %q, want src directory", stdout.String())
+	}
+}
+
+func TestRunDebugFileStatus(t *testing.T) {
+	root := t.TempDir()
+	runAppCommand(t, root, "git", "init")
+	runAppCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runAppCommand(t, root, "git", "config", "user.name", "Test User")
+	writeAppFile(t, filepath.Join(root, "tracked.txt"), "one\n")
+	runAppCommand(t, root, "git", "add", "tracked.txt")
+	runAppCommand(t, root, "git", "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+	writeAppFile(t, filepath.Join(root, "tracked.txt"), "one\ntwo\n")
+	writeAppFile(t, filepath.Join(root, "new.txt"), "new\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"debug", "file", "status", "--directory", root}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var status []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("decode status JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	byPath := map[string]map[string]any{}
+	for _, item := range status {
+		byPath[item["path"].(string)] = item
+	}
+	if byPath["tracked.txt"]["status"] != "modified" || byPath["new.txt"]["status"] != "added" {
+		t.Fatalf("status = %#v, want modified tracked and added new", status)
+	}
+}
+
 func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -1094,6 +1180,16 @@ func writeAppFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func runAppCommand(t *testing.T, dir string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", name, args, err, string(output))
 	}
 }
 

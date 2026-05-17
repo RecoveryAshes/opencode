@@ -62,6 +62,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return configCommand(args[1:], stdout, stderr)
 	case "db":
 		return dbCommand(ctx, args[1:], stdout, stderr)
+	case "debug":
+		return debugCommand(ctx, args[1:], stdout, stderr)
 	case "export":
 		return exportCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
@@ -1379,6 +1381,7 @@ commands:
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
   db [--db PATH] [--format tsv|json] COMMAND [QUERY]
+  debug file COMMAND
   export [--db PATH] [--sanitize] [SESSION_ID]
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
