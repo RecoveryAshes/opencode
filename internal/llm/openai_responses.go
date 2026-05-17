@@ -32,19 +32,19 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 	if len(request.Messages) == 0 {
 		return ChatResponse{}, fmt.Errorf("at least one message is required")
 	}
-	body := responsesRequest{
-		Model:  defaultString(request.Model, "gpt-4o-mini"),
-		Input:  make([]responsesInputItem, 0, len(request.Messages)),
-		Stream: false,
-	}
+	body := map[string]any{}
+	applyResponsesOptions(body, request.Options)
+	body["model"] = defaultString(request.Model, "gpt-4o-mini")
+	body["input"] = make([]responsesInputItem, 0, len(request.Messages))
+	body["stream"] = false
 	if len(request.Tools) > 0 {
-		body.Tools = responsesToolDefinitions(request.Tools)
+		body["tools"] = responsesToolDefinitions(request.Tools)
 	}
 	if request.MaxTokens != nil {
-		body.MaxOutputTokens = request.MaxTokens
+		body["max_output_tokens"] = *request.MaxTokens
 	}
 	if request.Temperature != nil {
-		body.Temperature = request.Temperature
+		body["temperature"] = *request.Temperature
 	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
@@ -60,9 +60,9 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 			item.Role = "user"
 			item.Content = []responsesContent{{Type: "input_text", Text: message.Content}}
 		}
-		body.Input = append(body.Input, item)
+		body["input"] = append(body["input"].([]responsesInputItem), item)
 	}
-	if len(body.Input) == 0 {
+	if len(body["input"].([]responsesInputItem)) == 0 {
 		return ChatResponse{}, fmt.Errorf("at least one non-empty message is required")
 	}
 	payload, err := json.Marshal(body)
@@ -104,13 +104,27 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 	return decodeResponsesJSON(data)
 }
 
-type responsesRequest struct {
-	Model           string               `json:"model"`
-	Input           []responsesInputItem `json:"input"`
-	Stream          bool                 `json:"stream"`
-	MaxOutputTokens *int                 `json:"max_output_tokens,omitempty"`
-	Temperature     *float64             `json:"temperature,omitempty"`
-	Tools           []responsesToolDef   `json:"tools,omitempty"`
+func applyResponsesOptions(body map[string]any, options map[string]any) {
+	for key, value := range options {
+		if !responsesBodyOption(key, value) {
+			continue
+		}
+		body[key] = value
+	}
+}
+
+func responsesBodyOption(key string, value any) bool {
+	if key == "" || value == nil {
+		return false
+	}
+	switch key {
+	case "apiKey", "baseURL", "headers", "fetch", "timeout", "chunkTimeout", "includeUsage", "setCacheKey":
+		return false
+	case "model", "input", "stream", "tools", "temperature", "max_output_tokens":
+		return false
+	default:
+		return true
+	}
 }
 
 type responsesInputItem struct {

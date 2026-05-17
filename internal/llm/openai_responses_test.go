@@ -64,6 +64,52 @@ func TestResponsesChatRequestAndJSONResponse(t *testing.T) {
 	}
 }
 
+func TestResponsesChatSendsConfiguredBodyOptions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body["store"] != false || body["reasoningSummary"] != "auto" || body["promptCacheKey"] != "ses_123" {
+			t.Fatalf("body = %#v, want configured Responses options", body)
+		}
+		include := body["include"].([]any)
+		if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+			t.Fatalf("include = %#v, want encrypted reasoning include", include)
+		}
+		for _, forbidden := range []string{"apiKey", "baseURL", "headers", "timeout", "includeUsage"} {
+			if _, ok := body[forbidden]; ok {
+				t.Fatalf("body = %#v, did not want transport option %q", body, forbidden)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output_text":"ok"}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewResponsesClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "openai",
+		Protocol:   "openai-responses",
+		BaseURL:    mock.URL,
+		Model:      "gpt-5.2",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Options: map[string]any{
+			"apiKey":           "transport-key",
+			"baseURL":          "https://transport.example/v1",
+			"headers":          map[string]any{"X-Test": "transport"},
+			"timeout":          300000,
+			"includeUsage":     true,
+			"store":            false,
+			"reasoningSummary": "auto",
+			"promptCacheKey":   "ses_123",
+			"include":          []any{"reasoning.encrypted_content"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestResponsesChatParsesSSE(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
