@@ -182,6 +182,24 @@ func TestResolveChatRequestBedrockRequiresBearerForNow(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestCohere(t *testing.T) {
+	t.Setenv("COHERE_BASE_URL", "https://local.cohere.test/v2")
+	t.Setenv("COHERE_API_KEY", "cohere-key")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "cohere", "command-r")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "cohere-chat" ||
+		got.BaseURL != "https://local.cohere.test/v2" ||
+		got.APIKey != "cohere-key" ||
+		got.AuthHeader != "Authorization" ||
+		got.AuthScheme != "Bearer" ||
+		got.Model != "command-r" {
+		t.Fatalf("request = %#v, want Cohere request", got)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)

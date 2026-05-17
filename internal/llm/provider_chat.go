@@ -15,6 +15,7 @@ type ProviderChatClient struct {
 	Gemini           *GeminiClient
 	Bedrock          *BedrockClient
 	Responses        *ResponsesClient
+	Cohere           *CohereClient
 }
 
 // NewProviderChatClient creates the default runtime provider client.
@@ -26,6 +27,7 @@ func NewProviderChatClient() *ProviderChatClient {
 		Gemini:           &GeminiClient{HTTPClient: httpClient},
 		Bedrock:          &BedrockClient{HTTPClient: httpClient},
 		Responses:        &ResponsesClient{HTTPClient: httpClient},
+		Cohere:           &CohereClient{HTTPClient: httpClient},
 	}
 }
 
@@ -62,6 +64,12 @@ func (client *ProviderChatClient) Chat(ctx context.Context, request ChatRequest)
 			responses = NewResponsesClient()
 		}
 		return responses.Chat(ctx, request)
+	case "cohere-chat":
+		cohere := client.Cohere
+		if cohere == nil {
+			cohere = NewCohereClient()
+		}
+		return cohere.Chat(ctx, request)
 	default:
 		return ChatResponse{}, fmt.Errorf("unsupported chat protocol %q", request.Protocol)
 	}
