@@ -115,7 +115,14 @@ type bedrockMessage struct {
 }
 
 type bedrockContentBlock struct {
-	Text string `json:"text,omitempty"`
+	Text    string          `json:"text,omitempty"`
+	ToolUse *bedrockToolUse `json:"toolUse,omitempty"`
+}
+
+type bedrockToolUse struct {
+	ToolUseID string         `json:"toolUseId"`
+	Name      string         `json:"name"`
+	Input     map[string]any `json:"input,omitempty"`
 }
 
 type bedrockInferenceConfig struct {
@@ -191,16 +198,26 @@ func decodeBedrockResponse(data []byte) (ChatResponse, error) {
 		return ChatResponse{}, fmt.Errorf("decode Bedrock response: %w", err)
 	}
 	var text strings.Builder
+	toolCalls := []ToolCall{}
 	for _, block := range response.Output.Message.Content {
 		text.WriteString(block.Text)
+		if block.ToolUse != nil && block.ToolUse.Name != "" {
+			toolCalls = append(toolCalls, ToolCall{
+				ID:        block.ToolUse.ToolUseID,
+				Name:      block.ToolUse.Name,
+				Arguments: cloneAnyMap(block.ToolUse.Input),
+				Raw:       rawToolArguments(block.ToolUse.Input),
+			})
+		}
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("bedrock response did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapBedrockFinishReason(response.StopReason),
 		Usage:        mapBedrockUsage(response.Usage),
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
@@ -210,6 +227,7 @@ func decodeBedrockEventStream(reader io.Reader) (ChatResponse, error) {
 	var text strings.Builder
 	usage := Usage{}
 	reason := ""
+	toolBuilders := map[int]*bedrockToolBuilder{}
 	for {
 		message, err := decoder.Decode(reader, payload)
 		if err != nil {
@@ -240,23 +258,50 @@ func decodeBedrockEventStream(reader io.Reader) (ChatResponse, error) {
 		if err := json.Unmarshal(wrappedPayload, &event); err != nil {
 			return ChatResponse{}, fmt.Errorf("decode Bedrock event-stream event: %w", err)
 		}
-		if err := applyBedrockStreamEvent(&text, &usage, &reason, event); err != nil {
+		if err := applyBedrockStreamEvent(&text, &usage, &reason, toolBuilders, event); err != nil {
 			return ChatResponse{}, err
 		}
 	}
-	if text.Len() == 0 {
+	toolCalls, err := bedrockStreamToolCalls(toolBuilders)
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("bedrock event-stream did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapBedrockFinishReason(reason),
 		Usage:        usage,
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
-func applyBedrockStreamEvent(text *strings.Builder, usage *Usage, reason *string, event bedrockStreamEvent) error {
+type bedrockToolBuilder struct {
+	id    string
+	name  string
+	input strings.Builder
+}
+
+func applyBedrockStreamEvent(text *strings.Builder, usage *Usage, reason *string, toolBuilders map[int]*bedrockToolBuilder, event bedrockStreamEvent) error {
+	if event.ContentBlockStart != nil &&
+		event.ContentBlockStart.Start != nil &&
+		event.ContentBlockStart.Start.ToolUse != nil {
+		toolBuilders[event.ContentBlockStart.ContentBlockIndex] = &bedrockToolBuilder{
+			id:   event.ContentBlockStart.Start.ToolUse.ToolUseID,
+			name: event.ContentBlockStart.Start.ToolUse.Name,
+		}
+	}
 	if event.ContentBlockDelta != nil && event.ContentBlockDelta.Delta != nil {
 		text.WriteString(event.ContentBlockDelta.Delta.Text)
+		if event.ContentBlockDelta.Delta.ToolUse != nil {
+			builder := toolBuilders[event.ContentBlockDelta.ContentBlockIndex]
+			if builder == nil {
+				builder = &bedrockToolBuilder{}
+				toolBuilders[event.ContentBlockDelta.ContentBlockIndex] = builder
+			}
+			builder.input.WriteString(event.ContentBlockDelta.Delta.ToolUse.Input)
+		}
 	}
 	if event.MessageStop != nil {
 		*reason = event.MessageStop.StopReason
@@ -280,6 +325,36 @@ func applyBedrockStreamEvent(text *strings.Builder, usage *Usage, reason *string
 		return fmt.Errorf("bedrock event-stream throttling exception: %s", event.ThrottlingException.Message)
 	}
 	return nil
+}
+
+func bedrockStreamToolCalls(builders map[int]*bedrockToolBuilder) ([]ToolCall, error) {
+	if len(builders) == 0 {
+		return nil, nil
+	}
+	result := make([]ToolCall, 0, len(builders))
+	for index := 0; index < len(builders); index++ {
+		builder, ok := builders[index]
+		if !ok || builder == nil {
+			continue
+		}
+		if builder.name == "" {
+			return nil, fmt.Errorf("bedrock tool use did not include a name")
+		}
+		raw := builder.input.String()
+		args := map[string]any{}
+		if strings.TrimSpace(raw) != "" {
+			if err := json.Unmarshal([]byte(raw), &args); err != nil {
+				return nil, fmt.Errorf("decode bedrock tool use %s input: %w", builder.name, err)
+			}
+		}
+		result = append(result, ToolCall{
+			ID:        builder.id,
+			Name:      builder.name,
+			Arguments: args,
+			Raw:       raw,
+		})
+	}
+	return result, nil
 }
 
 func mapBedrockUsage(usage bedrockUsage) Usage {

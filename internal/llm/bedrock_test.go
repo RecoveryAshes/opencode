@@ -114,6 +114,71 @@ func TestBedrockChatParsesEventStream(t *testing.T) {
 	}
 }
 
+func TestBedrockChatParsesToolUse(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"output":{"message":{"role":"assistant","content":[{"toolUse":{"toolUseId":"toolu_1","name":"read","input":{"filePath":"README.md"}}}]}},
+			"stopReason":"tool_use",
+			"usage":{"inputTokens":1,"outputTokens":2,"totalTokens":3}
+		}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "amazon-bedrock",
+		Protocol:   "bedrock-converse",
+		BaseURL:    mock.URL,
+		APIKey:     "bedrock-token",
+		Model:      "us.amazon.nova-micro-v1:0",
+		Messages:   []Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one Bedrock tool use", got)
+	}
+	if got.ToolCalls[0].ID != "toolu_1" || got.ToolCalls[0].Name != "read" || got.ToolCalls[0].Arguments["filePath"] != "README.md" {
+		t.Fatalf("tool call = %#v, want read README.md", got.ToolCalls[0])
+	}
+}
+
+func TestBedrockChatEventStreamParsesToolUse(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	body := encodeBedrockEventStream(t,
+		bedrockEventFrame("contentBlockStart", `{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"toolu_1","name":"glob"}}}`),
+		bedrockEventFrame("contentBlockDelta", `{"contentBlockIndex":0,"delta":{"toolUse":{"input":"{\"pattern\""}}}`),
+		bedrockEventFrame("contentBlockDelta", `{"contentBlockIndex":0,"delta":{"toolUse":{"input":":\"*.go\"}"}}}`),
+		bedrockEventFrame("messageStop", `{"stopReason":"tool_use"}`),
+		bedrockEventFrame("metadata", `{"usage":{"inputTokens":1,"outputTokens":2,"totalTokens":3}}`),
+	)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(body)
+	}))
+	defer mock.Close()
+
+	got, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "amazon-bedrock",
+		Protocol:   "bedrock-converse",
+		BaseURL:    mock.URL,
+		APIKey:     "bedrock-token",
+		Model:      "us.amazon.nova-micro-v1:0",
+		Messages:   []Message{{Role: "user", Content: "glob"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || got.Usage.TotalTokens != 3 || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want streamed Bedrock tool use", got)
+	}
+	if got.ToolCalls[0].ID != "toolu_1" || got.ToolCalls[0].Name != "glob" || got.ToolCalls[0].Arguments["pattern"] != "*.go" {
+		t.Fatalf("tool call = %#v, want glob *.go", got.ToolCalls[0])
+	}
+}
+
 func TestBedrockChatEventStreamProviderError(t *testing.T) {
 	clearBedrockAuthEnv(t)
 	body := encodeBedrockEventStream(t,
