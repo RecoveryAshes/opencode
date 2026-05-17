@@ -46,17 +46,48 @@ type ModelRef struct {
 	Variant    string `json:"variant,omitempty"`
 }
 
+// PathInfo stores the local execution path captured on assistant messages.
+type PathInfo struct {
+	CWD  string `json:"cwd"`
+	Root string `json:"root"`
+}
+
+// TokenUsage mirrors the legacy assistant token accounting JSON shape.
+type TokenUsage struct {
+	Total     *int       `json:"total,omitempty"`
+	Input     int        `json:"input"`
+	Output    int        `json:"output"`
+	Reasoning int        `json:"reasoning"`
+	Cache     CacheUsage `json:"cache"`
+}
+
+// CacheUsage stores cached token read/write counts.
+type CacheUsage struct {
+	Read  int `json:"read"`
+	Write int `json:"write"`
+}
+
 // MessageInfo is the common serialized message contract.
 type MessageInfo struct {
-	ID        MessageID       `json:"id"`
-	SessionID ID              `json:"sessionID"`
-	Role      string          `json:"role"`
-	Time      MessageTime     `json:"time"`
-	Agent     string          `json:"agent,omitempty"`
-	Model     *ModelRef       `json:"model,omitempty"`
-	Tools     map[string]bool `json:"tools,omitempty"`
-	System    string          `json:"system,omitempty"`
-	Format    map[string]any  `json:"format,omitempty"`
+	ID         MessageID       `json:"id"`
+	SessionID  ID              `json:"sessionID"`
+	Role       string          `json:"role"`
+	Time       MessageTime     `json:"time"`
+	Agent      string          `json:"agent,omitempty"`
+	Model      *ModelRef       `json:"model,omitempty"`
+	Tools      map[string]bool `json:"tools,omitempty"`
+	System     string          `json:"system,omitempty"`
+	Format     map[string]any  `json:"format,omitempty"`
+	ParentID   *MessageID      `json:"parentID,omitempty"`
+	ModelID    string          `json:"modelID,omitempty"`
+	ProviderID string          `json:"providerID,omitempty"`
+	Mode       string          `json:"mode,omitempty"`
+	Path       *PathInfo       `json:"path,omitempty"`
+	Cost       *float64        `json:"cost,omitempty"`
+	Tokens     *TokenUsage     `json:"tokens,omitempty"`
+	Variant    string          `json:"variant,omitempty"`
+	Finish     string          `json:"finish,omitempty"`
+	Error      map[string]any  `json:"error,omitempty"`
 }
 
 // MessageTime stores message timestamps in milliseconds.
@@ -124,11 +155,25 @@ type PromptInput struct {
 	Parts     []Part          `json:"parts"`
 }
 
+// AssistantInput contains the migrated fields needed to persist one assistant turn.
+type AssistantInput struct {
+	ParentID MessageID
+	Agent    string
+	Model    ModelRef
+	Path     PathInfo
+	Text     string
+	Finish   string
+	Tokens   TokenUsage
+	Cost     float64
+	Variant  string
+}
+
 // MessageRepository is the storage boundary for migrated message routes.
 type MessageRepository interface {
 	Messages(context.Context, ID, int) ([]WithParts, error)
 	GetMessage(context.Context, ID, MessageID) (WithParts, error)
 	CreatePrompt(context.Context, ID, PromptInput) (WithParts, error)
+	CreateAssistant(context.Context, ID, AssistantInput) (WithParts, error)
 	RemoveMessage(context.Context, ID, MessageID) error
 	RemovePart(context.Context, ID, MessageID, PartID) error
 	UpdatePart(context.Context, Part) (Part, error)

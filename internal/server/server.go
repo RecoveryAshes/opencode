@@ -16,6 +16,7 @@ import (
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/runtime"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
 
@@ -26,6 +27,7 @@ type Options struct {
 	Version  string
 	Sessions session.Repository
 	Messages session.MessageRepository
+	Runtime  *runtime.PromptRuntime
 }
 
 // SessionRepository is the storage contract required by the HTTP server.
@@ -96,6 +98,9 @@ func NewHandler(opts Options) http.Handler {
 			opts.Messages = storage.NewMemorySessionStore()
 		}
 	}
+	if opts.Runtime == nil {
+		opts.Runtime = runtime.NewPromptRuntime(opts.Messages)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{
@@ -111,7 +116,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{}, http.StatusOK, nil
 	}))
-	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages))
+	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime))
 	mux.HandleFunc("/session", sessions(opts.Sessions))
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
@@ -241,14 +246,14 @@ func sessions(repo session.Repository) http.HandlerFunc {
 	})
 }
 
-func sessionByID(repo session.Repository, messages session.MessageRepository) http.HandlerFunc {
+func sessionByID(repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		id, remainder, err := parseSessionPath(r.URL.Path)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
 		if remainder != "" {
-			return sessionSubresource(r, id, remainder, messages)
+			return sessionSubresource(r, id, remainder, messages, promptRuntime)
 		}
 
 		switch r.Method {
@@ -273,7 +278,7 @@ func sessionByID(repo session.Repository, messages session.MessageRepository) ht
 	})
 }
 
-func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository) (any, int, error) {
+func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) (any, int, error) {
 	parts := strings.Split(path, "/")
 	if len(parts) == 1 && parts[0] == "message" {
 		switch r.Method {
@@ -290,7 +295,15 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 				return nil, http.StatusBadRequest, err
 			}
 			result, err := messages.CreatePrompt(r.Context(), sessionID, input)
-			return result, statusFromError(err), err
+			if err != nil {
+				return result, statusFromError(err), err
+			}
+			if !input.NoReply && promptRuntime != nil {
+				if _, err := promptRuntime.Reply(r.Context(), sessionID, result); err != nil {
+					return nil, statusFromError(err), err
+				}
+			}
+			return result, http.StatusOK, nil
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}

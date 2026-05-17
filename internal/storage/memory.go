@@ -152,13 +152,37 @@ func (store *MemorySessionStore) CreatePrompt(_ context.Context, sessionID sessi
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	if _, ok := store.sessions[sessionID]; !ok {
+	info, ok := store.sessions[sessionID]
+	if !ok {
 		return session.WithParts{}, session.ErrNotFound
 	}
 	message, err := createPromptMessage(sessionID, input)
 	if err != nil {
 		return session.WithParts{}, err
 	}
+	info.Time.Updated = session.NowMillis()
+	store.sessions[sessionID] = info
+	store.moveToFront(sessionID)
+	store.messages[sessionID] = append(store.messages[sessionID], message)
+	return message, nil
+}
+
+// CreateAssistant creates one assistant message with text and finish parts.
+func (store *MemorySessionStore) CreateAssistant(_ context.Context, sessionID session.ID, input session.AssistantInput) (session.WithParts, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	info, ok := store.sessions[sessionID]
+	if !ok {
+		return session.WithParts{}, session.ErrNotFound
+	}
+	message, err := createAssistantMessage(sessionID, input)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	info.Time.Updated = session.NowMillis()
+	store.sessions[sessionID] = info
+	store.moveToFront(sessionID)
 	store.messages[sessionID] = append(store.messages[sessionID], message)
 	return message, nil
 }
@@ -271,6 +295,89 @@ func createPromptMessage(sessionID session.ID, input session.PromptInput) (sessi
 		}
 		message.Parts = append(message.Parts, part)
 	}
+	return message, nil
+}
+
+func createAssistantMessage(sessionID session.ID, input session.AssistantInput) (session.WithParts, error) {
+	messageID, err := session.NewMessageID()
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	now := session.NowMillis()
+	completed := now
+	parentID := input.ParentID
+	cost := input.Cost
+	finish := defaultString(input.Finish, "stop")
+	agent := defaultString(input.Agent, "build")
+	model := input.Model
+	if model.ProviderID == "" {
+		model.ProviderID = "openai-compatible"
+	}
+	if model.ModelID == "" {
+		model.ModelID = "gpt-4o-mini"
+	}
+	path := input.Path
+	if path.CWD == "" {
+		path.CWD = "."
+	}
+	if path.Root == "" {
+		path.Root = path.CWD
+	}
+
+	message := session.WithParts{
+		Info: session.MessageInfo{
+			ID:         messageID,
+			SessionID:  sessionID,
+			Role:       "assistant",
+			Time:       session.MessageTime{Created: now, Completed: &completed},
+			Agent:      agent,
+			ParentID:   &parentID,
+			ModelID:    model.ModelID,
+			ProviderID: model.ProviderID,
+			Mode:       agent,
+			Path:       &path,
+			Cost:       &cost,
+			Tokens:     &input.Tokens,
+			Variant:    model.Variant,
+			Finish:     finish,
+		},
+		Parts: []session.Part{},
+	}
+	if input.Text != "" {
+		partID, partErr := session.NewPartID()
+		if partErr != nil {
+			return session.WithParts{}, partErr
+		}
+		message.Parts = append(message.Parts, session.Part{
+			ID:        partID,
+			SessionID: sessionID,
+			MessageID: messageID,
+			Type:      "text",
+			Data: map[string]any{
+				"text": input.Text,
+				"time": map[string]any{
+					"start": now,
+					"end":   completed,
+				},
+			},
+		})
+	}
+
+	partID, err := session.NewPartID()
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	message.Parts = append(message.Parts, session.Part{
+		ID:        partID,
+		SessionID: sessionID,
+		MessageID: messageID,
+		Type:      "step-finish",
+		Data: map[string]any{
+			"reason": finish,
+			"cost":   input.Cost,
+			"tokens": input.Tokens,
+		},
+	})
 	return message, nil
 }
 

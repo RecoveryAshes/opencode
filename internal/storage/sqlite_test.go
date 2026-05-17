@@ -143,6 +143,32 @@ func TestSQLiteSessionStoreMessages(t *testing.T) {
 	if got.Parts[0].Data["text"] != "hello" {
 		t.Fatalf("GetMessage() = %#v, want hello text part", got)
 	}
+	if got.Parts[0].Type != "text" {
+		t.Fatalf("part type = %q, want text", got.Parts[0].Type)
+	}
+
+	assistant, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: message.Info.ID,
+		Agent:    "build",
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Path:     session.PathInfo{CWD: "/tmp/project", Root: "/tmp/project"},
+		Text:     "reply",
+		Finish:   "stop",
+		Tokens:   session.TokenUsage{Input: 1, Output: 2, Cache: session.CacheUsage{}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistant() error = %v", err)
+	}
+	gotAssistant, err := store.GetMessage(ctx, info.ID, assistant.Info.ID)
+	if err != nil {
+		t.Fatalf("GetMessage(assistant) error = %v", err)
+	}
+	if gotAssistant.Info.Role != "assistant" || gotAssistant.Info.ParentID == nil || *gotAssistant.Info.ParentID != message.Info.ID {
+		t.Fatalf("assistant = %#v", gotAssistant)
+	}
+	if len(gotAssistant.Parts) != 2 || gotAssistant.Parts[0].Type != "text" || gotAssistant.Parts[1].Type != "step-finish" {
+		t.Fatalf("assistant parts = %#v", gotAssistant.Parts)
+	}
 
 	got.Parts[0].Data["text"] = "updated"
 	if _, err := store.UpdatePart(ctx, got.Parts[0]); err != nil {

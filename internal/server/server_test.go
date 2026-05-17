@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/runtime"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
 
@@ -150,6 +153,64 @@ func TestSessionMessageHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSessionPromptCreatesAssistantReply(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	client := &serverFakeChatClient{}
+	server := httptest.NewServer(NewHandler(Options{
+		Sessions: store,
+		Runtime: &runtime.PromptRuntime{
+			Messages: store,
+			Client:   client,
+			CWD:      "/tmp/project",
+			Root:     "/tmp/project",
+		},
+	}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"chat"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	body := `{"agent":"build","model":{"providerID":"openai-compatible","modelID":"mock-model"},"parts":[{"type":"text","text":"hello"}]}`
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/message", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("prompt status = %d, want 200", resp.StatusCode)
+	}
+	var user session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		t.Fatalf("decode user message: %v", err)
+	}
+	if user.Info.Role != "user" {
+		t.Fatalf("prompt response role = %q, want user", user.Info.Role)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(created.ID) + "/message")
+	if err != nil {
+		t.Fatalf("GET /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var messages []session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(messages) != 2 || messages[1].Info.Role != "assistant" || messages[1].Parts[0].Data["text"] != "assistant reply" {
+		t.Fatalf("messages = %#v, want persisted assistant reply", messages)
+	}
+	if len(client.request.Messages) != 1 || client.request.Messages[0].Content != "hello" {
+		t.Fatalf("provider request = %#v", client.request)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -176,6 +237,23 @@ func TestOpenAPIAndEvent(t *testing.T) {
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("content-type = %q, want text/event-stream", resp.Header.Get("Content-Type"))
 	}
+}
+
+type serverFakeChatClient struct {
+	request llm.ChatRequest
+}
+
+func (client *serverFakeChatClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
+	client.request = request
+	return llm.ChatResponse{
+		Text:         "assistant reply",
+		FinishReason: "stop",
+		Usage: llm.Usage{
+			InputTokens:  1,
+			OutputTokens: 2,
+			TotalTokens:  3,
+		},
+	}, nil
 }
 
 func TestToolHTTPAPI(t *testing.T) {

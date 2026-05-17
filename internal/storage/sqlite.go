@@ -277,6 +277,39 @@ func (store *SQLiteSessionStore) CreatePrompt(ctx context.Context, sessionID ses
 	return message, nil
 }
 
+// CreateAssistant creates one assistant message with text and finish parts.
+func (store *SQLiteSessionStore) CreateAssistant(ctx context.Context, sessionID session.ID, input session.AssistantInput) (session.WithParts, error) {
+	if _, err := store.Get(ctx, sessionID); err != nil {
+		return session.WithParts{}, err
+	}
+	message, err := createAssistantMessage(sessionID, input)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return session.WithParts{}, fmt.Errorf("begin assistant transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := insertMessage(ctx, tx, message); err != nil {
+		return session.WithParts{}, err
+	}
+	for _, part := range message.Parts {
+		if err := insertPart(ctx, tx, part); err != nil {
+			return session.WithParts{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session SET time_updated = ? WHERE id = ?`, session.NowMillis(), sessionID); err != nil {
+		return session.WithParts{}, fmt.Errorf("touch session after assistant: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return session.WithParts{}, fmt.Errorf("commit assistant: %w", err)
+	}
+	return message, nil
+}
+
 // RemoveMessage deletes one message and its parts.
 func (store *SQLiteSessionStore) RemoveMessage(ctx context.Context, sessionID session.ID, messageID session.MessageID) error {
 	result, err := store.db.ExecContext(ctx, `DELETE FROM message WHERE session_id = ? AND id = ?`, sessionID, messageID)
@@ -369,7 +402,7 @@ func (store *SQLiteSessionStore) scanMessages(ctx context.Context, rows messageR
 }
 
 func (store *SQLiteSessionStore) parts(ctx context.Context, messageID session.MessageID) ([]session.Part, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT id, session_id, message_id, data FROM part WHERE message_id = ? ORDER BY id ASC`, messageID)
+	rows, err := store.db.QueryContext(ctx, `SELECT id, session_id, message_id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, rowid ASC`, messageID)
 	if err != nil {
 		return nil, fmt.Errorf("list parts: %w", err)
 	}
@@ -464,7 +497,12 @@ func decodeMessageInfo(id string, sessionID string, _ int64, data string) (sessi
 }
 
 func partDataJSON(part session.Part) (string, error) {
-	data, err := json.Marshal(part.Data)
+	raw := map[string]any{}
+	for key, value := range part.Data {
+		raw[key] = value
+	}
+	raw["type"] = part.Type
+	data, err := json.Marshal(raw)
 	if err != nil {
 		return "", fmt.Errorf("encode part data: %w", err)
 	}

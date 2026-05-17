@@ -173,6 +173,9 @@ commands:
   serve [--hostname HOST] [--port PORT] [--db PATH]
   providers
   tools
-  retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]`)
+  retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]
+
+provider env:
+  OPENCODE_OPENAI_COMPATIBLE_BASE_URL, OPENCODE_OPENAI_COMPATIBLE_API_KEY, OPENCODE_OPENAI_COMPATIBLE_MODEL`)
 	return err
 }

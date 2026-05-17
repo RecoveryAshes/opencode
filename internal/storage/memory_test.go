@@ -67,12 +67,28 @@ func TestMemorySessionStoreMessages(t *testing.T) {
 		t.Fatalf("message = %#v, want user with one part", message)
 	}
 
+	assistant, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: message.Info.ID,
+		Agent:    "build",
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Path:     session.PathInfo{CWD: "/tmp/project", Root: "/tmp/project"},
+		Text:     "reply",
+		Finish:   "stop",
+		Tokens:   session.TokenUsage{Input: 1, Output: 2, Cache: session.CacheUsage{}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistant() error = %v", err)
+	}
+	if assistant.Info.Role != "assistant" || assistant.Info.ParentID == nil || *assistant.Info.ParentID != message.Info.ID {
+		t.Fatalf("assistant = %#v", assistant)
+	}
+
 	messages, err := store.Messages(ctx, info.ID, 0)
 	if err != nil {
 		t.Fatalf("Messages() error = %v", err)
 	}
-	if len(messages) != 1 || messages[0].Info.ID != message.Info.ID {
-		t.Fatalf("Messages() = %#v, want created message", messages)
+	if len(messages) != 2 || messages[0].Info.ID != message.Info.ID || messages[1].Info.ID != assistant.Info.ID {
+		t.Fatalf("Messages() = %#v, want user and assistant", messages)
 	}
 
 	message.Parts[0].Data["text"] = "updated"
