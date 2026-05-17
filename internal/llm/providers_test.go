@@ -65,9 +65,28 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 						"tool_call":   true,
 						"temperature": false,
 						"cost": map[string]any{
-							"input":      1.25,
-							"output":     2.5,
-							"cache_read": 0.1,
+							"input":       1.25,
+							"output":      2.5,
+							"cache_read":  0.1,
+							"cache_write": 0.2,
+							"context_over_200k": map[string]any{
+								"input":       5.0,
+								"output":      8.0,
+								"cache_read":  0.5,
+								"cache_write": 0.6,
+							},
+							"tiers": []any{
+								map[string]any{
+									"input":       3.0,
+									"output":      6.0,
+									"cache_read":  0.3,
+									"cache_write": 0.4,
+									"tier": map[string]any{
+										"type": "context",
+										"size": 200000.0,
+									},
+								},
+							},
 						},
 						"limit": map[string]any{
 							"context": 200000,
@@ -100,6 +119,14 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 		model.Capabilities.Temperature ||
 		model.Cost.Input != 1.25 ||
 		model.Cost.Cache.Read != 0.1 ||
+		model.Cost.Cache.Write != 0.2 ||
+		len(model.Cost.Tiers) != 1 ||
+		model.Cost.Tiers[0].Tier.Type != "context" ||
+		model.Cost.Tiers[0].Tier.Size != 200000 ||
+		model.Cost.Tiers[0].Cache.Write != 0.4 ||
+		model.Cost.ExperimentalOver200K == nil ||
+		model.Cost.ExperimentalOver200K.Input != 5 ||
+		model.Cost.ExperimentalOver200K.Cache.Read != 0.5 ||
 		model.Limit.Context != 200000 ||
 		model.Limit.Output != 8192 ||
 		!model.Capabilities.Input.Image {

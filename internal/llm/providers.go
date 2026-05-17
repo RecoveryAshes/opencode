@@ -56,15 +56,39 @@ type Modalities struct {
 
 // Cost describes per-token model cost.
 type Cost struct {
-	Input  float64   `json:"input"`
-	Output float64   `json:"output"`
-	Cache  CacheCost `json:"cache"`
+	Input                float64            `json:"input"`
+	Output               float64            `json:"output"`
+	Cache                CacheCost          `json:"cache"`
+	Tiers                []CostTier         `json:"tiers,omitempty"`
+	ExperimentalOver200K *Over200KModelCost `json:"experimentalOver200K,omitempty"`
 }
 
 // CacheCost describes prompt-cache pricing.
 type CacheCost struct {
 	Read  float64 `json:"read"`
 	Write float64 `json:"write"`
+}
+
+// CostTier describes model pricing that applies above a token threshold.
+type CostTier struct {
+	Input  float64      `json:"input"`
+	Output float64      `json:"output"`
+	Cache  CacheCost    `json:"cache"`
+	Tier   CostTierSpec `json:"tier"`
+}
+
+// CostTierSpec describes the condition for a tiered model price.
+type CostTierSpec struct {
+	Type string  `json:"type"`
+	Size float64 `json:"size"`
+}
+
+// Over200KModelCost preserves models.dev context_over_200k pricing under the
+// public provider contract name used by the TypeScript implementation.
+type Over200KModelCost struct {
+	Input  float64   `json:"input"`
+	Output float64   `json:"output"`
+	Cache  CacheCost `json:"cache"`
 }
 
 // Limit describes model token limits.
@@ -309,10 +333,55 @@ func modelFromConfig(providerID string, modelID string, input map[string]any) Pu
 				Read:  floatFromAny(cost["cache_read"], model.Cost.Cache.Read),
 				Write: floatFromAny(cost["cache_write"], model.Cost.Cache.Write),
 			},
+			Tiers:                costTiersFromConfig(cost["tiers"]),
+			ExperimentalOver200K: over200KCostFromConfig(cost["context_over_200k"]),
 		}
 	}
 	model.Capabilities = capabilitiesFromConfig(input, model.Capabilities)
 	return model
+}
+
+func costTiersFromConfig(input any) []CostTier {
+	raw, ok := input.([]any)
+	if !ok {
+		return nil
+	}
+	result := []CostTier{}
+	for _, item := range raw {
+		record, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tierRecord, _ := record["tier"].(map[string]any)
+		result = append(result, CostTier{
+			Input:  floatFromAny(record["input"], 0),
+			Output: floatFromAny(record["output"], 0),
+			Cache: CacheCost{
+				Read:  floatFromAny(record["cache_read"], 0),
+				Write: floatFromAny(record["cache_write"], 0),
+			},
+			Tier: CostTierSpec{
+				Type: stringFromAny(tierRecord["type"], ""),
+				Size: floatFromAny(tierRecord["size"], 0),
+			},
+		})
+	}
+	return result
+}
+
+func over200KCostFromConfig(input any) *Over200KModelCost {
+	record, ok := input.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return &Over200KModelCost{
+		Input:  floatFromAny(record["input"], 0),
+		Output: floatFromAny(record["output"], 0),
+		Cache: CacheCost{
+			Read:  floatFromAny(record["cache_read"], 0),
+			Write: floatFromAny(record["cache_write"], 0),
+		},
+	}
 }
 
 func capabilitiesFromConfig(input map[string]any, fallback Capabilities) Capabilities {
