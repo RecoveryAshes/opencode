@@ -138,6 +138,12 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/command", commands())
 	mux.HandleFunc("/config/providers", configProviders())
 	mux.HandleFunc("/provider", providersList())
+	mux.HandleFunc("/find/file", findFile())
+	mux.HandleFunc("/find/symbol", findSymbol())
+	mux.HandleFunc("/find", findText())
+	mux.HandleFunc("/file/content", fileContent())
+	mux.HandleFunc("/file/status", fileStatus())
+	mux.HandleFunc("/file", fileList())
 	mux.HandleFunc("/mcp/", mcpByName(opts.MCP))
 	mux.HandleFunc("/mcp", mcpRoot(opts.MCP))
 	mux.HandleFunc("/pty/shells", handleJSON(func(r *http.Request) (any, int, error) {
@@ -174,6 +180,24 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/command": map[string]any{
 				"get": map[string]any{"operationId": "command.list"},
+			},
+			"/find": map[string]any{
+				"get": map[string]any{"operationId": "find.text"},
+			},
+			"/find/file": map[string]any{
+				"get": map[string]any{"operationId": "find.files"},
+			},
+			"/find/symbol": map[string]any{
+				"get": map[string]any{"operationId": "find.symbols"},
+			},
+			"/file": map[string]any{
+				"get": map[string]any{"operationId": "file.list"},
+			},
+			"/file/content": map[string]any{
+				"get": map[string]any{"operationId": "file.read"},
+			},
+			"/file/status": map[string]any{
+				"get": map[string]any{"operationId": "file.status"},
 			},
 			"/config": map[string]any{
 				"get": map[string]any{"operationId": "config.get"},

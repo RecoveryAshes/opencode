@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -526,6 +527,146 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	}
 }
 
+func TestFileHTTPAPI(t *testing.T) {
+	root := t.TempDir()
+	writeServerFile(t, filepath.Join(root, "README.md"), "hello project\nneedle line\n")
+	writeServerFile(t, filepath.Join(root, "src", "main.go"), "package main\n\nfunc Run() {}\n")
+	writeServerFile(t, filepath.Join(root, "node_modules", "ignored.js"), "needle ignored\n")
+	writeServerFile(t, filepath.Join(root, "image.png"), string([]byte{0x89, 'P', 'N', 'G'}))
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/file?directory=" + urlQueryEscape(root) + "&path=.")
+	if err != nil {
+		t.Fatalf("GET /file error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /file status = %d, want 200", resp.StatusCode)
+	}
+	var nodes []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode nodes: %v", err)
+	}
+	if len(nodes) < 3 || nodes[0]["type"] != "directory" || nodes[0]["name"] != "node_modules" || nodes[0]["ignored"] != true {
+		t.Fatalf("nodes = %#v, want ignored directory sorted first", nodes)
+	}
+
+	resp, err = http.Get(server.URL + "/file/content?directory=" + urlQueryEscape(root) + "&path=README.md")
+	if err != nil {
+		t.Fatalf("GET /file/content text error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var content map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&content); err != nil {
+		t.Fatalf("decode text content: %v", err)
+	}
+	if content["type"] != "text" || content["content"] != "hello project\nneedle line" {
+		t.Fatalf("content = %#v, want trimmed text", content)
+	}
+
+	resp, err = http.Get(server.URL + "/file/content?directory=" + urlQueryEscape(root) + "&path=image.png")
+	if err != nil {
+		t.Fatalf("GET /file/content image error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var image map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&image); err != nil {
+		t.Fatalf("decode image content: %v", err)
+	}
+	if image["type"] != "text" || image["encoding"] != "base64" || image["mimeType"] != "image/png" {
+		t.Fatalf("image = %#v, want base64 png", image)
+	}
+
+	resp, err = http.Get(server.URL + "/find?directory=" + urlQueryEscape(root) + "&pattern=needle")
+	if err != nil {
+		t.Fatalf("GET /find error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var matches []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&matches); err != nil {
+		t.Fatalf("decode matches: %v", err)
+	}
+	if len(matches) != 1 || matches[0]["path"].(map[string]any)["text"] != "README.md" {
+		t.Fatalf("matches = %#v, want README needle only", matches)
+	}
+
+	resp, err = http.Get(server.URL + "/find/file?directory=" + urlQueryEscape(root) + "&query=main&type=file&limit=5")
+	if err != nil {
+		t.Fatalf("GET /find/file error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var files []string
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		t.Fatalf("decode files: %v", err)
+	}
+	if len(files) != 1 || files[0] != "src/main.go" {
+		t.Fatalf("files = %#v, want src/main.go", files)
+	}
+
+	resp, err = http.Get(server.URL + "/find/file?directory=" + urlQueryEscape(root) + "&query=&limit=5")
+	if err != nil {
+		t.Fatalf("GET /find/file empty error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var dirs []string
+	if err := json.NewDecoder(resp.Body).Decode(&dirs); err != nil {
+		t.Fatalf("decode dirs: %v", err)
+	}
+	if len(dirs) != 1 || dirs[0] != "src/" {
+		t.Fatalf("dirs = %#v, want non-ignored directories for empty query", dirs)
+	}
+
+	resp, err = http.Get(server.URL + "/find/symbol?directory=" + urlQueryEscape(root) + "&query=Run")
+	if err != nil {
+		t.Fatalf("GET /find/symbol error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var symbols []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&symbols); err != nil {
+		t.Fatalf("decode symbols: %v", err)
+	}
+	if len(symbols) != 1 || symbols[0]["name"] != "Run" || int(symbols[0]["kind"].(float64)) != 12 {
+		t.Fatalf("symbols = %#v, want Run function", symbols)
+	}
+}
+
+func TestFileStatusHTTPAPI(t *testing.T) {
+	root := t.TempDir()
+	runServerCommand(t, root, "git", "init")
+	runServerCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runServerCommand(t, root, "git", "config", "user.name", "Test User")
+	writeServerFile(t, filepath.Join(root, "tracked.txt"), "one\n")
+	runServerCommand(t, root, "git", "add", "tracked.txt")
+	runServerCommand(t, root, "git", "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+	writeServerFile(t, filepath.Join(root, "tracked.txt"), "one\ntwo\n")
+	writeServerFile(t, filepath.Join(root, "new.txt"), "new\n")
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/file/status?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /file/status error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /file/status status = %d, want 200", resp.StatusCode)
+	}
+	var status []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	byPath := map[string]map[string]any{}
+	for _, item := range status {
+		byPath[item["path"].(string)] = item
+	}
+	if byPath["tracked.txt"]["status"] != "modified" || byPath["new.txt"]["status"] != "added" {
+		t.Fatalf("status = %#v, want modified tracked and added new", status)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -709,6 +850,16 @@ func writeServerFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func runServerCommand(t *testing.T, dir string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, output)
 	}
 }
 
