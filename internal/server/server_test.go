@@ -123,6 +123,53 @@ func TestOpenAPIAndEvent(t *testing.T) {
 	}
 }
 
+func TestToolHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+	root := t.TempDir()
+
+	resp, err := http.Get(server.URL + "/tool")
+	if err != nil {
+		t.Fatalf("GET /tool error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tool status = %d, want 200", resp.StatusCode)
+	}
+
+	body := `{"directory":` + quoteJSON(root) + `,"params":{"filePath":"hello.txt","content":"hello tool"}}`
+	resp, err = http.Post(server.URL+"/tool/write", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /tool/write error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /tool/write status = %d, want 200", resp.StatusCode)
+	}
+
+	body = `{"directory":` + quoteJSON(root) + `,"params":{"filePath":"hello.txt"}}`
+	resp, err = http.Post(server.URL+"/tool/read", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /tool/read error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode tool read result: %v", err)
+	}
+	if !strings.Contains(result["output"].(string), "hello tool") {
+		t.Fatalf("tool read result = %#v", result)
+	}
+}
+
+func quoteJSON(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
 func closeBody(t *testing.T, resp *http.Response) {
 	t.Helper()
 	if err := resp.Body.Close(); err != nil {

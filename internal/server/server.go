@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
@@ -104,6 +105,8 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
 	}))
+	mux.HandleFunc("/tool/", toolByName())
+	mux.HandleFunc("/tool", tools())
 	return withCommonHeaders(mux)
 }
 
@@ -126,6 +129,12 @@ func OpenAPI(version string) map[string]any {
 			"/provider": map[string]any{
 				"get": map[string]any{"operationId": "provider.list"},
 			},
+			"/tool": map[string]any{
+				"get": map[string]any{"operationId": "tool.list"},
+			},
+			"/tool/{name}": map[string]any{
+				"post": map[string]any{"operationId": "tool.execute"},
+			},
 			"/session": map[string]any{
 				"get":  map[string]any{"operationId": "session.list"},
 				"post": map[string]any{"operationId": "session.create"},
@@ -144,6 +153,41 @@ func OpenAPI(version string) map[string]any {
 			"phase":  "go-foundation",
 		},
 	}
+}
+
+func tools() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		return integration.AllTools(), http.StatusOK, nil
+	})
+}
+
+func toolByName() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/tool/")
+		if name == "" || strings.Contains(name, "/") {
+			return nil, http.StatusBadRequest, fmt.Errorf("invalid tool name %q", name)
+		}
+
+		var request integration.Request
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		request.Name = name
+		if request.Params == nil {
+			request.Params = map[string]any{}
+		}
+		result, err := integration.Execute(r.Context(), request)
+		if err != nil {
+			return nil, integration.HTTPStatus(err), err
+		}
+		return result, http.StatusOK, nil
+	})
 }
 
 func sessions(repo session.Repository) http.HandlerFunc {
