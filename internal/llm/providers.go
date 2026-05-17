@@ -155,7 +155,22 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			DefaultModel:   "command-a-03-2025",
 		}
 		return profile.chatRequest(messages, modelID), nil
-	case "google-vertex", "vercel":
+	case "vercel":
+		profile := openAIProfile{
+			ProviderID:     "vercel",
+			DefaultBaseURL: "https://ai-gateway.vercel.sh/v3/ai",
+			BaseURLEnvVars: []string{"OPENCODE_VERCEL_BASE_URL", "VERCEL_BASE_URL", "AI_GATEWAY_BASE_URL"},
+			APIKeyEnvVars:  []string{"OPENCODE_VERCEL_API_KEY", "VERCEL_API_KEY", "AI_GATEWAY_API_KEY"},
+			ModelEnvVars:   []string{"OPENCODE_VERCEL_MODEL", "VERCEL_MODEL", "AI_GATEWAY_MODEL"},
+			AuthHeader:     "Authorization",
+			AuthScheme:     "Bearer",
+			Headers: map[string]string{
+				"http-referer": "https://opencode.ai/",
+				"x-title":      "opencode",
+			},
+		}
+		return profile.chatRequest(messages, modelID), nil
+	case "google-vertex":
 		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)

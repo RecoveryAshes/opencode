@@ -233,6 +233,22 @@ func TestResolveChatRequestCloudflareWorkersAI(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestVercel(t *testing.T) {
+	t.Setenv("VERCEL_API_KEY", "vercel-key")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "vercel", "openai/gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://ai-gateway.vercel.sh/v3/ai" ||
+		got.APIKey != "vercel-key" ||
+		got.Headers["http-referer"] != "https://opencode.ai/" ||
+		got.Headers["x-title"] != "opencode" {
+		t.Fatalf("request = %#v, want Vercel AI Gateway request", got)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)
