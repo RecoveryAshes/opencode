@@ -441,6 +441,84 @@ func TestSessionStateHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSessionLocalSubroutesHTTPAPI(t *testing.T) {
+	root := t.TempDir()
+	commandPath := filepath.Join(root, ".opencode", "command", "init.md")
+	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
+		t.Fatalf("mkdir command dir: %v", err)
+	}
+	if err := os.WriteFile(commandPath, []byte("Initialize {{args}}"), 0o644); err != nil {
+		t.Fatalf("write init command: %v", err)
+	}
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"title":"subroutes"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/init", "application/json", strings.NewReader(`{"providerID":"openai-compatible","modelID":"mock-model","messageID":"msg_init"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/init error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("init status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/shell", "application/json", strings.NewReader(`{"agent":"build","command":"echo hello"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/shell error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("shell status = %d, want 200", resp.StatusCode)
+	}
+	var shellMessage session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&shellMessage); err != nil {
+		t.Fatalf("decode shell message: %v", err)
+	}
+	text, _ := shellMessage.Parts[0].Data["text"].(string)
+	if shellMessage.Info.Role != "user" || !strings.Contains(text, "echo hello") {
+		t.Fatalf("shell message = %#v, want shell prompt", shellMessage)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/prompt_async", "application/json", strings.NewReader(`{"noReply":true,"parts":[{"type":"text","text":"async"}]}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/prompt_async error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("prompt_async status = %d, want 204", resp.StatusCode)
+	}
+
+	if err := store.SetDiff(context.Background(), created.ID, []map[string]any{{"file": "main.go", "additions": 1.0}}); err != nil {
+		t.Fatalf("SetDiff() error = %v", err)
+	}
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/summarize", "application/json", strings.NewReader(`{"providerID":"openai-compatible","modelID":"mock-model"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/summarize error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("summarize status = %d, want 200", resp.StatusCode)
+	}
+	reloaded, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if reloaded.Summary == nil || reloaded.Summary.Files != 1 {
+		t.Fatalf("summary = %#v, want persisted diff summary", reloaded.Summary)
+	}
+}
+
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	store := storage.NewMemorySessionStore()
 	client := &serverFakeChatClient{}

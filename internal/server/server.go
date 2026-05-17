@@ -747,6 +747,57 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		}
 		return true, http.StatusOK, nil
 	}
+	if len(parts) == 1 && parts[0] == "init" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		var input struct {
+			ModelID    string            `json:"modelID"`
+			ProviderID string            `json:"providerID"`
+			MessageID  session.MessageID `json:"messageID"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		directory := "."
+		if repo, ok := messages.(session.Repository); ok {
+			info, err := repo.Get(r.Context(), sessionID)
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			directory = defaultString(info.Directory, directory)
+		}
+		_, err := executeSessionCommand(r.Context(), sessionID, commandPayload{
+			MessageID: &input.MessageID,
+			Model:     input.ProviderID + "/" + input.ModelID,
+			Command:   "init",
+			Arguments: "",
+			Directory: directory,
+			NoReply:   true,
+		}, messages, nil)
+		return true, statusFromError(err), err
+	}
+	if len(parts) == 1 && parts[0] == "summarize" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		repo, ok := messages.(session.DiffRepository)
+		if ok {
+			diffs, err := repo.Diff(r.Context(), sessionID)
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			if err := repo.SetDiff(r.Context(), sessionID, diffs); err != nil {
+				return nil, statusFromError(err), err
+			}
+		} else if sessionRepo, ok := messages.(session.Repository); ok {
+			_, err := sessionRepo.Update(r.Context(), sessionID, session.UpdateInput{Summary: &session.SummaryInfo{}})
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+		}
+		return true, http.StatusOK, nil
+	}
 	if len(parts) == 1 && parts[0] == "todo" {
 		if r.Method != http.MethodGet {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -851,6 +902,68 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
+	}
+	if len(parts) == 1 && parts[0] == "prompt_async" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		var input session.PromptInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		result, err := messages.CreatePrompt(r.Context(), sessionID, input)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		publishMessageEvents(events, sessionID, result)
+		if !input.NoReply && promptRuntime != nil {
+			go func() {
+				assistant, err := promptRuntime.Reply(context.Background(), sessionID, result)
+				if err != nil {
+					events.publish("session.error", map[string]any{"sessionID": sessionID, "error": err.Error()})
+					return
+				}
+				publishMessageEvents(events, sessionID, assistant)
+			}()
+		}
+		return nil, http.StatusNoContent, nil
+	}
+	if len(parts) == 1 && parts[0] == "shell" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		var input struct {
+			MessageID *session.MessageID `json:"messageID,omitempty"`
+			Agent     string             `json:"agent"`
+			Model     *session.ModelRef  `json:"model,omitempty"`
+			Command   string             `json:"command"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		if strings.TrimSpace(input.Command) == "" {
+			return nil, http.StatusBadRequest, fmt.Errorf("command is required")
+		}
+		result, err := messages.CreatePrompt(r.Context(), sessionID, session.PromptInput{
+			MessageID: input.MessageID,
+			Agent:     defaultString(input.Agent, "build"),
+			Model:     input.Model,
+			NoReply:   true,
+			Parts: []session.Part{{
+				Type: "text",
+				Data: map[string]any{
+					"text": fmt.Sprintf("Run shell command:\n%s", input.Command),
+					"metadata": map[string]any{
+						"shell":   true,
+						"command": input.Command,
+					},
+				},
+			}},
+		})
+		if err == nil {
+			publishMessageEvents(events, sessionID, result)
+		}
+		return result, statusFromError(err), err
 	}
 	if len(parts) == 2 && parts[0] == "message" {
 		messageID := session.MessageID(parts[1])
