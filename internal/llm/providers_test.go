@@ -109,6 +109,9 @@ func TestResolveChatRequestAzureUsesAPIKeyHeaderAndVersion(t *testing.T) {
 	if got.BaseURL != "https://opencode-test.openai.azure.com/openai/v1" {
 		t.Fatalf("baseURL = %q, want resource URL", got.BaseURL)
 	}
+	if got.Protocol != "openai-responses" {
+		t.Fatalf("protocol = %q, want OpenAI Responses", got.Protocol)
+	}
 	if got.AuthHeader != "api-key" || got.AuthScheme != "" || got.APIKey != "azure-key" {
 		t.Fatalf("auth = %#v, want Azure api-key header", got)
 	}

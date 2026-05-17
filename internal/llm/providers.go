@@ -50,7 +50,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		}
 		return profile.chatRequest(messages, modelID), nil
 	case "azure":
-		profile := openAIProfile{
+		profile := responsesProfile{
 			ProviderID:     "azure",
 			DefaultBaseURL: azureBaseURL(),
 			BaseURLEnvVars: []string{"OPENCODE_AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_BASE_URL"},

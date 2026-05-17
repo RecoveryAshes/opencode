@@ -92,6 +92,42 @@ func TestResponsesChatParsesSSE(t *testing.T) {
 	}
 }
 
+func TestResponsesChatSupportsAzureAuthAndQuery(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("api-version"); got != "2024-10-21" {
+			t.Fatalf("api-version = %q, want configured version", got)
+		}
+		if got := r.Header.Get("api-key"); got != "azure-key" {
+			t.Fatalf("api-key = %q, want Azure key", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("authorization = %q, want no bearer header", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output_text":"ok"}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewResponsesClient().Chat(t.Context(), ChatRequest{
+		ProviderID:  "azure",
+		Protocol:    "openai-responses",
+		BaseURL:     mock.URL + "/openai/v1",
+		APIKey:      "azure-key",
+		AuthHeader:  "api-key",
+		QueryParams: map[string]string{"api-version": "2024-10-21"},
+		Model:       "deployment",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		Temperature: nil,
+		MaxTokens:   nil,
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Text != "ok" {
+		t.Fatalf("Chat() = %#v, want ok", got)
+	}
+}
+
 func TestProviderChatClientRoutesResponses(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
