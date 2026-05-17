@@ -418,22 +418,112 @@ func flattenMessages(items []session.WithParts) []map[string]any {
 }
 
 func v2ContextMessages(items []session.WithParts) []session.WithParts {
-	start := 0
-	for index, item := range items {
-		if messageHasPartType(item, "compaction") {
-			start = index
+	result := make([]session.WithParts, 0, len(items))
+	completed := map[session.MessageID]bool{}
+	var retain *session.MessageID
+	for index := len(items) - 1; index >= 0; index-- {
+		item := items[index]
+		result = append(result, item)
+		if retain != nil {
+			if item.Info.ID == *retain {
+				break
+			}
+			continue
+		}
+		if item.Info.Role == "user" && completed[item.Info.ID] {
+			part, ok := compactionPart(item)
+			if !ok {
+				continue
+			}
+			tailStartID := partTailStartID(part)
+			if tailStartID == "" {
+				break
+			}
+			retain = &tailStartID
+			if item.Info.ID == tailStartID {
+				break
+			}
+			continue
+		}
+		if completedSummary(item) && item.Info.ParentID != nil {
+			completed[*item.Info.ParentID] = true
 		}
 	}
-	return append([]session.WithParts{}, items[start:]...)
+	slices.Reverse(result)
+	return reorderCompactedTail(result)
 }
 
-func messageHasPartType(item session.WithParts, partType string) bool {
+func compactionPart(item session.WithParts) (session.Part, bool) {
 	for _, part := range item.Parts {
-		if part.Type == partType {
-			return true
+		if part.Type == "compaction" {
+			return part, true
 		}
 	}
-	return false
+	return session.Part{}, false
+}
+
+func partTailStartID(part session.Part) session.MessageID {
+	for _, key := range []string{"tail_start_id", "tailStartID"} {
+		if value, ok := part.Data[key].(string); ok && value != "" {
+			return session.MessageID(value)
+		}
+	}
+	return ""
+}
+
+func completedSummary(item session.WithParts) bool {
+	return item.Info.Role == "assistant" &&
+		item.Info.Summary != nil &&
+		item.Info.Summary.Assistant &&
+		item.Info.Finish != "" &&
+		len(item.Info.Error) == 0
+}
+
+func reorderCompactedTail(items []session.WithParts) []session.WithParts {
+	compactionIndex := -1
+	tailStartID := session.MessageID("")
+	for index, item := range items {
+		if item.Info.Role != "user" {
+			continue
+		}
+		part, ok := compactionPart(item)
+		if !ok {
+			continue
+		}
+		tailID := partTailStartID(part)
+		if tailID == "" {
+			continue
+		}
+		compactionIndex = index
+		tailStartID = tailID
+	}
+	if compactionIndex < 0 {
+		return append([]session.WithParts{}, items...)
+	}
+	summaryIndex := -1
+	compactionID := items[compactionIndex].Info.ID
+	for index := compactionIndex + 1; index < len(items); index++ {
+		item := items[index]
+		if completedSummary(item) && item.Info.ParentID != nil && *item.Info.ParentID == compactionID {
+			summaryIndex = index
+			break
+		}
+	}
+	tailIndex := -1
+	for index, item := range items {
+		if item.Info.ID == tailStartID {
+			tailIndex = index
+			break
+		}
+	}
+	if tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex {
+		result := make([]session.WithParts, 0, len(items))
+		result = append(result, items[compactionIndex:summaryIndex+1]...)
+		result = append(result, items[tailIndex:compactionIndex]...)
+		result = append(result, items[summaryIndex+1:]...)
+		return result
+	}
+	return append([]session.WithParts{}, items...)
 }
 
 func flattenMessage(item session.WithParts) map[string]any {

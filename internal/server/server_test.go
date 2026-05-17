@@ -1779,8 +1779,69 @@ func TestV2HTTPAPICompatibility(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&contextMessages); err != nil {
 		t.Fatalf("decode context after compaction: %v", err)
 	}
-	if len(contextMessages) != 2 || contextMessages[0]["id"] != string(compactionID) || contextMessages[1]["id"] != string(tailID) {
-		t.Fatalf("context = %#v, want compaction boundary and tail message", contextMessages)
+	if len(contextMessages) != 3 || contextMessages[0]["id"] != promptMessage["id"] || contextMessages[1]["id"] != string(compactionID) || contextMessages[2]["id"] != string(tailID) {
+		t.Fatalf("context = %#v, want uncompleted compaction to keep history", contextMessages)
+	}
+	if _, err := store.CreateAssistant(context.Background(), created.ID, session.AssistantInput{
+		ParentID: compactionID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Summary:  true,
+		Text:     "summary",
+		Finish:   "stop",
+	}); err != nil {
+		t.Fatalf("CreateAssistant(summary) error = %v", err)
+	}
+	resp, err = http.Get(server.URL + "/api/session/" + string(created.ID) + "/context")
+	if err != nil {
+		t.Fatalf("GET /api/session/id/context after summary error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&contextMessages); err != nil {
+		t.Fatalf("decode context after summary: %v", err)
+	}
+	if len(contextMessages) != 3 || contextMessages[0]["id"] != string(compactionID) || contextMessages[1]["id"] != string(tailID) || contextMessages[2]["role"] != "assistant" {
+		t.Fatalf("context = %#v, want completed compaction boundary with chronological tail and summary", contextMessages)
+	}
+
+	tailStartID := session.MessageID("msg_tail_start")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &tailStartID,
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "retained tail"},
+		}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(tail start) error = %v", err)
+	}
+	tailCompactionID := session.MessageID("msg_tail_compaction")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &tailCompactionID,
+		Parts: []session.Part{{
+			Type: "compaction",
+			Data: map[string]any{"auto": true, "tail_start_id": string(tailStartID)},
+		}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(tail compaction) error = %v", err)
+	}
+	if _, err := store.CreateAssistant(context.Background(), created.ID, session.AssistantInput{
+		ParentID: tailCompactionID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Summary:  true,
+		Text:     "tail summary",
+		Finish:   "stop",
+	}); err != nil {
+		t.Fatalf("CreateAssistant(tail summary) error = %v", err)
+	}
+	resp, err = http.Get(server.URL + "/api/session/" + string(created.ID) + "/context")
+	if err != nil {
+		t.Fatalf("GET /api/session/id/context after tail compaction error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&contextMessages); err != nil {
+		t.Fatalf("decode context after tail compaction: %v", err)
+	}
+	if len(contextMessages) < 3 || contextMessages[0]["id"] != string(tailCompactionID) || contextMessages[1]["role"] != "assistant" || contextMessages[2]["id"] != string(tailStartID) {
+		t.Fatalf("context = %#v, want compaction summary followed by retained tail", contextMessages)
 	}
 
 	resp, err = http.Post(server.URL+"/api/session/"+string(created.ID)+"/compact", "application/json", nil)
