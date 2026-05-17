@@ -26,6 +26,9 @@ type Options struct {
 	Sessions session.Repository
 }
 
+// SessionRepository is the storage contract required by the HTTP server.
+type SessionRepository = session.Repository
+
 // Listener describes a running sidecar server.
 type Listener struct {
 	URL    *url.URL

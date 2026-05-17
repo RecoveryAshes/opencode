@@ -11,7 +11,8 @@ Migrated into Go:
 - Session domain contracts: `internal/domain/session`
 - Session retry behavior: `internal/domain/session/retry`
 - Session overflow behavior: `internal/domain/session/overflow`
-- First storage seam: `internal/storage`
+- Storage seam: in-memory repository plus SQLite `project`/`session` repository in `internal/storage`
+- Config discovery seam: `.opencode/agent`, `.opencode/command`, `.opencode/skill`, `.opencode/theme`
 - Provider inventory and contracts: `internal/llm`
 - Local tool integration inventory: `internal/integration`
 
@@ -94,8 +95,8 @@ This runs:
 ## Next Migration Slices
 
 1. Freeze TypeScript HTTP/OpenAPI/SSE/WebSocket snapshots and compare them against `internal/server`.
-2. Port SQLite schema and migrations behind storage repositories.
-3. Port session create/list/get/message flows and event bus semantics.
+2. Expand SQLite migrations to all remaining tables and historical migration fixtures.
+3. Port session message/prompt/compact/revert/share flows and event bus semantics.
 4. Port file, shell, grep/glob, LSP, PTY, MCP, and plugin tools.
 5. Port providers one adapter at a time with golden normalized error and stream tests.
 6. Rebuild the TUI in Go and reduce Electron main to sidecar lifecycle plus local client calls.

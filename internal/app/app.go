@@ -60,15 +60,25 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 	fs.SetOutput(stderr)
 	hostname := fs.String("hostname", "127.0.0.1", "hostname to bind")
 	port := fs.Int("port", 0, "port to bind; 0 prefers 4096 then any free port")
+	dbPath := fs.String("db", "", "SQLite database path; empty uses in-memory storage")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	sessionRepo, closeRepo, err := openSessionRepository(*dbPath)
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stderr, "open db failed: %v\n", err); writeErr != nil {
+			return 1
+		}
+		return 1
+	}
+	defer closeRepo()
 
 	listener, err := server.Listen(ctx, server.Options{
 		Hostname: *hostname,
 		Port:     *port,
 		Version:  version,
-		Sessions: storage.NewMemorySessionStore(),
+		Sessions: sessionRepo,
 	})
 	if err != nil {
 		if _, writeErr := fmt.Fprintf(stderr, "serve failed: %v\n", err); writeErr != nil {
@@ -87,6 +97,19 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 	}
 	<-ctx.Done()
 	return 0
+}
+
+func openSessionRepository(dbPath string) (server.SessionRepository, func(), error) {
+	if dbPath == "" {
+		return storage.NewMemorySessionStore(), func() {}, nil
+	}
+	store, err := storage.OpenSQLiteSessionStore(dbPath)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return store, func() {
+		_ = store.Close()
+	}, nil
 }
 
 func retryDelay(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -147,7 +170,7 @@ func printUsage(w io.Writer) error {
 
 commands:
   version
-  serve [--hostname HOST] [--port PORT]
+  serve [--hostname HOST] [--port PORT] [--db PATH]
   providers
   tools
   retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]`)
