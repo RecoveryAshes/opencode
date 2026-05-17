@@ -4,11 +4,14 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -55,6 +58,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return commands(args[1:], stdout, stderr)
 	case "config":
 		return configCommand(args[1:], stdout, stderr)
+	case "db":
+		return dbCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -241,6 +246,40 @@ func resolveDBPath(dbPath string) (string, error) {
 		return "", fmt.Errorf("create db directory: %w", err)
 	}
 	return dbPath, nil
+}
+
+func resolvePersistentDBPath(dbPath string) (string, error) {
+	if dbPath == "" {
+		dbPath = os.Getenv("OPENCODE_DB")
+	}
+	if dbPath == "" {
+		dbPath = filepath.Join(appDataDir(), "opencode.db")
+	} else if dbPath != ":memory:" && !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(appDataDir(), dbPath)
+	}
+	if dbPath == ":memory:" {
+		return dbPath, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return "", fmt.Errorf("create db directory: %w", err)
+	}
+	return dbPath, nil
+}
+
+func appDataDir() string {
+	if base := os.Getenv("XDG_DATA_HOME"); base != "" {
+		return filepath.Join(base, "opencode")
+	}
+	home := os.Getenv("OPENCODE_TEST_HOME")
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
+	if home == "" {
+		if resolved, err := os.UserHomeDir(); err == nil {
+			home = resolved
+		}
+	}
+	return filepath.Join(home, ".local", "share", "opencode")
 }
 
 func sessionCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -857,6 +896,198 @@ func configCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	return writeJSON(stdout, result)
 }
 
+func dbCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("db", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "SQLite database path; relative paths resolve under the opencode data directory")
+	format := fs.String("format", "tsv", "query output format: tsv or json")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path, err := resolvePersistentDBPath(*dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "resolve db path failed: %v\n", err)
+		return 1
+	}
+	if fs.NArg() == 0 {
+		return dbShell(ctx, path, stderr)
+	}
+	switch fs.Arg(0) {
+	case "path":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode db [--db PATH] path")
+			return 2
+		}
+		if _, err := fmt.Fprintln(stdout, path); err != nil {
+			return 1
+		}
+		return 0
+	case "migrate":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode db [--db PATH] migrate")
+			return 2
+		}
+		store, err := storage.OpenSQLiteSessionStore(path)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Migration failed: %v\n", err)
+			return 1
+		}
+		if err := store.Close(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "close db failed: %v\n", err)
+			return 1
+		}
+		if _, err := fmt.Fprintln(stdout, "Migration complete: schema ready"); err != nil {
+			return 1
+		}
+		return 0
+	case "query":
+		if fs.NArg() != 2 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode db [--db PATH] [--format tsv|json] query SQL")
+			return 2
+		}
+		return dbQuery(ctx, path, fs.Arg(1), *format, stdout, stderr)
+	case "shell":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode db [--db PATH] shell")
+			return 2
+		}
+		return dbShell(ctx, path, stderr)
+	default:
+		if fs.NArg() == 1 {
+			return dbQuery(ctx, path, fs.Arg(0), *format, stdout, stderr)
+		}
+		_, _ = fmt.Fprintf(stderr, "unknown db command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
+func dbQuery(ctx context.Context, path string, query string, format string, stdout io.Writer, stderr io.Writer) int {
+	if format != "tsv" && format != "json" {
+		_, _ = fmt.Fprintf(stderr, "unsupported db format: %s\n", format)
+		return 2
+	}
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "close db failed: %v\n", err)
+		}
+	}()
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "close query rows failed: %v\n", err)
+		}
+	}()
+	result, err := scanDBRows(rows)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "read query rows failed: %v\n", err)
+		return 1
+	}
+	if format == "json" {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if len(result) == 0 {
+		return 0
+	}
+	columns := make([]string, 0, len(result[0]))
+	for key := range result[0] {
+		columns = append(columns, key)
+	}
+	slices.Sort(columns)
+	if _, err := fmt.Fprintln(stdout, strings.Join(columns, "\t")); err != nil {
+		return 1
+	}
+	for _, row := range result {
+		values := make([]string, 0, len(columns))
+		for _, column := range columns {
+			values = append(values, dbCellString(row[column]))
+		}
+		if _, err := fmt.Fprintln(stdout, strings.Join(values, "\t")); err != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+func sqliteReadOnlyDSN(path string) string {
+	if path == ":memory:" {
+		return path
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+}
+
+func scanDBRows(rows *sql.Rows) ([]map[string]any, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	result := []map[string]any{}
+	for rows.Next() {
+		values := make([]any, len(columns))
+		destinations := make([]any, len(columns))
+		for i := range values {
+			destinations[i] = &values[i]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			return nil, err
+		}
+		row := map[string]any{}
+		for i, column := range columns {
+			row[column] = normalizeDBValue(values[i])
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func normalizeDBValue(value any) any {
+	switch typed := value.(type) {
+	case []byte:
+		return string(typed)
+	default:
+		return typed
+	}
+}
+
+func dbCellString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
+func dbShell(ctx context.Context, path string, stderr io.Writer) int {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		_, _ = fmt.Fprintln(stderr, "sqlite3 executable not found; install sqlite3 or use `opencode db query SQL`")
+		return 1
+	}
+	cmd := exec.CommandContext(ctx, "sqlite3", path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "sqlite3 failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func tool(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tool", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -929,6 +1160,7 @@ commands:
   session [--db PATH] COMMAND
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
+  db [--db PATH] [--format tsv|json] COMMAND [QUERY]
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

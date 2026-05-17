@@ -258,6 +258,113 @@ func TestRunSessionUsesOPENCODEDB(t *testing.T) {
 	}
 }
 
+func TestRunDBPathMatchesPersistentStorageRules(t *testing.T) {
+	home := t.TempDir()
+	xdgData := filepath.Join(home, "share")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", xdgData)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"db", "path"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	want := filepath.Join(xdgData, "opencode", "opencode.db")
+	if strings.TrimSpace(stdout.String()) != want {
+		t.Fatalf("db path = %q, want %q", strings.TrimSpace(stdout.String()), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"db", "--db", "custom.db", "path"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("relative db path exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	want = filepath.Join(xdgData, "opencode", "custom.db")
+	if strings.TrimSpace(stdout.String()) != want {
+		t.Fatalf("relative db path = %q, want %q", strings.TrimSpace(stdout.String()), want)
+	}
+}
+
+func TestRunDBMigrateAndQuery(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, []string{"db", "--db", dbPath, "migrate"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("migrate exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Migration complete") {
+		t.Fatalf("migrate stdout = %q, want migration complete", stdout.String())
+	}
+
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "DB CLI",
+	})
+	sessionID := created["id"].(string)
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(ctx, []string{"db", "--db", dbPath, "query", "select id, title from session order by title"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("query exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 || lines[0] != "id\ttitle" || lines[1] != sessionID+"\tDB CLI" {
+		t.Fatalf("query stdout = %q, want TSV header and row", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(ctx, []string{"db", "--db", dbPath, "--format", "json", "query", "select title from session"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("json query exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("decode json query: %v\nstdout=%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0]["title"] != "DB CLI" {
+		t.Fatalf("json rows = %#v, want title row", rows)
+	}
+}
+
+func TestRunDBQueryRejectsWritesInReadOnlyMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	created := runAppJSON[map[string]any](t, context.Background(), []string{
+		"session", "--db", dbPath, "create", "--title", "readonly",
+	})
+	if created["title"] != "readonly" {
+		t.Fatalf("created = %#v, want readonly title", created)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"db", "--db", dbPath, "query", "delete from session"}, &stdout, &stderr, "test")
+	if code != 1 {
+		t.Fatalf("delete query exit code = %d, want 1", code)
+	}
+	if !strings.Contains(strings.ToLower(stderr.String()), "readonly") {
+		t.Fatalf("stderr = %q, want readonly error", stderr.String())
+	}
+}
+
+func TestRunDBRejectsInvalidCommandShape(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"db", "path", "extra"}, &stdout, &stderr, "test")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: opencode db") {
+		t.Fatalf("stderr = %q, want db usage", stderr.String())
+	}
+}
+
 func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
