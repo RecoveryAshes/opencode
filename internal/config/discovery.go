@@ -25,16 +25,25 @@ func Discover(root string) (Discovery, error) {
 	result := Discovery{Root: root}
 
 	var err error
-	if result.Agents, err = markdownFiles(filepath.Join(root, ".opencode", "agent")); err != nil {
+	if result.Agents, err = markdownFilesInDirs(
+		filepath.Join(root, ".opencode", "agent"),
+		filepath.Join(root, ".opencode", "agents"),
+	); err != nil {
 		return Discovery{}, err
 	}
 	if result.Commands, err = commandFileList(root); err != nil {
 		return Discovery{}, err
 	}
-	if result.Skills, err = markdownFiles(filepath.Join(root, ".opencode", "skill")); err != nil {
+	if result.Skills, err = markdownFilesInDirs(
+		filepath.Join(root, ".opencode", "skill"),
+		filepath.Join(root, ".opencode", "skills"),
+	); err != nil {
 		return Discovery{}, err
 	}
-	if result.Themes, err = jsonFiles(filepath.Join(root, ".opencode", "theme")); err != nil {
+	if result.Themes, err = jsonFilesInDirs(
+		filepath.Join(root, ".opencode", "theme"),
+		filepath.Join(root, ".opencode", "themes"),
+	); err != nil {
 		return Discovery{}, err
 	}
 	return result, nil
@@ -48,31 +57,49 @@ func commandFileList(root string) ([]string, error) {
 	return files, nil
 }
 
-func markdownFiles(dir string) ([]string, error) {
-	return filesWithExtensions(dir, ".md", ".markdown")
+func markdownFilesInDirs(dirs ...string) ([]string, error) {
+	return filesInDirs([]string{".md", ".markdown"}, dirs...)
 }
 
-func jsonFiles(dir string) ([]string, error) {
-	return filesWithExtensions(dir, ".json", ".jsonc")
+func jsonFilesInDirs(dirs ...string) ([]string, error) {
+	return filesInDirs([]string{".json", ".jsonc"}, dirs...)
 }
 
-func filesWithExtensions(dir string, extensions ...string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
+func filesInDirs(extensions []string, dirs ...string) ([]string, error) {
+	result := []string{}
+	for _, dir := range dirs {
+		files, err := recursiveFilesWithExtensions(dir, extensions...)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, files...)
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+func recursiveFilesWithExtensions(dir string, extensions ...string) ([]string, error) {
+	if !dirExists(dir) {
 		return []string{}, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-
 	result := []string{}
-	for _, entry := range entries {
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		if entry.IsDir() {
-			continue
+			return nil
 		}
 		if slices.Contains(extensions, strings.ToLower(filepath.Ext(entry.Name()))) {
-			result = append(result, filepath.Join(dir, entry.Name()))
+			result = append(result, path)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	slices.Sort(result)
 	return result, nil
