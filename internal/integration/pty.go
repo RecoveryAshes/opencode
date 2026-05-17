@@ -21,6 +21,7 @@ type PTYInfo struct {
 	CWD     string   `json:"cwd"`
 	Status  string   `json:"status"`
 	PID     int      `json:"pid"`
+	Size    *PTYSize `json:"size,omitempty"`
 }
 
 // PTYCreateInput creates a shell-backed process. It is not a real OS PTY yet,
@@ -35,7 +36,14 @@ type PTYCreateInput struct {
 
 // PTYUpdateInput changes mutable PTY session fields.
 type PTYUpdateInput struct {
-	Title string `json:"title,omitempty"`
+	Title string   `json:"title,omitempty"`
+	Size  *PTYSize `json:"size,omitempty"`
+}
+
+// PTYSize records terminal dimensions from the public PTY update contract.
+type PTYSize struct {
+	Rows int `json:"rows"`
+	Cols int `json:"cols"`
 }
 
 // PTYManager manages local shell sessions.
@@ -192,6 +200,9 @@ func (manager *PTYManager) Update(id string, input PTYUpdateInput) (PTYInfo, boo
 	}
 	if input.Title != "" {
 		session.info.Title = input.Title
+	}
+	if input.Size != nil {
+		session.info.Size = &PTYSize{Rows: input.Size.Rows, Cols: input.Size.Cols}
 	}
 	return session.info, true
 }

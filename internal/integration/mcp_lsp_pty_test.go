@@ -107,6 +107,16 @@ func TestPTYManagerLifecycle(t *testing.T) {
 	if len(manager.List()) != 1 {
 		t.Fatalf("List() = %#v", manager.List())
 	}
+	updated, ok := manager.Update(info.ID, PTYUpdateInput{
+		Title: "renamed",
+		Size:  &PTYSize{Rows: 24, Cols: 120},
+	})
+	if !ok {
+		t.Fatalf("Update() ok = false")
+	}
+	if updated.Title != "renamed" || updated.Size == nil || updated.Size.Rows != 24 || updated.Size.Cols != 120 {
+		t.Fatalf("updated = %#v, want title and size", updated)
+	}
 	if !manager.Remove(info.ID) {
 		t.Fatalf("Remove() = false")
 	}

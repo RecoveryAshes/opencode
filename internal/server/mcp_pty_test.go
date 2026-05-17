@@ -81,7 +81,7 @@ func TestPTYHTTPAPI(t *testing.T) {
 		t.Fatalf("buffer = %#v", output)
 	}
 
-	req, err := http.NewRequest(http.MethodPut, server.URL+"/pty/"+info.ID, bytes.NewBufferString(`{"title":"renamed"}`))
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/pty/"+info.ID, bytes.NewBufferString(`{"title":"renamed","size":{"rows":30,"cols":100}}`))
 	if err != nil {
 		t.Fatalf("new pty update request: %v", err)
 	}
@@ -97,5 +97,8 @@ func TestPTYHTTPAPI(t *testing.T) {
 	}
 	if updated.Title != "renamed" {
 		t.Fatalf("updated = %#v", updated)
+	}
+	if updated.Size == nil || updated.Size.Rows != 30 || updated.Size.Cols != 100 {
+		t.Fatalf("updated = %#v, want size contract preserved", updated)
 	}
 }
