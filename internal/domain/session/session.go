@@ -39,6 +39,45 @@ type SummaryInfo struct {
 	Diffs     []map[string]any `json:"diffs,omitempty"`
 }
 
+// MessageSummary stores the legacy union used by MessageV2:
+// user messages carry a summary object, while assistant compaction messages
+// mark summary generation with the boolean true.
+type MessageSummary struct {
+	Assistant bool             `json:"-"`
+	Title     string           `json:"title,omitempty"`
+	Body      string           `json:"body,omitempty"`
+	Diffs     []map[string]any `json:"diffs,omitempty"`
+}
+
+// MarshalJSON emits either a boolean assistant summary marker or the user
+// message summary object shape used by the TypeScript API.
+func (summary MessageSummary) MarshalJSON() ([]byte, error) {
+	if summary.Assistant {
+		return []byte("true"), nil
+	}
+	type userSummary MessageSummary
+	return json.Marshal(userSummary(summary))
+}
+
+// UnmarshalJSON accepts the TypeScript MessageV2 summary union.
+func (summary *MessageSummary) UnmarshalJSON(data []byte) error {
+	var marker bool
+	if err := json.Unmarshal(data, &marker); err == nil {
+		summary.Assistant = marker
+		summary.Title = ""
+		summary.Body = ""
+		summary.Diffs = nil
+		return nil
+	}
+	type userSummary MessageSummary
+	var object userSummary
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	*summary = MessageSummary(object)
+	return nil
+}
+
 // ShareInfo stores a public session share URL.
 type ShareInfo struct {
 	URL string `json:"url"`
@@ -153,7 +192,7 @@ type MessageInfo struct {
 	ProviderID string          `json:"providerID,omitempty"`
 	Mode       string          `json:"mode,omitempty"`
 	Path       *PathInfo       `json:"path,omitempty"`
-	Summary    bool            `json:"summary,omitempty"`
+	Summary    *MessageSummary `json:"summary,omitempty"`
 	Cost       *float64        `json:"cost,omitempty"`
 	Tokens     *TokenUsage     `json:"tokens,omitempty"`
 	Variant    string          `json:"variant,omitempty"`

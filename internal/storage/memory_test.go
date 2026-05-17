@@ -249,6 +249,7 @@ func TestMemorySessionStoreMessages(t *testing.T) {
 		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
 		Path:     session.PathInfo{CWD: "/tmp/project", Root: "/tmp/project"},
 		Text:     "reply",
+		Summary:  true,
 		Finish:   "stop",
 		Tokens:   session.TokenUsage{Input: 1, Output: 2, Cache: session.CacheUsage{}},
 	})
@@ -257,6 +258,9 @@ func TestMemorySessionStoreMessages(t *testing.T) {
 	}
 	if assistant.Info.Role != "assistant" || assistant.Info.ParentID == nil || *assistant.Info.ParentID != message.Info.ID {
 		t.Fatalf("assistant = %#v", assistant)
+	}
+	if assistant.Info.Summary == nil || !assistant.Info.Summary.Assistant {
+		t.Fatalf("assistant summary = %#v, want assistant marker", assistant.Info.Summary)
 	}
 
 	messages, err := store.Messages(ctx, info.ID, 0)

@@ -616,13 +616,15 @@ func createAssistantMessage(sessionID session.ID, input session.AssistantInput) 
 			ProviderID: model.ProviderID,
 			Mode:       agent,
 			Path:       &path,
-			Summary:    input.Summary,
 			Cost:       &cost,
 			Tokens:     &input.Tokens,
 			Variant:    model.Variant,
 			Finish:     finish,
 		},
 		Parts: []session.Part{},
+	}
+	if input.Summary {
+		message.Info.Summary = &session.MessageSummary{Assistant: true}
 	}
 	if input.Text != "" {
 		partID, partErr := session.NewPartID()

@@ -402,6 +402,7 @@ func TestSQLiteSessionStoreMessages(t *testing.T) {
 		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
 		Path:     session.PathInfo{CWD: "/tmp/project", Root: "/tmp/project"},
 		Text:     "reply",
+		Summary:  true,
 		Finish:   "stop",
 		Tokens:   session.TokenUsage{Input: 1, Output: 2, Cache: session.CacheUsage{}},
 	})
@@ -414,6 +415,9 @@ func TestSQLiteSessionStoreMessages(t *testing.T) {
 	}
 	if gotAssistant.Info.Role != "assistant" || gotAssistant.Info.ParentID == nil || *gotAssistant.Info.ParentID != message.Info.ID {
 		t.Fatalf("assistant = %#v", gotAssistant)
+	}
+	if gotAssistant.Info.Summary == nil || !gotAssistant.Info.Summary.Assistant {
+		t.Fatalf("assistant summary = %#v, want assistant marker", gotAssistant.Info.Summary)
 	}
 	if len(gotAssistant.Parts) != 2 || gotAssistant.Parts[0].Type != "text" || gotAssistant.Parts[1].Type != "step-finish" {
 		t.Fatalf("assistant parts = %#v", gotAssistant.Parts)
