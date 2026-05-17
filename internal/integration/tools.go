@@ -71,12 +71,28 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return readTool(request)
 	case "write":
 		return writeTool(request)
+	case "edit":
+		return editTool(request)
+	case "apply_patch":
+		return applyPatchTool(request)
 	case "glob":
 		return globTool(request)
 	case "grep":
 		return grepTool(request)
 	case "shell":
 		return shellTool(ctx, request)
+	case "webfetch":
+		return webFetchTool(ctx, request)
+	case "websearch":
+		return webSearchTool(ctx, request)
+	case "skill":
+		return skillTool(request)
+	case "repo_clone":
+		return repoCloneTool(ctx, request)
+	case "repo_overview":
+		return repoOverviewTool(ctx, request)
+	case "todo", "todowrite":
+		return todoTool(request)
 	default:
 		return Result{}, fmt.Errorf("tool %q is not implemented in Go yet", request.Name)
 	}
@@ -97,6 +113,7 @@ var tools = []Tool{
 	{Name: "websearch", Category: "network"},
 	{Name: "question", Category: "user-input"},
 	{Name: "todo", Category: "session"},
+	{Name: "todowrite", Category: "session"},
 	{Name: "skill", Category: "plugin"},
 	{Name: "repo_clone", Category: "git"},
 	{Name: "repo_overview", Category: "git"},

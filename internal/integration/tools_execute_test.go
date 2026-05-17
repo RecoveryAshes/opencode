@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +74,126 @@ func TestReadWriteGlobGrepShellTools(t *testing.T) {
 	}
 	if shellResult.Metadata["exit"] != 0 || shellResult.Output != "migrated" {
 		t.Fatalf("shell result = %#v", shellResult)
+	}
+}
+
+func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	editResult, err := Execute(context.Background(), Request{
+		Name:      "edit",
+		Directory: root,
+		Params: map[string]any{
+			"filePath":  "hello.txt",
+			"oldString": "hello",
+			"newString": "hello go",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit Execute() error = %v", err)
+	}
+	if editResult.Output != "Edit applied successfully." {
+		t.Fatalf("edit output = %q", editResult.Output)
+	}
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: added.txt",
+		"+added",
+		"*** Update File: hello.txt",
+		"@@",
+		"-hello go",
+		"+hello migrated",
+		"*** End Patch",
+	}, "\n")
+	patchResult, err := Execute(context.Background(), Request{
+		Name:      "apply_patch",
+		Directory: root,
+		Params:    map[string]any{"patchText": patch},
+	})
+	if err != nil {
+		t.Fatalf("apply_patch Execute() error = %v", err)
+	}
+	if !strings.Contains(patchResult.Output, "A added.txt") || !strings.Contains(patchResult.Output, "M hello.txt") {
+		t.Fatalf("patch output = %q", patchResult.Output)
+	}
+
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body><h1>Title</h1><p>Hello &amp; Go</p></body></html>"))
+	}))
+	defer web.Close()
+	webResult, err := Execute(context.Background(), Request{
+		Name:   "webfetch",
+		Params: map[string]any{"url": web.URL, "format": "text"},
+	})
+	if err != nil {
+		t.Fatalf("webfetch Execute() error = %v", err)
+	}
+	if !strings.Contains(webResult.Output, "Title") || !strings.Contains(webResult.Output, "Hello & Go") {
+		t.Fatalf("webfetch output = %q", webResult.Output)
+	}
+
+	skillDir := filepath.Join(root, ".opencode", "skills", "review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: review\n---\nUse for review."), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	skillResult, err := Execute(context.Background(), Request{
+		Name:      "skill",
+		Directory: root,
+		Params:    map[string]any{"name": "review"},
+	})
+	if err != nil {
+		t.Fatalf("skill Execute() error = %v", err)
+	}
+	if !strings.Contains(skillResult.Output, `<skill_content name="review">`) {
+		t.Fatalf("skill output = %q", skillResult.Output)
+	}
+
+	todoResult, err := Execute(context.Background(), Request{
+		Name: "todo",
+		Params: map[string]any{"todos": []map[string]string{{
+			"content":  "migrate",
+			"status":   "pending",
+			"priority": "high",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("todo Execute() error = %v", err)
+	}
+	if todoResult.Title != "1 todos" || !strings.Contains(todoResult.Output, "migrate") {
+		t.Fatalf("todo result = %#v", todoResult)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	overview, err := Execute(context.Background(), Request{
+		Name:      "repo_overview",
+		Directory: root,
+		Params:    map[string]any{"path": ".", "depth": 2},
+	})
+	if err != nil {
+		t.Fatalf("repo_overview Execute() error = %v", err)
+	}
+	if !strings.Contains(overview.Output, "Ecosystems: Go") || !strings.Contains(overview.Output, "go.mod") {
+		t.Fatalf("repo_overview output = %q", overview.Output)
+	}
+}
+
+func TestParseRepositoryReferenceSupportsGitSSHShorthand(t *testing.T) {
+	got, err := parseRepositoryReference("git@github.com:RecoveryAshes/opencode.git")
+	if err != nil {
+		t.Fatalf("parseRepositoryReference() error = %v", err)
+	}
+	if got.host != "github.com" || got.path != "RecoveryAshes/opencode" || got.remote != "git@github.com:RecoveryAshes/opencode.git" {
+		t.Fatalf("reference = %#v", got)
 	}
 }
 

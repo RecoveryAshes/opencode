@@ -8,7 +8,7 @@ func TestToolInventoryIncludesMigrationTargets(t *testing.T) {
 		got[name] = true
 	}
 
-	for _, name := range []string{"read", "write", "edit", "apply_patch", "shell", "grep", "lsp", "webfetch", "websearch", "skill"} {
+	for _, name := range []string{"read", "write", "edit", "apply_patch", "shell", "grep", "lsp", "webfetch", "websearch", "skill", "todo", "todowrite", "repo_clone", "repo_overview"} {
 		if !got[name] {
 			t.Fatalf("tool %q missing from inventory", name)
 		}
