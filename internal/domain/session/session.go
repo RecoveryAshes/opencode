@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -36,6 +37,101 @@ type Info struct {
 	Title      string   `json:"title,omitempty"`
 	Time       TimeInfo `json:"time"`
 	Permission []string `json:"permission,omitempty"`
+}
+
+// ModelRef identifies a provider/model pair used by a message.
+type ModelRef struct {
+	ProviderID string `json:"providerID"`
+	ModelID    string `json:"modelID"`
+	Variant    string `json:"variant,omitempty"`
+}
+
+// MessageInfo is the common serialized message contract.
+type MessageInfo struct {
+	ID        MessageID       `json:"id"`
+	SessionID ID              `json:"sessionID"`
+	Role      string          `json:"role"`
+	Time      MessageTime     `json:"time"`
+	Agent     string          `json:"agent,omitempty"`
+	Model     *ModelRef       `json:"model,omitempty"`
+	Tools     map[string]bool `json:"tools,omitempty"`
+	System    string          `json:"system,omitempty"`
+	Format    map[string]any  `json:"format,omitempty"`
+}
+
+// MessageTime stores message timestamps in milliseconds.
+type MessageTime struct {
+	Created   int64  `json:"created"`
+	Completed *int64 `json:"completed,omitempty"`
+}
+
+// Part is a stored message part. Data carries the fields specific to the part
+// type, matching the TypeScript MessageV2 part JSON shape.
+type Part struct {
+	ID        PartID         `json:"id"`
+	SessionID ID             `json:"sessionID"`
+	MessageID MessageID      `json:"messageID"`
+	Type      string         `json:"type"`
+	Data      map[string]any `json:"-"`
+}
+
+// MarshalJSON emits the TypeScript-compatible flattened part shape.
+func (part Part) MarshalJSON() ([]byte, error) {
+	result := map[string]any{}
+	for key, value := range part.Data {
+		result[key] = value
+	}
+	result["id"] = part.ID
+	result["sessionID"] = part.SessionID
+	result["messageID"] = part.MessageID
+	result["type"] = part.Type
+	return json.Marshal(result)
+}
+
+// UnmarshalJSON accepts the TypeScript-compatible flattened part shape.
+func (part *Part) UnmarshalJSON(data []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	part.ID = PartID(stringValue(raw["id"]))
+	part.SessionID = ID(stringValue(raw["sessionID"]))
+	part.MessageID = MessageID(stringValue(raw["messageID"]))
+	part.Type = stringValue(raw["type"])
+	delete(raw, "id")
+	delete(raw, "sessionID")
+	delete(raw, "messageID")
+	delete(raw, "type")
+	part.Data = raw
+	return nil
+}
+
+// WithParts is the public message DTO returned by the session API.
+type WithParts struct {
+	Info  MessageInfo `json:"info"`
+	Parts []Part      `json:"parts"`
+}
+
+// PromptInput is the migrated subset of SessionPrompt.PromptInput.
+type PromptInput struct {
+	MessageID *MessageID      `json:"messageID,omitempty"`
+	Agent     string          `json:"agent,omitempty"`
+	Model     *ModelRef       `json:"model,omitempty"`
+	NoReply   bool            `json:"noReply,omitempty"`
+	Tools     map[string]bool `json:"tools,omitempty"`
+	System    string          `json:"system,omitempty"`
+	Format    map[string]any  `json:"format,omitempty"`
+	Parts     []Part          `json:"parts"`
+}
+
+// MessageRepository is the storage boundary for migrated message routes.
+type MessageRepository interface {
+	Messages(context.Context, ID, int) ([]WithParts, error)
+	GetMessage(context.Context, ID, MessageID) (WithParts, error)
+	CreatePrompt(context.Context, ID, PromptInput) (WithParts, error)
+	RemoveMessage(context.Context, ID, MessageID) error
+	RemovePart(context.Context, ID, MessageID, PartID) error
+	UpdatePart(context.Context, Part) (Part, error)
 }
 
 // CreateInput is the session creation payload accepted by the HTTP API.
@@ -69,11 +165,29 @@ var ErrNotFound = errors.New("session not found")
 
 // NewID creates a new session identifier with the legacy "ses" prefix.
 func NewID() (ID, error) {
-	random := make([]byte, 10)
-	if _, err := rand.Read(random); err != nil {
+	random, err := randomHex(10)
+	if err != nil {
 		return "", fmt.Errorf("generate session id: %w", err)
 	}
-	return ID(fmt.Sprintf("ses_%x_%s", time.Now().UnixMilli(), hex.EncodeToString(random))), nil
+	return ID(fmt.Sprintf("ses_%x_%s", time.Now().UnixMilli(), random)), nil
+}
+
+// NewMessageID creates a new message identifier with the legacy "msg" prefix.
+func NewMessageID() (MessageID, error) {
+	random, err := randomHex(10)
+	if err != nil {
+		return "", fmt.Errorf("generate message id: %w", err)
+	}
+	return MessageID(fmt.Sprintf("msg_%x_%s", time.Now().UnixMilli(), random)), nil
+}
+
+// NewPartID creates a new message part identifier with the legacy "prt" prefix.
+func NewPartID() (PartID, error) {
+	random, err := randomHex(10)
+	if err != nil {
+		return "", fmt.Errorf("generate part id: %w", err)
+	}
+	return PartID(fmt.Sprintf("prt_%x_%s", time.Now().UnixMilli(), random)), nil
 }
 
 // ParseID validates a serialized session ID.
@@ -87,4 +201,19 @@ func ParseID(value string) (ID, error) {
 // NowMillis returns the current Unix timestamp in milliseconds.
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
+}
+
+func randomHex(size int) (string, error) {
+	random := make([]byte, size)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(random), nil
+}
+
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
 }

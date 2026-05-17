@@ -44,3 +44,50 @@ func TestMemorySessionStoreCreateListUpdateRemove(t *testing.T) {
 		t.Fatalf("Get() error = %v, want not found", err)
 	}
 }
+
+func TestMemorySessionStoreMessages(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	message, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Agent: "build",
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	if message.Info.Role != "user" || len(message.Parts) != 1 || message.Parts[0].MessageID != message.Info.ID {
+		t.Fatalf("message = %#v, want user with one part", message)
+	}
+
+	messages, err := store.Messages(ctx, info.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0].Info.ID != message.Info.ID {
+		t.Fatalf("Messages() = %#v, want created message", messages)
+	}
+
+	message.Parts[0].Data["text"] = "updated"
+	updated, err := store.UpdatePart(ctx, message.Parts[0])
+	if err != nil {
+		t.Fatalf("UpdatePart() error = %v", err)
+	}
+	if updated.Data["text"] != "updated" {
+		t.Fatalf("updated part = %#v", updated)
+	}
+
+	if err := store.RemovePart(ctx, info.ID, message.Info.ID, message.Parts[0].ID); err != nil {
+		t.Fatalf("RemovePart() error = %v", err)
+	}
+	if err := store.RemoveMessage(ctx, info.ID, message.Info.ID); err != nil {
+		t.Fatalf("RemoveMessage() error = %v", err)
+	}
+}

@@ -17,6 +17,7 @@ type MemorySessionStore struct {
 	mu       sync.RWMutex
 	sessions map[session.ID]session.Info
 	order    []session.ID
+	messages map[session.ID][]session.WithParts
 }
 
 // NewMemorySessionStore creates an empty session store.
@@ -24,6 +25,7 @@ func NewMemorySessionStore() *MemorySessionStore {
 	return &MemorySessionStore{
 		sessions: map[session.ID]session.Info{},
 		order:    []session.ID{},
+		messages: map[session.ID][]session.WithParts{},
 	}
 }
 
@@ -110,10 +112,118 @@ func (store *MemorySessionStore) Remove(_ context.Context, id session.ID) error 
 		return session.ErrNotFound
 	}
 	delete(store.sessions, id)
+	delete(store.messages, id)
 	store.order = slices.DeleteFunc(store.order, func(candidate session.ID) bool {
 		return candidate == id
 	})
 	return nil
+}
+
+// Messages returns messages in creation order.
+func (store *MemorySessionStore) Messages(_ context.Context, sessionID session.ID, limit int) ([]session.WithParts, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[sessionID]; !ok {
+		return nil, session.ErrNotFound
+	}
+	items := append([]session.WithParts(nil), store.messages[sessionID]...)
+	if limit > 0 && len(items) > limit {
+		items = items[len(items)-limit:]
+	}
+	return items, nil
+}
+
+// GetMessage returns a message with its parts.
+func (store *MemorySessionStore) GetMessage(_ context.Context, sessionID session.ID, messageID session.MessageID) (session.WithParts, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	for _, message := range store.messages[sessionID] {
+		if message.Info.ID == messageID {
+			return message, nil
+		}
+	}
+	return session.WithParts{}, session.ErrNotFound
+}
+
+// CreatePrompt creates a user message and prompt parts.
+func (store *MemorySessionStore) CreatePrompt(_ context.Context, sessionID session.ID, input session.PromptInput) (session.WithParts, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if _, ok := store.sessions[sessionID]; !ok {
+		return session.WithParts{}, session.ErrNotFound
+	}
+	message, err := createPromptMessage(sessionID, input)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	store.messages[sessionID] = append(store.messages[sessionID], message)
+	return message, nil
+}
+
+// RemoveMessage deletes one message and its parts.
+func (store *MemorySessionStore) RemoveMessage(_ context.Context, sessionID session.ID, messageID session.MessageID) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	items := store.messages[sessionID]
+	next := slices.DeleteFunc(items, func(message session.WithParts) bool {
+		return message.Info.ID == messageID
+	})
+	if len(next) == len(items) {
+		return session.ErrNotFound
+	}
+	store.messages[sessionID] = next
+	return nil
+}
+
+// RemovePart deletes one part from a message.
+func (store *MemorySessionStore) RemovePart(_ context.Context, sessionID session.ID, messageID session.MessageID, partID session.PartID) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	items := store.messages[sessionID]
+	for messageIndex, message := range items {
+		if message.Info.ID != messageID {
+			continue
+		}
+		next := slices.DeleteFunc(message.Parts, func(part session.Part) bool {
+			return part.ID == partID
+		})
+		if len(next) == len(message.Parts) {
+			return session.ErrNotFound
+		}
+		message.Parts = next
+		items[messageIndex] = message
+		store.messages[sessionID] = items
+		return nil
+	}
+	return session.ErrNotFound
+}
+
+// UpdatePart replaces one stored part.
+func (store *MemorySessionStore) UpdatePart(_ context.Context, part session.Part) (session.Part, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	items := store.messages[part.SessionID]
+	for messageIndex, message := range items {
+		if message.Info.ID != part.MessageID {
+			continue
+		}
+		for partIndex, existing := range message.Parts {
+			if existing.ID == part.ID {
+				message.Parts[partIndex] = part
+				items[messageIndex] = message
+				store.messages[part.SessionID] = items
+				return part, nil
+			}
+		}
+		return session.Part{}, session.ErrNotFound
+	}
+	return session.Part{}, session.ErrNotFound
 }
 
 func (store *MemorySessionStore) moveToFront(id session.ID) {
@@ -121,6 +231,54 @@ func (store *MemorySessionStore) moveToFront(id session.ID) {
 		return candidate == id
 	})
 	store.order = append([]session.ID{id}, store.order...)
+}
+
+func createPromptMessage(sessionID session.ID, input session.PromptInput) (session.WithParts, error) {
+	messageID := session.MessageID("")
+	if input.MessageID != nil {
+		messageID = *input.MessageID
+	} else {
+		next, err := session.NewMessageID()
+		if err != nil {
+			return session.WithParts{}, err
+		}
+		messageID = next
+	}
+	now := session.NowMillis()
+	message := session.WithParts{
+		Info: session.MessageInfo{
+			ID:        messageID,
+			SessionID: sessionID,
+			Role:      "user",
+			Time:      session.MessageTime{Created: now},
+			Agent:     defaultString(input.Agent, "build"),
+			Model:     input.Model,
+			Tools:     input.Tools,
+			System:    input.System,
+			Format:    input.Format,
+		},
+		Parts: make([]session.Part, 0, len(input.Parts)),
+	}
+	for _, part := range input.Parts {
+		part.SessionID = sessionID
+		part.MessageID = messageID
+		if part.ID == "" {
+			next, err := session.NewPartID()
+			if err != nil {
+				return session.WithParts{}, err
+			}
+			part.ID = next
+		}
+		message.Parts = append(message.Parts, part)
+	}
+	return message, nil
+}
+
+func defaultString(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 // IsNotFound reports whether an error represents a missing record.

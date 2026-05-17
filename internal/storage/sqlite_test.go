@@ -113,6 +113,57 @@ func TestSQLiteSessionSchemaMatchesCoreLegacyColumns(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionStoreMessages(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	message, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Agent: "build",
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+
+	got, err := store.GetMessage(ctx, info.ID, message.Info.ID)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	if got.Parts[0].Data["text"] != "hello" {
+		t.Fatalf("GetMessage() = %#v, want hello text part", got)
+	}
+
+	got.Parts[0].Data["text"] = "updated"
+	if _, err := store.UpdatePart(ctx, got.Parts[0]); err != nil {
+		t.Fatalf("UpdatePart() error = %v", err)
+	}
+	got, err = store.GetMessage(ctx, info.ID, message.Info.ID)
+	if err != nil {
+		t.Fatalf("GetMessage() after update error = %v", err)
+	}
+	if got.Parts[0].Data["text"] != "updated" {
+		t.Fatalf("updated part = %#v", got.Parts[0])
+	}
+
+	if err := store.RemovePart(ctx, info.ID, message.Info.ID, got.Parts[0].ID); err != nil {
+		t.Fatalf("RemovePart() error = %v", err)
+	}
+	if err := store.RemoveMessage(ctx, info.ID, message.Info.ID); err != nil {
+		t.Fatalf("RemoveMessage() error = %v", err)
+	}
+}
+
 func closeStore(t *testing.T, store *SQLiteSessionStore) {
 	t.Helper()
 	if err := store.Close(); err != nil {

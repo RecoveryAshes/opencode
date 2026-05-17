@@ -95,6 +95,61 @@ func TestSessionCreateListGetUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestSessionMessageHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"chat"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	body := `{"agent":"build","parts":[{"type":"text","text":"hello"}],"noReply":true}`
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/message", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var message session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&message); err != nil {
+		t.Fatalf("decode message: %v", err)
+	}
+	if message.Info.Role != "user" || len(message.Parts) != 1 {
+		t.Fatalf("message = %#v, want user with part", message)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(created.ID) + "/message")
+	if err != nil {
+		t.Fatalf("GET /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var messages []session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Info.ID != message.Info.ID {
+		t.Fatalf("messages = %#v, want created message", messages)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/session/"+string(created.ID)+"/message/"+string(message.Info.ID), nil)
+	if err != nil {
+		t.Fatalf("new delete message request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /session/id/message/id error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete message status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()

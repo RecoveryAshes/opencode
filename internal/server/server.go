@@ -25,10 +25,14 @@ type Options struct {
 	Port     int
 	Version  string
 	Sessions session.Repository
+	Messages session.MessageRepository
 }
 
 // SessionRepository is the storage contract required by the HTTP server.
 type SessionRepository = session.Repository
+
+// MessageRepository is the message storage contract required by the HTTP server.
+type MessageRepository = session.MessageRepository
 
 // Listener describes a running sidecar server.
 type Listener struct {
@@ -85,6 +89,13 @@ func NewHandler(opts Options) http.Handler {
 	if opts.Sessions == nil {
 		opts.Sessions = storage.NewMemorySessionStore()
 	}
+	if opts.Messages == nil {
+		if messages, ok := opts.Sessions.(session.MessageRepository); ok {
+			opts.Messages = messages
+		} else {
+			opts.Messages = storage.NewMemorySessionStore()
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{
@@ -100,7 +111,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{}, http.StatusOK, nil
 	}))
-	mux.HandleFunc("/session/", sessionByID(opts.Sessions))
+	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages))
 	mux.HandleFunc("/session", sessions(opts.Sessions))
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
@@ -146,6 +157,18 @@ func OpenAPI(version string) map[string]any {
 				"get":    map[string]any{"operationId": "session.get"},
 				"patch":  map[string]any{"operationId": "session.update"},
 				"delete": map[string]any{"operationId": "session.delete"},
+			},
+			"/session/{sessionID}/message": map[string]any{
+				"get":  map[string]any{"operationId": "session.messages"},
+				"post": map[string]any{"operationId": "session.prompt"},
+			},
+			"/session/{sessionID}/message/{messageID}": map[string]any{
+				"get":    map[string]any{"operationId": "session.message"},
+				"delete": map[string]any{"operationId": "session.deleteMessage"},
+			},
+			"/session/{sessionID}/message/{messageID}/part/{partID}": map[string]any{
+				"patch":  map[string]any{"operationId": "part.update"},
+				"delete": map[string]any{"operationId": "part.delete"},
 			},
 		},
 		"x-opencode-go-migration": map[string]any{
@@ -218,11 +241,14 @@ func sessions(repo session.Repository) http.HandlerFunc {
 	})
 }
 
-func sessionByID(repo session.Repository) http.HandlerFunc {
+func sessionByID(repo session.Repository, messages session.MessageRepository) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
-		id, err := session.ParseID(strings.TrimPrefix(r.URL.Path, "/session/"))
+		id, remainder, err := parseSessionPath(r.URL.Path)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
+		}
+		if remainder != "" {
+			return sessionSubresource(r, id, remainder, messages)
 		}
 
 		switch r.Method {
@@ -245,6 +271,81 @@ func sessionByID(repo session.Repository) http.HandlerFunc {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
 	})
+}
+
+func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository) (any, int, error) {
+	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] == "message" {
+		switch r.Method {
+		case http.MethodGet:
+			limit, err := parseLimit(r.URL.Query().Get("limit"))
+			if err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			result, err := messages.Messages(r.Context(), sessionID, limit)
+			return result, statusFromError(err), err
+		case http.MethodPost:
+			var input session.PromptInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			result, err := messages.CreatePrompt(r.Context(), sessionID, input)
+			return result, statusFromError(err), err
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+	}
+	if len(parts) == 2 && parts[0] == "message" {
+		messageID := session.MessageID(parts[1])
+		switch r.Method {
+		case http.MethodGet:
+			result, err := messages.GetMessage(r.Context(), sessionID, messageID)
+			return result, statusFromError(err), err
+		case http.MethodDelete:
+			err := messages.RemoveMessage(r.Context(), sessionID, messageID)
+			return true, statusFromError(err), err
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+	}
+	if len(parts) == 4 && parts[0] == "message" && parts[2] == "part" {
+		messageID := session.MessageID(parts[1])
+		partID := session.PartID(parts[3])
+		switch r.Method {
+		case http.MethodDelete:
+			err := messages.RemovePart(r.Context(), sessionID, messageID, partID)
+			return true, statusFromError(err), err
+		case http.MethodPatch:
+			var part session.Part
+			if err := json.NewDecoder(r.Body).Decode(&part); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			if part.ID != partID || part.MessageID != messageID || part.SessionID != sessionID {
+				return nil, http.StatusBadRequest, fmt.Errorf("part path identifiers do not match payload")
+			}
+			result, err := messages.UpdatePart(r.Context(), part)
+			return result, statusFromError(err), err
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+	}
+	return nil, http.StatusNotFound, fmt.Errorf("unknown session route /session/%s/%s", sessionID, path)
+}
+
+func parseSessionPath(path string) (session.ID, string, error) {
+	rest := strings.TrimPrefix(path, "/session/")
+	if rest == path || rest == "" {
+		return "", "", fmt.Errorf("invalid session path %q", path)
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	id, err := session.ParseID(parts[0])
+	if err != nil {
+		return "", "", err
+	}
+	if len(parts) == 1 {
+		return id, "", nil
+	}
+	return id, parts[1], nil
 }
 
 func handleEvent(version string) http.HandlerFunc {

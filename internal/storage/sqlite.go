@@ -176,9 +176,14 @@ func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 		`PRAGMA foreign_keys = ON`,
 		projectSchema,
 		sessionSchema,
+		messageSchema,
+		partSchema,
 		`CREATE INDEX IF NOT EXISTS session_project_idx ON session(project_id)`,
 		`CREATE INDEX IF NOT EXISTS session_workspace_idx ON session(workspace_id)`,
 		`CREATE INDEX IF NOT EXISTS session_parent_idx ON session(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx ON message(session_id, time_created, id)`,
+		`CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part(message_id, id)`,
+		`CREATE INDEX IF NOT EXISTS part_session_idx ON part(session_id)`,
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("configure sqlite: %w", err)
@@ -195,6 +200,291 @@ id, worktree, name, time_created, time_updated, sandboxes
 		return fmt.Errorf("ensure project: %w", err)
 	}
 	return nil
+}
+
+// Messages returns messages in creation order.
+func (store *SQLiteSessionStore) Messages(ctx context.Context, sessionID session.ID, limit int) ([]session.WithParts, error) {
+	if _, err := store.Get(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	query := `SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC`
+	args := []any{sessionID}
+	if limit > 0 {
+		query = `SELECT id, session_id, time_created, time_updated, data FROM (
+SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT ?
+) ORDER BY time_created ASC, id ASC`
+		args = append(args, limit)
+	}
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	return store.scanMessages(ctx, rows)
+}
+
+// GetMessage returns a message with its parts.
+func (store *SQLiteSessionStore) GetMessage(ctx context.Context, sessionID session.ID, messageID session.MessageID) (session.WithParts, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? AND id = ?`, sessionID, messageID)
+	if err != nil {
+		return session.WithParts{}, fmt.Errorf("get message: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	items, err := store.scanMessages(ctx, rows)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	if len(items) == 0 {
+		return session.WithParts{}, session.ErrNotFound
+	}
+	return items[0], nil
+}
+
+// CreatePrompt creates a user message and prompt parts.
+func (store *SQLiteSessionStore) CreatePrompt(ctx context.Context, sessionID session.ID, input session.PromptInput) (session.WithParts, error) {
+	if _, err := store.Get(ctx, sessionID); err != nil {
+		return session.WithParts{}, err
+	}
+	message, err := createPromptMessage(sessionID, input)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return session.WithParts{}, fmt.Errorf("begin prompt transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := insertMessage(ctx, tx, message); err != nil {
+		return session.WithParts{}, err
+	}
+	for _, part := range message.Parts {
+		if err := insertPart(ctx, tx, part); err != nil {
+			return session.WithParts{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session SET time_updated = ? WHERE id = ?`, session.NowMillis(), sessionID); err != nil {
+		return session.WithParts{}, fmt.Errorf("touch session after prompt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return session.WithParts{}, fmt.Errorf("commit prompt: %w", err)
+	}
+	return message, nil
+}
+
+// RemoveMessage deletes one message and its parts.
+func (store *SQLiteSessionStore) RemoveMessage(ctx context.Context, sessionID session.ID, messageID session.MessageID) error {
+	result, err := store.db.ExecContext(ctx, `DELETE FROM message WHERE session_id = ? AND id = ?`, sessionID, messageID)
+	if err != nil {
+		return fmt.Errorf("remove message: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("remove message rows affected: %w", err)
+	}
+	if count == 0 {
+		return session.ErrNotFound
+	}
+	return nil
+}
+
+// RemovePart deletes one part from a message.
+func (store *SQLiteSessionStore) RemovePart(ctx context.Context, sessionID session.ID, messageID session.MessageID, partID session.PartID) error {
+	result, err := store.db.ExecContext(ctx, `DELETE FROM part WHERE session_id = ? AND message_id = ? AND id = ?`, sessionID, messageID, partID)
+	if err != nil {
+		return fmt.Errorf("remove part: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("remove part rows affected: %w", err)
+	}
+	if count == 0 {
+		return session.ErrNotFound
+	}
+	return nil
+}
+
+// UpdatePart replaces one stored part.
+func (store *SQLiteSessionStore) UpdatePart(ctx context.Context, part session.Part) (session.Part, error) {
+	data, err := partDataJSON(part)
+	if err != nil {
+		return session.Part{}, err
+	}
+	result, err := store.db.ExecContext(ctx, `UPDATE part SET data = ?, time_updated = ? WHERE session_id = ? AND message_id = ? AND id = ?`,
+		data,
+		session.NowMillis(),
+		part.SessionID,
+		part.MessageID,
+		part.ID,
+	)
+	if err != nil {
+		return session.Part{}, fmt.Errorf("update part: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return session.Part{}, fmt.Errorf("update part rows affected: %w", err)
+	}
+	if count == 0 {
+		return session.Part{}, session.ErrNotFound
+	}
+	return part, nil
+}
+
+type messageRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func (store *SQLiteSessionStore) scanMessages(ctx context.Context, rows messageRows) ([]session.WithParts, error) {
+	result := []session.WithParts{}
+	for rows.Next() {
+		var id string
+		var sessionID string
+		var created int64
+		var updated int64
+		var data string
+		if err := rows.Scan(&id, &sessionID, &created, &updated, &data); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		info, err := decodeMessageInfo(id, sessionID, created, data)
+		if err != nil {
+			return nil, err
+		}
+		parts, err := store.parts(ctx, session.MessageID(id))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, session.WithParts{Info: info, Parts: parts})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages: %w", err)
+	}
+	return result, nil
+}
+
+func (store *SQLiteSessionStore) parts(ctx context.Context, messageID session.MessageID) ([]session.Part, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT id, session_id, message_id, data FROM part WHERE message_id = ? ORDER BY id ASC`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list parts: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	result := []session.Part{}
+	for rows.Next() {
+		var id string
+		var sessionID string
+		var storedMessageID string
+		var data string
+		if err := rows.Scan(&id, &sessionID, &storedMessageID, &data); err != nil {
+			return nil, fmt.Errorf("scan part: %w", err)
+		}
+		part, err := decodePart(id, sessionID, storedMessageID, data)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, part)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate parts: %w", err)
+	}
+	return result, nil
+}
+
+func insertMessage(ctx context.Context, tx *sql.Tx, message session.WithParts) error {
+	data, err := messageInfoJSON(message.Info)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		message.Info.ID,
+		message.Info.SessionID,
+		message.Info.Time.Created,
+		message.Info.Time.Created,
+		data,
+	)
+	if err != nil {
+		return fmt.Errorf("insert message: %w", err)
+	}
+	return nil
+}
+
+func insertPart(ctx context.Context, tx *sql.Tx, part session.Part) error {
+	data, err := partDataJSON(part)
+	if err != nil {
+		return err
+	}
+	now := session.NowMillis()
+	_, err = tx.ExecContext(ctx, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		part.ID,
+		part.MessageID,
+		part.SessionID,
+		now,
+		now,
+		data,
+	)
+	if err != nil {
+		return fmt.Errorf("insert part: %w", err)
+	}
+	return nil
+}
+
+func messageInfoJSON(info session.MessageInfo) (string, error) {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("encode message info: %w", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", fmt.Errorf("decode message info: %w", err)
+	}
+	delete(raw, "id")
+	delete(raw, "sessionID")
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return "", fmt.Errorf("encode message data: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func decodeMessageInfo(id string, sessionID string, _ int64, data string) (session.MessageInfo, error) {
+	var info session.MessageInfo
+	if err := json.Unmarshal([]byte(data), &info); err != nil {
+		return session.MessageInfo{}, fmt.Errorf("decode message data: %w", err)
+	}
+	info.ID = session.MessageID(id)
+	info.SessionID = session.ID(sessionID)
+	return info, nil
+}
+
+func partDataJSON(part session.Part) (string, error) {
+	data, err := json.Marshal(part.Data)
+	if err != nil {
+		return "", fmt.Errorf("encode part data: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodePart(id string, sessionID string, messageID string, data string) (session.Part, error) {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+		return session.Part{}, fmt.Errorf("decode part data: %w", err)
+	}
+	partType, _ := raw["type"].(string)
+	delete(raw, "type")
+	return session.Part{
+		ID:        session.PartID(id),
+		SessionID: session.ID(sessionID),
+		MessageID: session.MessageID(messageID),
+		Type:      partType,
+		Data:      raw,
+	}, nil
 }
 
 type sessionScanner interface {
@@ -298,4 +588,23 @@ time_updated integer NOT NULL,
 time_compacting integer,
 time_archived integer,
 CONSTRAINT fk_session_project_id_project_id_fk FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+)`
+
+const messageSchema = `CREATE TABLE IF NOT EXISTS message (
+id text PRIMARY KEY,
+session_id text NOT NULL,
+time_created integer NOT NULL,
+time_updated integer NOT NULL,
+data text NOT NULL,
+CONSTRAINT fk_message_session_id_session_id_fk FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+)`
+
+const partSchema = `CREATE TABLE IF NOT EXISTS part (
+id text PRIMARY KEY,
+message_id text NOT NULL,
+session_id text NOT NULL,
+time_created integer NOT NULL,
+time_updated integer NOT NULL,
+data text NOT NULL,
+CONSTRAINT fk_part_message_id_message_id_fk FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE
 )`
