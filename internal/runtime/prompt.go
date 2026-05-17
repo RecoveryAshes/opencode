@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -24,6 +25,8 @@ type PromptRuntime struct {
 	Client   ChatClient
 	CWD      string
 	Root     string
+	// MaxToolIterations caps provider/tool feedback loops for one assistant turn.
+	MaxToolIterations int
 }
 
 // NewPromptRuntime creates a prompt runtime backed by migrated provider clients.
@@ -55,15 +58,10 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 
 	model := modelRef(userMessage)
-	request, err := llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
+	response, tools, usage, err := runtime.runProviderLoop(ctx, client, messages, model)
 	if err != nil {
 		return session.WithParts{}, err
 	}
-	response, err := client.Chat(ctx, request)
-	if err != nil {
-		return session.WithParts{}, err
-	}
-	tools := runtime.executeToolCalls(ctx, response.ToolCalls)
 
 	return runtime.Messages.CreateAssistant(ctx, sessionID, session.AssistantInput{
 		ParentID: userMessage.Info.ID,
@@ -75,19 +73,50 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 		},
 		Text:   response.Text,
 		Tools:  tools,
-		Finish: defaultString(response.FinishReason, finishReasonForTools(tools)),
+		Finish: finishReason(response.FinishReason, tools),
 		Tokens: session.TokenUsage{
-			Total:     optionalPositive(response.Usage.TotalTokens),
-			Input:     response.Usage.InputTokens,
-			Output:    response.Usage.OutputTokens,
-			Reasoning: response.Usage.ReasoningTokens,
+			Total:     optionalPositive(usage.TotalTokens),
+			Input:     usage.InputTokens,
+			Output:    usage.OutputTokens,
+			Reasoning: usage.ReasoningTokens,
 			Cache: session.CacheUsage{
-				Read:  response.Usage.CacheReadTokens,
-				Write: response.Usage.CacheWriteTokens,
+				Read:  usage.CacheReadTokens,
+				Write: usage.CacheWriteTokens,
 			},
 		},
 		Cost: 0,
 	})
+}
+
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatClient, messages []llm.Message, model session.ModelRef) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+	maxIterations := runtime.MaxToolIterations
+	if maxIterations <= 0 {
+		maxIterations = 4
+	}
+	tools := []session.ToolExecution{}
+	usage := llm.Usage{}
+	var response llm.ChatResponse
+	for iteration := 0; ; iteration++ {
+		request, err := llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
+		if err != nil {
+			return llm.ChatResponse{}, nil, llm.Usage{}, err
+		}
+		next, err := client.Chat(ctx, request)
+		if err != nil {
+			return llm.ChatResponse{}, nil, llm.Usage{}, err
+		}
+		response = next
+		usage = mergeUsage(usage, next.Usage)
+		if len(next.ToolCalls) == 0 {
+			return response, tools, usage, nil
+		}
+		executed := runtime.executeToolCalls(ctx, next.ToolCalls)
+		tools = append(tools, executed...)
+		if iteration+1 >= maxIterations {
+			return response, tools, usage, nil
+		}
+		messages = append(messages, toolResultMessage(next, executed))
+	}
 }
 
 func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []session.ToolExecution {
@@ -123,11 +152,67 @@ func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, calls []llm.
 	return result
 }
 
-func finishReasonForTools(tools []session.ToolExecution) string {
-	if len(tools) > 0 {
-		return "tool-calls"
+func finishReason(reason string, tools []session.ToolExecution) string {
+	if reason != "" && reason != "tool-calls" {
+		return reason
 	}
-	return "stop"
+	if len(tools) > 0 {
+		if reason == "tool-calls" {
+			return reason
+		}
+		return "stop"
+	}
+	return defaultString(reason, "stop")
+}
+
+func toolResultMessage(response llm.ChatResponse, tools []session.ToolExecution) llm.Message {
+	var output strings.Builder
+	if strings.TrimSpace(response.Text) != "" {
+		output.WriteString("The assistant said before requesting tools:\n")
+		output.WriteString(response.Text)
+		output.WriteString("\n\n")
+	}
+	output.WriteString("Local tool results are available below. Continue the answer using these results.\n")
+	for _, tool := range tools {
+		output.WriteString("\n<tool_call")
+		if tool.CallID != "" {
+			output.WriteString(` id="`)
+			output.WriteString(escapeAttribute(tool.CallID))
+			output.WriteString(`"`)
+		}
+		output.WriteString(` name="`)
+		output.WriteString(escapeAttribute(tool.Tool))
+		output.WriteString(`">`)
+		output.WriteString("\n<input>")
+		output.WriteString(mustJSON(tool.Input))
+		output.WriteString("</input>\n")
+		if tool.Error != "" {
+			output.WriteString("<error>")
+			output.WriteString(tool.Error)
+			output.WriteString("</error>\n")
+		} else {
+			output.WriteString("<output>")
+			output.WriteString(tool.Output)
+			output.WriteString("</output>\n")
+		}
+		output.WriteString("</tool_call>\n")
+	}
+	return llm.Message{Role: "user", Content: output.String()}
+}
+
+func mergeUsage(left llm.Usage, right llm.Usage) llm.Usage {
+	result := llm.Usage{
+		InputTokens:      left.InputTokens + right.InputTokens,
+		OutputTokens:     left.OutputTokens + right.OutputTokens,
+		ReasoningTokens:  left.ReasoningTokens + right.ReasoningTokens,
+		CacheReadTokens:  left.CacheReadTokens + right.CacheReadTokens,
+		CacheWriteTokens: left.CacheWriteTokens + right.CacheWriteTokens,
+		TotalTokens:      left.TotalTokens + right.TotalTokens,
+	}
+	if result.TotalTokens == 0 {
+		result.TotalTokens = result.InputTokens + result.OutputTokens + result.ReasoningTokens
+	}
+	return result
 }
 
 func lowerTranscript(messages []session.WithParts) []llm.Message {
@@ -181,6 +266,19 @@ func optionalPositive(value int) *int {
 		return nil
 	}
 	return &value
+}
+
+func mustJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func escapeAttribute(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;")
+	return replacer.Replace(value)
 }
 
 func mustGetwd() string {

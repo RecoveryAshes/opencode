@@ -13,12 +13,22 @@ import (
 )
 
 type fakeChatClient struct {
-	request  llm.ChatRequest
-	response llm.ChatResponse
+	request   llm.ChatRequest
+	requests  []llm.ChatRequest
+	response  llm.ChatResponse
+	responses []llm.ChatResponse
 }
 
 func (client *fakeChatClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	client.request = request
+	client.requests = append(client.requests, request)
+	if len(client.responses) > 0 {
+		index := len(client.requests) - 1
+		if index >= len(client.responses) {
+			index = len(client.responses) - 1
+		}
+		return client.responses[index], nil
+	}
 	if client.response.Text != "" || client.response.FinishReason != "" || len(client.response.ToolCalls) > 0 || client.response.Usage.TotalTokens > 0 {
 		return client.response, nil
 	}
@@ -349,15 +359,22 @@ func TestPromptRuntimeExecutesToolCalls(t *testing.T) {
 		t.Fatalf("CreatePrompt() error = %v", err)
 	}
 	client := &fakeChatClient{
-		response: llm.ChatResponse{
-			FinishReason: "tool-calls",
-			ToolCalls: []llm.ToolCall{{
-				ID:        "call_1",
-				Name:      "read",
-				Arguments: map[string]any{"filePath": "hello.txt"},
-				Raw:       `{"filePath":"hello.txt"}`,
-			}},
-			Usage: llm.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		responses: []llm.ChatResponse{
+			{
+				FinishReason: "tool-calls",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_1",
+					Name:      "read",
+					Arguments: map[string]any{"filePath": "hello.txt"},
+					Raw:       `{"filePath":"hello.txt"}`,
+				}},
+				Usage: llm.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+			},
+			{
+				Text:         "hello tool was read",
+				FinishReason: "stop",
+				Usage:        llm.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+			},
 		},
 	}
 	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
@@ -366,13 +383,16 @@ func TestPromptRuntimeExecutesToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reply() error = %v", err)
 	}
-	if assistant.Info.Finish != "tool-calls" {
-		t.Fatalf("assistant finish = %q, want tool-calls", assistant.Info.Finish)
+	if assistant.Info.Finish != "stop" {
+		t.Fatalf("assistant finish = %q, want stop", assistant.Info.Finish)
 	}
-	if len(assistant.Parts) != 2 || assistant.Parts[0].Type != "tool" {
-		t.Fatalf("assistant parts = %#v, want tool and step-finish", assistant.Parts)
+	if len(assistant.Parts) != 3 || assistant.Parts[0].Type != "text" || assistant.Parts[1].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want text, tool, and step-finish", assistant.Parts)
 	}
-	tool := assistant.Parts[0]
+	if assistant.Parts[0].Data["text"] != "hello tool was read" {
+		t.Fatalf("assistant text = %#v, want final provider answer", assistant.Parts[0].Data)
+	}
+	tool := assistant.Parts[1]
 	if tool.Data["callID"] != "call_1" || tool.Data["tool"] != "read" {
 		t.Fatalf("tool part = %#v, want call_1/read", tool.Data)
 	}
@@ -382,6 +402,15 @@ func TestPromptRuntimeExecutesToolCalls(t *testing.T) {
 	}
 	if state["status"] != "completed" || !strings.Contains(stringValue(state["output"]), "hello tool") {
 		t.Fatalf("state = %#v, want completed read output", state)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("provider calls = %d, want initial tool call and final answer", len(client.requests))
+	}
+	if len(client.requests[1].Messages) != 2 || !strings.Contains(client.requests[1].Messages[1].Content, "hello tool") {
+		t.Fatalf("second provider request = %#v, want injected tool result", client.requests[1])
+	}
+	if assistant.Info.Tokens == nil || assistant.Info.Tokens.Input != 3 || assistant.Info.Tokens.Output != 4 || assistant.Info.Tokens.Total == nil || *assistant.Info.Tokens.Total != 7 {
+		t.Fatalf("tokens = %#v, want merged tool-loop usage", assistant.Info.Tokens)
 	}
 }
 
@@ -399,13 +428,19 @@ func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
 		t.Fatalf("CreatePrompt() error = %v", err)
 	}
 	client := &fakeChatClient{
-		response: llm.ChatResponse{
-			FinishReason: "tool-calls",
-			ToolCalls: []llm.ToolCall{{
-				ID:        "call_missing",
-				Name:      "missing",
-				Arguments: map[string]any{},
-			}},
+		responses: []llm.ChatResponse{
+			{
+				FinishReason: "tool-calls",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_missing",
+					Name:      "missing",
+					Arguments: map[string]any{},
+				}},
+			},
+			{
+				Text:         "missing tool could not run",
+				FinishReason: "stop",
+			},
 		},
 	}
 	runtime := &PromptRuntime{Messages: store, Client: client}
@@ -414,15 +449,18 @@ func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reply() error = %v", err)
 	}
-	if len(assistant.Parts) != 2 || assistant.Parts[0].Type != "tool" {
-		t.Fatalf("assistant parts = %#v, want tool and step-finish", assistant.Parts)
+	if len(assistant.Parts) != 3 || assistant.Parts[1].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want text, tool, and step-finish", assistant.Parts)
 	}
-	state, ok := assistant.Parts[0].Data["state"].(map[string]any)
+	state, ok := assistant.Parts[1].Data["state"].(map[string]any)
 	if !ok {
-		t.Fatalf("state = %#v, want object", assistant.Parts[0].Data["state"])
+		t.Fatalf("state = %#v, want object", assistant.Parts[1].Data["state"])
 	}
 	if state["status"] != "error" || !strings.Contains(stringValue(state["error"]), "not implemented") {
 		t.Fatalf("state = %#v, want missing tool error", state)
+	}
+	if len(client.requests) != 2 || !strings.Contains(client.requests[1].Messages[1].Content, "<error>") {
+		t.Fatalf("second provider request = %#v, want injected tool error", client.requests)
 	}
 }
 
