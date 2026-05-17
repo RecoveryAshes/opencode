@@ -635,6 +635,138 @@ func TestPromptRuntimeAppliesAzureProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeAppliesAdditionalProviderTransformOptions(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		modelID    string
+		apiNPM     string
+		rawModel   string
+		env        map[string]string
+		check      func(t *testing.T, request llm.ChatRequest, sessionID session.ID)
+	}{
+		{
+			name:       "openrouter includes usage and gemini 3 reasoning",
+			providerID: "openrouter",
+			modelID:    "google/gemini-3-pro",
+			apiNPM:     "@openrouter/ai-sdk-provider",
+			env:        map[string]string{"OPENROUTER_BASE_URL": "https://local.openrouter.test/api/v1"},
+			check: func(t *testing.T, request llm.ChatRequest, sessionID session.ID) {
+				t.Helper()
+				usage, ok := request.Options["usage"].(map[string]any)
+				reasoning, rok := request.Options["reasoning"].(map[string]any)
+				if !ok || usage["include"] != true || !rok || reasoning["effort"] != "high" || request.Options["prompt_cache_key"] != string(sessionID) {
+					t.Fatalf("options = %#v, want OpenRouter usage, reasoning, and cache key", request.Options)
+				}
+			},
+		},
+		{
+			name:       "google reasoning enables thinking config",
+			providerID: "google",
+			modelID:    "gemini-3-pro",
+			apiNPM:     "@ai-sdk/google",
+			rawModel:   `"reasoning": true,`,
+			env:        map[string]string{"GOOGLE_GENERATIVE_AI_BASE_URL": "https://local.google.test/v1beta"},
+			check: func(t *testing.T, request llm.ChatRequest, _ session.ID) {
+				t.Helper()
+				thinking, ok := request.Options["thinkingConfig"].(map[string]any)
+				if !ok || thinking["includeThoughts"] != true || thinking["thinkingLevel"] != "high" {
+					t.Fatalf("options = %#v, want Gemini thinking config", request.Options)
+				}
+			},
+		},
+		{
+			name:       "anthropic kimi enables thinking and disables tool streaming",
+			providerID: "anthropic",
+			modelID:    "kimi-k2.5",
+			apiNPM:     "@ai-sdk/anthropic",
+			rawModel:   `"limit": {"output": 12000},`,
+			env:        map[string]string{"ANTHROPIC_BASE_URL": "https://local.anthropic.test/v1"},
+			check: func(t *testing.T, request llm.ChatRequest, _ session.ID) {
+				t.Helper()
+				thinking, ok := request.Options["thinking"].(map[string]any)
+				if request.Options["toolStreaming"] != false || !ok || thinking["type"] != "enabled" || thinking["budgetTokens"] != 5999 {
+					t.Fatalf("options = %#v, want Anthropic Kimi thinking defaults", request.Options)
+				}
+			},
+		},
+		{
+			name:       "gateway enables caching",
+			providerID: "openai-compatible",
+			modelID:    "openai/gpt-5.2",
+			apiNPM:     "@ai-sdk/gateway",
+			env:        map[string]string{"OPENCODE_OPENAI_COMPATIBLE_BASE_URL": "https://local.gateway.test/v1"},
+			check: func(t *testing.T, request llm.ChatRequest, _ session.ID) {
+				t.Helper()
+				gateway, ok := request.Options["gateway"].(map[string]any)
+				if !ok || gateway["caching"] != "auto" {
+					t.Fatalf("options = %#v, want gateway caching auto", request.Options)
+				}
+			},
+		},
+		{
+			name:       "azure gpt 5.5 only sets reasoning summary",
+			providerID: "azure",
+			modelID:    "gpt-5.5",
+			apiNPM:     "@ai-sdk/azure",
+			env:        map[string]string{"AZURE_OPENAI_RESOURCE_NAME": "opencode-test"},
+			check: func(t *testing.T, request llm.ChatRequest, _ session.ID) {
+				t.Helper()
+				if request.Options["store"] != false ||
+					request.Options["reasoningSummary"] != "auto" ||
+					request.Options["reasoningEffort"] != nil ||
+					request.Options["textVerbosity"] != nil {
+					t.Fatalf("options = %#v, want Azure gpt-5.5 summary-only reasoning default", request.Options)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := storage.NewMemorySessionStore()
+			root := t.TempDir()
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			config := `{
+				"provider": {
+					"` + test.providerID + `": {
+						"models": {
+							"` + test.modelID + `": {
+								` + test.rawModel + `
+								"provider": {"npm": "` + test.apiNPM + `"}
+							}
+						}
+					}
+				}
+			}`
+			if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(config), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+				Model: &session.ModelRef{ProviderID: test.providerID, ModelID: test.modelID},
+				Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("CreatePrompt() error = %v", err)
+			}
+			client := &fakeChatClient{}
+			runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+			if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+				t.Fatalf("Reply() error = %v", err)
+			}
+			test.check(t, client.request, info.ID)
+		})
+	}
+}
+
 func TestPromptRuntimeHonorsDisabledTools(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

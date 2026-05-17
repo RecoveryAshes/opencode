@@ -253,7 +253,7 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	if apiURL != "" && request.BaseURL == "" {
 		request.BaseURL = apiURL
 	}
-	request.Options = mergeAnyOptions(request.Options, defaultProviderBodyOptions(*request, rawProvider, rawModel, sessionID))
+	request.Options = mergeAnyOptions(request.Options, defaultProviderBodyOptions(*request, rawProvider, rawModel, model, sessionID))
 	applyDefaultSampling(request)
 	if rawModelOptions, ok := rawModel["options"].(map[string]any); ok {
 		applyChatOptions(request, rawModelOptions)
@@ -429,13 +429,17 @@ func configuredDefaultModel(info config.Info) *session.ModelRef {
 	}
 }
 
-func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, sessionID session.ID) map[string]any {
+func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, model session.ModelRef, sessionID session.ID) map[string]any {
 	result := map[string]any{}
 	apiNPM := stringFromConfig(rawProvider["npm"])
 	if modelProvider, ok := rawModel["provider"].(map[string]any); ok {
 		apiNPM = defaultString(stringFromConfig(modelProvider["npm"]), apiNPM)
 	}
 	modelID := strings.ToLower(request.Model)
+	publicModelID := strings.ToLower(defaultString(model.ModelID, request.Model))
+	if apiNPM == "@ai-sdk/google-vertex/anthropic" || (apiNPM == "@ai-sdk/anthropic" && !strings.Contains(modelID, "claude")) {
+		result["toolStreaming"] = false
+	}
 	switch {
 	case request.ProviderID == "openai" ||
 		request.ProviderID == "github-copilot" ||
@@ -448,6 +452,16 @@ func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]
 	}
 	if request.ProviderID == "openai" || boolFromConfig(rawProviderOption(rawProvider, "setCacheKey"), false) {
 		result["promptCacheKey"] = string(sessionID)
+	}
+	if apiNPM == "@openrouter/ai-sdk-provider" || apiNPM == "@llmgateway/ai-sdk-provider" {
+		result["usage"] = map[string]any{"include": true}
+		if strings.Contains(modelID, "gemini-3") {
+			result["reasoning"] = map[string]any{"effort": "high"}
+		}
+	}
+	if apiNPM == "@ai-sdk/azure" && strings.Contains(publicModelID, "gpt-5.5") {
+		result["reasoningSummary"] = "auto"
+		return result
 	}
 	if strings.Contains(modelID, "gpt-5") && !strings.Contains(modelID, "gpt-5-chat") {
 		if !strings.Contains(modelID, "gpt-5-pro") {
@@ -470,6 +484,9 @@ func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]
 	if request.ProviderID == "baseten" {
 		result["chat_template_args"] = map[string]any{"enable_thinking": true}
 	}
+	if request.ProviderID == "opencode" && (modelID == "kimi-k2-thinking" || modelID == "glm-4.6") {
+		result["chat_template_args"] = map[string]any{"enable_thinking": true}
+	}
 	if (strings.Contains(request.ProviderID, "zai") || strings.Contains(request.ProviderID, "zhipuai")) &&
 		request.Protocol == "openai-compatible" {
 		result["thinking"] = map[string]any{
@@ -477,11 +494,28 @@ func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]
 			"clear_thinking": false,
 		}
 	}
+	if (apiNPM == "@ai-sdk/google" || apiNPM == "@ai-sdk/google-vertex") && boolFromConfig(rawModel["reasoning"], false) {
+		thinking := map[string]any{"includeThoughts": true}
+		if strings.Contains(modelID, "gemini-3") {
+			thinking["thinkingLevel"] = "high"
+		}
+		result["thinkingConfig"] = thinking
+	}
+	if (apiNPM == "@ai-sdk/anthropic" || apiNPM == "@ai-sdk/google-vertex/anthropic") &&
+		(strings.Contains(modelID, "k2p") || strings.Contains(modelID, "kimi-k2.") || strings.Contains(modelID, "kimi-k2p")) {
+		result["thinking"] = map[string]any{
+			"type":         "enabled",
+			"budgetTokens": anthropicDefaultThinkingBudget(rawModel),
+		}
+	}
 	if (request.ProviderID == "alibaba" || request.ProviderID == "alibaba-cn") &&
 		boolFromConfig(rawModel["reasoning"], false) &&
 		request.Protocol == "openai-compatible" &&
 		!strings.Contains(modelID, "kimi-k2-thinking") {
 		result["enable_thinking"] = true
+	}
+	if apiNPM == "@ai-sdk/gateway" {
+		result["gateway"] = map[string]any{"caching": "auto"}
 	}
 	return result
 }
@@ -491,6 +525,23 @@ func rawProviderOption(rawProvider map[string]any, key string) any {
 		return rawOptions[key]
 	}
 	return nil
+}
+
+func anthropicDefaultThinkingBudget(rawModel map[string]any) int {
+	output := 32000
+	if rawLimit, ok := rawModel["limit"].(map[string]any); ok {
+		if configured, ok := intFromConfig(rawLimit["output"]); ok && configured > 0 {
+			output = configured
+		}
+	}
+	return minRuntimeInt(16000, output/2-1)
+}
+
+func minRuntimeInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func applyChatOptions(request *llm.ChatRequest, options map[string]any) {
