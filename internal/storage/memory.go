@@ -368,6 +368,46 @@ func (store *MemorySessionStore) Messages(_ context.Context, sessionID session.I
 	return items, nil
 }
 
+// MessagePage returns messages using the legacy before cursor contract.
+func (store *MemorySessionStore) MessagePage(_ context.Context, sessionID session.ID, filter session.MessageListFilter) (session.MessagePage, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[sessionID]; !ok {
+		return session.MessagePage{}, session.ErrNotFound
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = len(store.messages[sessionID])
+	}
+	items := append([]session.WithParts(nil), store.messages[sessionID]...)
+	slices.Reverse(items)
+	if filter.Before != nil {
+		beforeIndex := -1
+		for index, item := range items {
+			if item.Info.ID == filter.Before.ID {
+				beforeIndex = index
+				break
+			}
+		}
+		if beforeIndex >= 0 {
+			items = items[beforeIndex+1:]
+		}
+	}
+	more := len(items) > limit
+	if more {
+		items = items[:limit]
+	}
+	result := append([]session.WithParts(nil), items...)
+	slices.Reverse(result)
+	var cursor *session.MessageCursor
+	if more && len(items) > 0 {
+		last := items[len(items)-1]
+		cursor = &session.MessageCursor{ID: last.Info.ID, Time: last.Info.Time.Created}
+	}
+	return session.MessagePage{Items: result, More: more, Cursor: cursor}, nil
+}
+
 // GetMessage returns a message with its parts.
 func (store *MemorySessionStore) GetMessage(_ context.Context, sessionID session.ID, messageID session.MessageID) (session.WithParts, error) {
 	store.mu.RLock()
@@ -711,14 +751,23 @@ func matchesSessionFilter(info session.Info, filter session.ListFilter) bool {
 	if filter.WorkspaceID != "" && info.WorkspaceID != filter.WorkspaceID {
 		return false
 	}
-	if filter.Directory != "" && info.Directory != filter.Directory {
+	if filter.Roots && info.ParentID != nil {
+		return false
+	}
+	if filter.Start > 0 && info.Time.Updated < filter.Start {
 		return false
 	}
 	if filter.Path != nil {
 		if *filter.Path == "" {
 			return info.Path == ""
 		}
-		return info.Path == *filter.Path || strings.HasPrefix(info.Path, *filter.Path+"/")
+		if info.Path == *filter.Path || strings.HasPrefix(info.Path, *filter.Path+"/") {
+			return true
+		}
+		return info.Path == "" && filter.Directory != "" && info.Directory == filter.Directory
+	}
+	if filter.Scope != "project" && filter.Directory != "" && info.Directory != filter.Directory {
+		return false
 	}
 	return true
 }

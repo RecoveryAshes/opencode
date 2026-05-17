@@ -156,6 +156,56 @@ func TestMemorySessionStoreTodoStatusAndDiff(t *testing.T) {
 	}
 }
 
+func TestMemorySessionStoreListRootsStartAndMessagePage(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemorySessionStore()
+
+	root, err := store.Create(ctx, session.CreateInput{Title: "root"})
+	if err != nil {
+		t.Fatalf("Create(root) error = %v", err)
+	}
+	child, err := store.Fork(ctx, root.ID, nil)
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+
+	roots, err := store.List(ctx, session.ListFilter{Roots: true})
+	if err != nil {
+		t.Fatalf("List(roots) error = %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != root.ID {
+		t.Fatalf("roots = %#v, want only root", roots)
+	}
+	start := child.Time.Updated + 1
+	started, err := store.List(ctx, session.ListFilter{Start: start})
+	if err != nil {
+		t.Fatalf("List(start) error = %v", err)
+	}
+	if len(started) != 0 {
+		t.Fatalf("started = %#v, want empty after future start", started)
+	}
+
+	for _, text := range []string{"first", "second", "third"} {
+		if _, err := store.CreatePrompt(ctx, root.ID, session.PromptInput{Parts: []session.Part{{Type: "text", Data: map[string]any{"text": text}}}}); err != nil {
+			t.Fatalf("CreatePrompt(%s) error = %v", text, err)
+		}
+	}
+	page, err := store.MessagePage(ctx, root.ID, session.MessageListFilter{Limit: 2})
+	if err != nil {
+		t.Fatalf("MessagePage() error = %v", err)
+	}
+	if !page.More || page.Cursor == nil || len(page.Items) != 2 || page.Items[0].Parts[0].Data["text"] != "second" || page.Items[1].Parts[0].Data["text"] != "third" {
+		t.Fatalf("page = %#v, want second/third plus cursor", page)
+	}
+	next, err := store.MessagePage(ctx, root.ID, session.MessageListFilter{Limit: 2, Before: page.Cursor})
+	if err != nil {
+		t.Fatalf("MessagePage(before) error = %v", err)
+	}
+	if next.More || len(next.Items) != 1 || next.Items[0].Parts[0].Data["text"] != "first" {
+		t.Fatalf("next page = %#v, want first", next)
+	}
+}
+
 func TestMemorySessionStoreMessages(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemorySessionStore()

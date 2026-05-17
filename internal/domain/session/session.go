@@ -265,6 +265,30 @@ type MessageRepository interface {
 	UpdatePart(context.Context, Part) (Part, error)
 }
 
+// MessageListFilter carries legacy HTTP message pagination fields.
+type MessageListFilter struct {
+	Limit  int
+	Before *MessageCursor
+}
+
+// MessageCursor points at one message for backwards pagination.
+type MessageCursor struct {
+	ID   MessageID `json:"id"`
+	Time int64     `json:"time"`
+}
+
+// MessagePage contains one legacy paginated message response.
+type MessagePage struct {
+	Items  []WithParts
+	More   bool
+	Cursor *MessageCursor
+}
+
+// MessagePager is implemented by stores that support legacy cursor pagination.
+type MessagePager interface {
+	MessagePage(context.Context, ID, MessageListFilter) (MessagePage, error)
+}
+
 // TodoRepository stores the per-session todo list used by the TUI and tools.
 type TodoRepository interface {
 	SetTodos(context.Context, ID, []TodoInfo) error
@@ -328,6 +352,9 @@ type ListFilter struct {
 	WorkspaceID string
 	Directory   string
 	Path        *string
+	Roots       bool
+	Start       int64
+	Scope       string
 }
 
 // Repository is the storage boundary for migrated session routes.

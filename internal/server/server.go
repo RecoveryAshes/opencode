@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -611,6 +612,9 @@ func sessions(repo session.Repository, events *eventBus) http.HandlerFunc {
 				WorkspaceID: workspaceIDFromRequest(r),
 				Directory:   r.URL.Query().Get("directory"),
 				Path:        optionalQueryString(r, "path"),
+				Roots:       parseBoolQuery(r.URL.Query().Get("roots")),
+				Start:       parseInt64Query(r.URL.Query().Get("start")),
+				Scope:       r.URL.Query().Get("scope"),
 			})
 			return result, http.StatusOK, err
 		case http.MethodPost:
@@ -825,12 +829,7 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 	if len(parts) == 1 && parts[0] == "message" {
 		switch r.Method {
 		case http.MethodGet:
-			limit, err := parseLimit(r.URL.Query().Get("limit"))
-			if err != nil {
-				return nil, http.StatusBadRequest, err
-			}
-			result, err := messages.Messages(r.Context(), sessionID, limit)
-			return result, statusFromError(err), err
+			return sessionMessages(r, sessionID, messages)
 		case http.MethodPost:
 			var input session.PromptInput
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -910,6 +909,36 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 	return nil, http.StatusNotFound, fmt.Errorf("unknown session route /session/%s/%s", sessionID, path)
 }
 
+func sessionMessages(r *http.Request, sessionID session.ID, messages session.MessageRepository) (any, int, error) {
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	before, err := decodeMessageCursor(r.URL.Query().Get("before"))
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	if before != nil && limit == 0 {
+		return nil, http.StatusBadRequest, fmt.Errorf("before requires limit")
+	}
+	pager, ok := messages.(session.MessagePager)
+	if before != nil || ok && limit > 0 {
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("message repository does not support pagination")
+		}
+		page, err := pager.MessagePage(r.Context(), sessionID, session.MessageListFilter{Limit: limit, Before: before})
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		if page.Cursor != nil {
+			setNextCursor(r, page.Cursor)
+		}
+		return page.Items, http.StatusOK, nil
+	}
+	result, err := messages.Messages(r.Context(), sessionID, limit)
+	return result, statusFromError(err), err
+}
+
 type commandPayload struct {
 	MessageID *session.MessageID `json:"messageID,omitempty"`
 	Agent     string             `json:"agent,omitempty"`
@@ -920,6 +949,29 @@ type commandPayload struct {
 	Directory string             `json:"directory,omitempty"`
 	NoReply   bool               `json:"noReply,omitempty"`
 	Parts     []session.Part     `json:"parts,omitempty"`
+}
+
+type responseHeaderKey struct{}
+
+func setNextCursor(r *http.Request, cursor *session.MessageCursor) {
+	if cursor == nil {
+		return
+	}
+	value := encodeMessageCursor(cursor)
+	headers, _ := r.Context().Value(responseHeaderKey{}).(http.Header)
+	if headers == nil {
+		return
+	}
+	headers.Set("Access-Control-Expose-Headers", "Link, X-Next-Cursor")
+	headers.Set("X-Next-Cursor", value)
+	link := *r.URL
+	query := link.Query()
+	query.Set("before", value)
+	if query.Get("limit") == "" {
+		query.Set("limit", "50")
+	}
+	link.RawQuery = query.Encode()
+	headers.Set("Link", fmt.Sprintf("<%s>; rel=\"next\"", link.String()))
 }
 
 func executeSessionCommand(ctx context.Context, sessionID session.ID, input commandPayload, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) (session.WithParts, error) {
@@ -1076,10 +1128,17 @@ func writeSSE(w io.Writer, item event) error {
 
 func handleJSON(fn func(*http.Request) (any, int, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		headers := http.Header{}
+		r = r.WithContext(context.WithValue(r.Context(), responseHeaderKey{}, headers))
 		body, status, err := fn(r)
 		if err != nil {
 			writeError(w, status, err)
 			return
+		}
+		for key, values := range headers {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -1123,6 +1182,52 @@ func parseLimit(value string) (int, error) {
 		return 0, fmt.Errorf("invalid limit %q", value)
 	}
 	return limit, nil
+}
+
+func parseBoolQuery(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseInt64Query(value string) int64 {
+	if strings.TrimSpace(value) == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
+func encodeMessageCursor(cursor *session.MessageCursor) string {
+	if cursor == nil {
+		return ""
+	}
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeMessageCursor(value string) (*session.MessageCursor, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid before cursor")
+	}
+	var cursor session.MessageCursor
+	if err := json.Unmarshal(data, &cursor); err != nil {
+		return nil, fmt.Errorf("invalid before cursor")
+	}
+	if cursor.ID == "" {
+		return nil, fmt.Errorf("invalid before cursor")
+	}
+	return &cursor, nil
 }
 
 func statusFromError(err error) int {

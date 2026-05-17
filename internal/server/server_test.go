@@ -146,6 +146,74 @@ func TestSessionCreateListMetadataHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSessionListRootsAndMessagesBeforeHTTPAPI(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"root"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var root session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+		t.Fatalf("decode root: %v", err)
+	}
+	if _, err := store.Fork(context.Background(), root.ID, nil); err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+
+	resp, err = http.Get(server.URL + "/session?roots=true")
+	if err != nil {
+		t.Fatalf("GET /session roots error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var roots []session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&roots); err != nil {
+		t.Fatalf("decode roots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != root.ID {
+		t.Fatalf("roots = %#v, want root only", roots)
+	}
+
+	for _, text := range []string{"first", "second", "third"} {
+		if _, err := store.CreatePrompt(context.Background(), root.ID, session.PromptInput{Parts: []session.Part{{Type: "text", Data: map[string]any{"text": text}}}}); err != nil {
+			t.Fatalf("CreatePrompt(%s) error = %v", text, err)
+		}
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(root.ID) + "/message?limit=2")
+	if err != nil {
+		t.Fatalf("GET /session/id/message limit error = %v", err)
+	}
+	defer closeBody(t, resp)
+	cursor := resp.Header.Get("X-Next-Cursor")
+	if cursor == "" || !strings.Contains(resp.Header.Get("Link"), "before=") {
+		t.Fatalf("headers cursor=%q link=%q, want next cursor headers", cursor, resp.Header.Get("Link"))
+	}
+	var page []session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode page: %v", err)
+	}
+	if len(page) != 2 || page[0].Parts[0].Data["text"] != "second" || page[1].Parts[0].Data["text"] != "third" {
+		t.Fatalf("page = %#v, want second/third", page)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(root.ID) + "/message?limit=2&before=" + url.QueryEscape(cursor))
+	if err != nil {
+		t.Fatalf("GET /session/id/message before error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var next []session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&next); err != nil {
+		t.Fatalf("decode next: %v", err)
+	}
+	if len(next) != 1 || next[0].Parts[0].Data["text"] != "first" {
+		t.Fatalf("next = %#v, want first", next)
+	}
+}
+
 func TestSessionMessageHTTPAPI(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
 	defer server.Close()

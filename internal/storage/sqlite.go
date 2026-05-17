@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
@@ -59,17 +60,28 @@ FROM session`
 		conditions = append(conditions, "workspace_id = ?")
 		args = append(args, filter.WorkspaceID)
 	}
-	if filter.Directory != "" {
-		conditions = append(conditions, "directory = ?")
-		args = append(args, filter.Directory)
+	if filter.Roots {
+		conditions = append(conditions, "parent_id IS NULL")
+	}
+	if filter.Start > 0 {
+		conditions = append(conditions, "time_updated >= ?")
+		args = append(args, filter.Start)
 	}
 	if filter.Path != nil {
 		if *filter.Path == "" {
 			conditions = append(conditions, "(path IS NULL OR path = '')")
 		} else {
-			conditions = append(conditions, "(path = ? OR path LIKE ?)")
-			args = append(args, *filter.Path, *filter.Path+"/%")
+			if filter.Directory != "" {
+				conditions = append(conditions, "(path = ? OR path LIKE ? OR ((path IS NULL OR path = '') AND directory = ?))")
+				args = append(args, *filter.Path, *filter.Path+"/%", filter.Directory)
+			} else {
+				conditions = append(conditions, "(path = ? OR path LIKE ?)")
+				args = append(args, *filter.Path, *filter.Path+"/%")
+			}
 		}
+	} else if filter.Scope != "project" && filter.Directory != "" {
+		conditions = append(conditions, "directory = ?")
+		args = append(args, filter.Directory)
 	}
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
@@ -706,12 +718,12 @@ func (store *SQLiteSessionStore) Messages(ctx context.Context, sessionID session
 	if _, err := store.Get(ctx, sessionID); err != nil {
 		return nil, err
 	}
-	query := `SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC`
+	query := `SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created ASC, rowid ASC`
 	args := []any{sessionID}
 	if limit > 0 {
 		query = `SELECT id, session_id, time_created, time_updated, data FROM (
-SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT ?
-) ORDER BY time_created ASC, id ASC`
+SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created DESC, rowid DESC LIMIT ?
+) ORDER BY time_created ASC, rowid ASC`
 		args = append(args, limit)
 	}
 	rows, err := store.db.QueryContext(ctx, query, args...)
@@ -722,6 +734,52 @@ SELECT id, session_id, time_created, time_updated, data FROM message WHERE sessi
 		_ = rows.Close()
 	}()
 	return store.scanMessages(ctx, rows)
+}
+
+// MessagePage returns messages using the legacy before cursor contract.
+func (store *SQLiteSessionStore) MessagePage(ctx context.Context, sessionID session.ID, filter session.MessageListFilter) (session.MessagePage, error) {
+	if _, err := store.Get(ctx, sessionID); err != nil {
+		return session.MessagePage{}, err
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		items, err := store.Messages(ctx, sessionID, 0)
+		if err != nil {
+			return session.MessagePage{}, err
+		}
+		return session.MessagePage{Items: items}, nil
+	}
+
+	query := `SELECT id, session_id, time_created, time_updated, data FROM message WHERE session_id = ?`
+	args := []any{sessionID}
+	if filter.Before != nil {
+		query += ` AND (time_created < ? OR (time_created = ? AND rowid < (SELECT rowid FROM message WHERE id = ?)))`
+		args = append(args, filter.Before.Time, filter.Before.Time, filter.Before.ID)
+	}
+	query += ` ORDER BY time_created DESC, rowid DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return session.MessagePage{}, fmt.Errorf("page messages: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	items, err := store.scanMessages(ctx, rows)
+	if err != nil {
+		return session.MessagePage{}, err
+	}
+	more := len(items) > limit
+	if more {
+		items = items[:limit]
+	}
+	var cursor *session.MessageCursor
+	if more && len(items) > 0 {
+		last := items[len(items)-1]
+		cursor = &session.MessageCursor{ID: last.Info.ID, Time: last.Info.Time.Created}
+	}
+	slices.Reverse(items)
+	return session.MessagePage{Items: items, More: more, Cursor: cursor}, nil
 }
 
 // GetMessage returns a message with its parts.
