@@ -164,6 +164,7 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 		request.BaseURL = apiURL
 	}
 	request.Options = mergeAnyOptions(request.Options, defaultProviderBodyOptions(*request, rawProvider, rawModel, sessionID))
+	applyDefaultSampling(request)
 	if rawModelOptions, ok := rawModel["options"].(map[string]any); ok {
 		applyChatOptions(request, rawModelOptions)
 		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawModelOptions))
@@ -183,6 +184,78 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	}
 	if rawHeaders, ok := rawModel["headers"].(map[string]any); ok {
 		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
+	}
+}
+
+func applyDefaultSampling(request *llm.ChatRequest) {
+	modelID := strings.ToLower(request.Model)
+	if request.Temperature == nil {
+		if value, ok := defaultTemperature(modelID); ok {
+			request.Temperature = &value
+		}
+	}
+	if request.TopP == nil {
+		if value, ok := defaultTopP(modelID); ok {
+			request.TopP = &value
+		}
+	}
+	if request.TopK == nil {
+		if value, ok := defaultTopK(modelID); ok {
+			request.TopK = &value
+		}
+	}
+}
+
+func defaultTemperature(modelID string) (float64, bool) {
+	switch {
+	case strings.Contains(modelID, "qwen"):
+		return 0.55, true
+	case strings.Contains(modelID, "claude"):
+		return 0, false
+	case strings.Contains(modelID, "gemini"),
+		strings.Contains(modelID, "glm-4.6"),
+		strings.Contains(modelID, "glm-4.7"),
+		strings.Contains(modelID, "minimax-m2"):
+		return 1.0, true
+	case strings.Contains(modelID, "kimi-k2"):
+		if strings.Contains(modelID, "thinking") ||
+			strings.Contains(modelID, "k2.") ||
+			strings.Contains(modelID, "k2p") ||
+			strings.Contains(modelID, "k2-5") {
+			return 1.0, true
+		}
+		return 0.6, true
+	default:
+		return 0, false
+	}
+}
+
+func defaultTopP(modelID string) (float64, bool) {
+	switch {
+	case strings.Contains(modelID, "qwen"):
+		return 1, true
+	case strings.Contains(modelID, "minimax-m2"),
+		strings.Contains(modelID, "gemini"),
+		strings.Contains(modelID, "kimi-k2.5"),
+		strings.Contains(modelID, "kimi-k2p5"),
+		strings.Contains(modelID, "kimi-k2-5"):
+		return 0.95, true
+	default:
+		return 0, false
+	}
+}
+
+func defaultTopK(modelID string) (int, bool) {
+	switch {
+	case strings.Contains(modelID, "minimax-m2"):
+		if strings.Contains(modelID, "m2.") || strings.Contains(modelID, "m25") || strings.Contains(modelID, "m21") {
+			return 40, true
+		}
+		return 20, true
+	case strings.Contains(modelID, "gemini"):
+		return 64, true
+	default:
+		return 0, false
 	}
 }
 

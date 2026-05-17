@@ -349,6 +349,33 @@ func TestPromptRuntimeMergesConfiguredAgentOptions(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeAppliesDefaultSamplingParams(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "gemini-3-pro"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Temperature == nil || *client.request.Temperature != 1 ||
+		client.request.TopP == nil || *client.request.TopP != 0.95 ||
+		client.request.TopK == nil || *client.request.TopK != 64 {
+		t.Fatalf("request = %#v, want migrated default sampling params", client.request)
+	}
+}
+
 func TestPromptRuntimeAppliesProviderCacheKeyDefaults(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()
