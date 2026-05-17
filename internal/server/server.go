@@ -138,6 +138,9 @@ func NewHandler(opts Options) http.Handler {
 	})
 	mux.HandleFunc("/health", health)
 	mux.HandleFunc("/global/health", health)
+	mux.HandleFunc("/global/config", globalConfig())
+	mux.HandleFunc("/global/dispose", instanceDispose())
+	mux.HandleFunc("/global/event", handleEvent(opts.Version, opts.Events))
 	mux.HandleFunc("/openapi.json", handleJSON(func(_ *http.Request) (any, int, error) {
 		return OpenAPI(opts.Version), http.StatusOK, nil
 	}))
@@ -221,6 +224,19 @@ func OpenAPI(version string) map[string]any {
 		"paths": map[string]any{
 			"/health": map[string]any{
 				"get": map[string]any{"operationId": "health.check"},
+			},
+			"/global/health": map[string]any{
+				"get": map[string]any{"operationId": "global.health"},
+			},
+			"/global/event": map[string]any{
+				"get": map[string]any{"operationId": "global.event"},
+			},
+			"/global/config": map[string]any{
+				"get":   map[string]any{"operationId": "global.config.get"},
+				"patch": map[string]any{"operationId": "global.config.update"},
+			},
+			"/global/dispose": map[string]any{
+				"post": map[string]any{"operationId": "global.dispose"},
 			},
 			"/event": map[string]any{
 				"get": map[string]any{"operationId": "event.subscribe"},
@@ -391,7 +407,8 @@ func OpenAPI(version string) map[string]any {
 				"get": map[string]any{"operationId": "file.status"},
 			},
 			"/config": map[string]any{
-				"get": map[string]any{"operationId": "config.get"},
+				"get":   map[string]any{"operationId": "config.get"},
+				"patch": map[string]any{"operationId": "config.update"},
 			},
 			"/config/providers": map[string]any{
 				"get": map[string]any{"operationId": "config.providers"},
@@ -504,14 +521,51 @@ func OpenAPI(version string) map[string]any {
 
 func configGet() http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			result, err := config.Load(config.LoadOptions{
+				Directory: defaultString(r.URL.Query().Get("directory"), "."),
+				Worktree:  r.URL.Query().Get("worktree"),
+			})
+			return result, statusFromError(err), err
+		case http.MethodPatch:
+			var patch config.Info
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			result, err := config.UpdateLocal(defaultString(r.URL.Query().Get("directory"), "."), patch)
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			return result.Info, http.StatusOK, nil
+		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
-		result, err := config.Load(config.LoadOptions{
-			Directory: defaultString(r.URL.Query().Get("directory"), "."),
-			Worktree:  r.URL.Query().Get("worktree"),
-		})
-		return result, statusFromError(err), err
+	})
+}
+
+func globalConfig() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		switch r.Method {
+		case http.MethodGet:
+			result, err := config.Load(config.LoadOptions{Directory: "."})
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			return result.Info, http.StatusOK, nil
+		case http.MethodPatch:
+			var patch config.Info
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			result, err := config.UpdateGlobal(patch)
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			return result.Info, http.StatusOK, nil
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
 	})
 }
 

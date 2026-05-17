@@ -156,6 +156,78 @@ func TestProjectFilesRootToLeafAndDisableProjectConfig(t *testing.T) {
 	}
 }
 
+func TestUpdateLocalWritesConfigJSON(t *testing.T) {
+	root := t.TempDir()
+	writeConfig(t, filepath.Join(root, "config.json"), `{
+		"$schema": "https://opencode.ai/config.json",
+		"model": "old/model",
+		"provider": {"local": {"apiKey": "old"}}
+	}`)
+
+	result, err := UpdateLocal(root, Info{
+		"model": "new/model",
+		"provider": map[string]any{
+			"local": map[string]any{"name": "Local"},
+		},
+		"plugin_origins": []any{"derived"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateLocal() error = %v", err)
+	}
+	if !result.Changed || result.File != filepath.Join(root, "config.json") {
+		t.Fatalf("result = %#v, want changed local config file", result)
+	}
+	if result.Info["model"] != "new/model" {
+		t.Fatalf("model = %#v, want new/model", result.Info["model"])
+	}
+	if _, ok := result.Info["plugin_origins"]; ok {
+		t.Fatalf("plugin_origins persisted in result: %#v", result.Info)
+	}
+	provider := result.Info["provider"].(map[string]any)["local"].(map[string]any)
+	if provider["apiKey"] != "old" || provider["name"] != "Local" {
+		t.Fatalf("provider = %#v, want merged provider", provider)
+	}
+	reloaded, err := ParseJSONC(mustReadConfig(t, result.File), result.File)
+	if err != nil {
+		t.Fatalf("parse written local config: %v", err)
+	}
+	if reloaded["model"] != "new/model" {
+		t.Fatalf("written model = %#v, want new/model", reloaded["model"])
+	}
+}
+
+func TestUpdateGlobalSelectsExistingFileAndOmitsEmptyShell(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	path := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	writeConfig(t, path, `{
+		"$schema": "https://opencode.ai/config.json",
+		"shell": "bash",
+		"model": "old/model"
+	}`)
+
+	result, err := UpdateGlobal(Info{"shell": "", "username": "global-user"})
+	if err != nil {
+		t.Fatalf("UpdateGlobal() error = %v", err)
+	}
+	if result.File != path || !result.Changed {
+		t.Fatalf("result = %#v, want existing jsonc file changed", result)
+	}
+	if _, ok := result.Info["shell"]; ok {
+		t.Fatalf("shell persisted in global result: %#v", result.Info)
+	}
+	if result.Info["model"] != "old/model" || result.Info["username"] != "global-user" {
+		t.Fatalf("info = %#v, want preserved model and updated username", result.Info)
+	}
+	reloaded, err := ParseJSONC(mustReadConfig(t, path), path)
+	if err != nil {
+		t.Fatalf("parse written global config: %v", err)
+	}
+	if _, ok := reloaded["shell"]; ok {
+		t.Fatalf("shell persisted in global file: %#v", reloaded)
+	}
+}
+
 func writeConfig(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -164,6 +236,15 @@ func writeConfig(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func mustReadConfig(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 func sameStrings(got []any, want []string) bool {

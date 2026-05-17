@@ -1066,6 +1066,78 @@ func TestConfigHTTPAPI(t *testing.T) {
 	if !ok || len(agents) != 1 || filepath.Base(agents[0].(string)) != "review.md" {
 		t.Fatalf("agents = %#v, want review.md", discovery["agents"])
 	}
+
+	req, err := http.NewRequest(http.MethodPatch, server.URL+"/config?directory="+urlQueryEscape(root), strings.NewReader(`{"username":"patched-user","model":"patched/model"}`))
+	if err != nil {
+		t.Fatalf("new PATCH /config request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH /config error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH /config status = %d, want 200", resp.StatusCode)
+	}
+	var updated map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode updated config: %v", err)
+	}
+	if updated["username"] != "patched-user" || updated["model"] != "patched/model" {
+		t.Fatalf("updated config = %#v, want patched values", updated)
+	}
+	localConfig := readServerJSON(t, filepath.Join(root, "config.json"))
+	if localConfig["username"] != "patched-user" || localConfig["model"] != "patched/model" {
+		t.Fatalf("local config file = %#v, want patched values", localConfig)
+	}
+
+	resp, err = http.Get(server.URL + "/global/config")
+	if err != nil {
+		t.Fatalf("GET /global/config error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /global/config status = %d, want 200", resp.StatusCode)
+	}
+	var global map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&global); err != nil {
+		t.Fatalf("decode global config: %v", err)
+	}
+	if global["model"] != "global/model" {
+		t.Fatalf("global config = %#v, want global model", global)
+	}
+
+	req, err = http.NewRequest(http.MethodPatch, server.URL+"/global/config", strings.NewReader(`{"username":"global-user","shell":""}`))
+	if err != nil {
+		t.Fatalf("new PATCH /global/config request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH /global/config error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH /global/config status = %d, want 200", resp.StatusCode)
+	}
+	var globalUpdated map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&globalUpdated); err != nil {
+		t.Fatalf("decode global updated config: %v", err)
+	}
+	if globalUpdated["username"] != "global-user" || globalUpdated["model"] != "global/model" {
+		t.Fatalf("global updated config = %#v, want username and preserved model", globalUpdated)
+	}
+	if _, ok := globalUpdated["shell"]; ok {
+		t.Fatalf("global updated config = %#v, want empty shell omitted", globalUpdated)
+	}
+	globalConfig := readServerJSON(t, filepath.Join(xdg, "opencode", "opencode.jsonc"))
+	if globalConfig["username"] != "global-user" || globalConfig["model"] != "global/model" {
+		t.Fatalf("global config file = %#v, want patched values", globalConfig)
+	}
+	if _, ok := globalConfig["shell"]; ok {
+		t.Fatalf("global config file = %#v, want empty shell omitted", globalConfig)
+	}
 }
 
 func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
@@ -2571,6 +2643,19 @@ func writeServerFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func readServerJSON(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decode %s: %v\n%s", path, err, data)
+	}
+	return result
 }
 
 func runServerCommand(t *testing.T, dir string, name string, args ...string) {

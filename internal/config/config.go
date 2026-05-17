@@ -34,6 +34,13 @@ type LoadResult struct {
 	Discovery Discovery `json:"discovery"`
 }
 
+// UpdateResult describes a persisted config update.
+type UpdateResult struct {
+	Info    Info   `json:"info"`
+	Changed bool   `json:"changed"`
+	File    string `json:"file"`
+}
+
 // Load reads global, explicit, project, .opencode, and environment-provided
 // config sources using the same broad precedence order as the TypeScript
 // runtime.
@@ -138,6 +145,45 @@ func ParseJSONC(data []byte, source string) (Info, error) {
 	return normalizeJSON(value).(map[string]any), nil
 }
 
+// UpdateLocal merges patch into DIRECTORY/config.json and returns the persisted
+// local config. This mirrors the TypeScript local config update target.
+func UpdateLocal(directory string, patch Info) (UpdateResult, error) {
+	directory, err := normalizeDirectory(directory)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	file := filepath.Join(directory, "config.json")
+	existing, err := readConfigFile(file)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	merged := mergeInfo(existing, writableInfo(patch, false))
+	changed, err := writeConfigJSON(file, merged)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	return UpdateResult{Info: merged, Changed: changed, File: file}, nil
+}
+
+// UpdateGlobal merges patch into the selected global config file. It preserves
+// jsonc files by writing JSON-compatible content back to the same path.
+func UpdateGlobal(patch Info) (UpdateResult, error) {
+	file := globalConfigFile()
+	existing, err := readConfigFile(file)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	merged := mergeInfo(existing, writableInfo(patch, true))
+	if shell, ok := patch["shell"].(string); ok && shell == "" {
+		delete(merged, "shell")
+	}
+	changed, err := writeConfigJSON(file, merged)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	return UpdateResult{Info: merged, Changed: changed, File: file}, nil
+}
+
 // ProjectFiles returns opencode.jsonc/opencode.json files from directory upward
 // to the worktree boundary, ordered from root to leaf.
 func ProjectFiles(name string, directory string, worktree string) ([]string, error) {
@@ -221,6 +267,69 @@ func GlobalConfigDir() string {
 		base = "."
 	}
 	return filepath.Join(base, "opencode")
+}
+
+func globalConfigFile() string {
+	dir := GlobalConfigDir()
+	for _, name := range []string{"opencode.jsonc", "opencode.json", "config.json"} {
+		file := filepath.Join(dir, name)
+		if regularFile(file) {
+			return file
+		}
+	}
+	return filepath.Join(dir, "opencode.jsonc")
+}
+
+func readConfigFile(path string) (Info, error) {
+	if !regularFile(path) {
+		return Info{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return Info{}, nil
+	}
+	return ParseJSONC(data, path)
+}
+
+func writeConfigJSON(path string, info Info) (bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("create config directory %s: %w", filepath.Dir(path), err)
+	}
+	next, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("encode config %s: %w", path, err)
+	}
+	next = append(next, '\n')
+	before, err := os.ReadFile(path)
+	if err == nil && string(before) == string(next) {
+		return false, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, next, 0o644); err != nil {
+		return false, fmt.Errorf("write config %s: %w", path, err)
+	}
+	return true, nil
+}
+
+func writableInfo(info Info, global bool) Info {
+	result := Info{}
+	for key, value := range info {
+		if key == "plugin_origins" {
+			continue
+		}
+		if global && key == "shell" {
+			if text, ok := value.(string); ok && text == "" {
+				continue
+			}
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func (result *LoadResult) mergeFile(path string) error {
