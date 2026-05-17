@@ -249,6 +249,31 @@ func TestResolveChatRequestVercel(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestGitHubCopilotRequiresBaseURL(t *testing.T) {
+	t.Setenv("GITHUB_COPILOT_API_KEY", "copilot-token")
+
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "github-copilot", "gpt-4.1")
+	if err == nil || !strings.Contains(err.Error(), "base URL") {
+		t.Fatalf("ResolveChatRequest() error = %v, want base URL requirement", err)
+	}
+}
+
+func TestResolveChatRequestGitHubCopilotWithBaseURL(t *testing.T) {
+	t.Setenv("GITHUB_COPILOT_BASE_URL", "https://copilot-proxy.test/v1")
+	t.Setenv("GITHUB_COPILOT_API_KEY", "copilot-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "github-copilot", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://copilot-proxy.test/v1" ||
+		got.APIKey != "copilot-token" ||
+		got.Model != "gpt-4.1" {
+		t.Fatalf("request = %#v, want GitHub Copilot request", got)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)
