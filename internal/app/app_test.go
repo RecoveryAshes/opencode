@@ -366,6 +366,50 @@ func TestRunMCPListTextShowsEmptyState(t *testing.T) {
 	}
 }
 
+func TestRunMCPToolsAndCallConfiguredLocalServer(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	serverPath := writeAppMCPFixture(t)
+	configContent := fmt.Sprintf(`{
+  "mcp": {
+    "mock": {"type": "local", "command": ["go", "run", %q], "timeout": 5000}
+  }
+}`, serverPath)
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"mcp", "--directory", root, "--json", "tools", "mock"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("tools exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var tools []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &tools); err != nil {
+		t.Fatalf("decode tools JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if len(tools) != 1 || tools[0]["name"] != "echo" {
+		t.Fatalf("tools = %#v, want echo tool", tools)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"mcp", "--directory", root, "--params", `{"text":"hello mcp"}`, "call", "mock", "echo"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("call exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode call JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	content := result["content"].([]any)[0].(map[string]any)
+	if content["text"] != "hello mcp" {
+		t.Fatalf("call result = %#v, want echoed text", result)
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()
@@ -1447,6 +1491,48 @@ func writeAppFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func writeAppMCPFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mcp.go")
+	source := `package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+)
+
+func main() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		var req map[string]any
+		_ = json.Unmarshal(scanner.Bytes(), &req)
+		id, hasID := req["id"]
+		if !hasID {
+			continue
+		}
+		method, _ := req["method"].(string)
+		result := map[string]any{}
+		switch method {
+		case "initialize":
+			result = map[string]any{"protocolVersion":"2024-11-05","capabilities":map[string]any{"tools":map[string]any{}}}
+		case "tools/list":
+			result = map[string]any{"tools":[]map[string]any{{"name":"echo","description":"echo text","inputSchema":map[string]any{"type":"object"}}}}
+		case "tools/call":
+			params := req["params"].(map[string]any)
+			args := params["arguments"].(map[string]any)
+			result = map[string]any{"content":[]map[string]any{{"type":"text","text":args["text"]}}}
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"jsonrpc":"2.0","id":id,"result":result})
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("write MCP fixture: %v", err)
+	}
+	return path
 }
 
 func runAppCommand(t *testing.T, dir string, name string, args ...string) {

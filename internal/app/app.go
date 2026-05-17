@@ -240,10 +240,15 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 }
 
 func openMCPManager(ctx context.Context, directory string) (*integration.MCPManager, func(), error) {
+	manager, _, closeManager, err := openConfiguredMCPManager(ctx, directory)
+	return manager, closeManager, err
+}
+
+func openConfiguredMCPManager(ctx context.Context, directory string) (*integration.MCPManager, []integration.MCPConfiguredServer, func(), error) {
 	manager := integration.NewMCPManager()
 	servers, err := integration.LoadConfiguredMCPServers(directory)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	for _, configured := range servers {
 		if configured.Disabled {
@@ -255,7 +260,7 @@ func openMCPManager(ctx context.Context, directory string) (*integration.MCPMana
 		}
 		manager.Add(ctx, configured.Name, configured.Config)
 	}
-	return manager, func() {
+	return manager, servers, func() {
 		for _, configured := range servers {
 			manager.Disconnect(configured.Name)
 		}
@@ -999,6 +1004,8 @@ func mcpCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.
 	fs.SetOutput(stderr)
 	directory := fs.String("directory", ".", "directory used to discover MCP config")
 	jsonOutput := fs.Bool("json", false, "write MCP status JSON")
+	paramsJSON := fs.String("params", "{}", "tool arguments as JSON object for mcp call")
+	paramsFile := fs.String("params-file", "", "path to JSON file containing tool arguments, or - for stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1013,6 +1020,27 @@ func mcpCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.
 			return 2
 		}
 		return mcpList(ctx, *directory, *jsonOutput, stdout, stderr)
+	case "tools":
+		if fs.NArg() != 2 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode mcp [--directory DIR] [--json] tools SERVER")
+			return 2
+		}
+		return mcpTools(ctx, *directory, fs.Arg(1), *jsonOutput, stdout, stderr)
+	case "call":
+		if fs.NArg() != 3 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode mcp [--directory DIR] [--params JSON | --params-file PATH] call SERVER TOOL")
+			return 2
+		}
+		if *paramsFile != "" && *paramsJSON != "{}" {
+			_, _ = fmt.Fprintln(stderr, "--params and --params-file are mutually exclusive")
+			return 2
+		}
+		params, err := decodeToolParams(*paramsJSON, *paramsFile, os.Stdin)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "decode params failed: %v\n", err)
+			return 2
+		}
+		return mcpCall(ctx, *directory, fs.Arg(1), fs.Arg(2), params, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown mcp command: %s\n", fs.Arg(0))
 		return 2
@@ -1069,6 +1097,66 @@ func mcpList(ctx context.Context, directory string, jsonOutput bool, stdout io.W
 		}
 	}
 	return 0
+}
+
+func mcpTools(ctx context.Context, directory string, serverName string, jsonOutput bool, stdout io.Writer, stderr io.Writer) int {
+	manager, servers, closeManager, err := openConfiguredMCPManager(ctx, directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load mcp config failed: %v\n", err)
+		return 1
+	}
+	defer closeManager()
+	if !configuredMCPServerExists(servers, serverName) {
+		_, _ = fmt.Fprintf(stderr, "mcp server not found: %s\n", serverName)
+		return 2
+	}
+	tools, err := manager.Tools(ctx, serverName)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp tools failed: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		return writeJSON(stdout, tools)
+	}
+	for _, tool := range tools {
+		if _, err := fmt.Fprintf(stdout, "%s\n", tool.Name); err != nil {
+			return 1
+		}
+		if tool.Description != "" {
+			if _, err := fmt.Fprintf(stdout, "  %s\n", tool.Description); err != nil {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+func mcpCall(ctx context.Context, directory string, serverName string, toolName string, params map[string]any, stdout io.Writer, stderr io.Writer) int {
+	manager, servers, closeManager, err := openConfiguredMCPManager(ctx, directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load mcp config failed: %v\n", err)
+		return 1
+	}
+	defer closeManager()
+	if !configuredMCPServerExists(servers, serverName) {
+		_, _ = fmt.Fprintf(stderr, "mcp server not found: %s\n", serverName)
+		return 2
+	}
+	result, err := manager.CallTool(ctx, serverName, toolName, params)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp call failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result)
+}
+
+func configuredMCPServerExists(servers []integration.MCPConfiguredServer, name string) bool {
+	for _, server := range servers {
+		if server.Name == name && !server.Disabled {
+			return true
+		}
+	}
+	return false
 }
 
 func disconnectMCPServers(manager *integration.MCPManager, servers []integration.MCPConfiguredServer) {
