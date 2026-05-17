@@ -60,3 +60,29 @@ func TestToolSchemasCoverInventory(t *testing.T) {
 		}
 	}
 }
+
+func TestLSPSchemaMatchesTypeScriptOperationSet(t *testing.T) {
+	schema := ToolSchema("lsp")
+	props := schema["properties"].(map[string]any)
+	operation := props["operation"].(map[string]any)
+	got := operation["enum"].([]string)
+	want := []string{
+		"goToDefinition",
+		"findReferences",
+		"hover",
+		"documentSymbol",
+		"workspaceSymbol",
+		"goToImplementation",
+		"prepareCallHierarchy",
+		"incomingCalls",
+		"outgoingCalls",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("lsp operation enum = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("lsp operation enum[%d] = %q, want %q; all = %#v", i, got[i], want[i], got)
+		}
+	}
+}

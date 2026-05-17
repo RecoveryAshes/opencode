@@ -50,11 +50,22 @@ func ToolSchema(name string) JSONSchema {
 			"command": stringSchema("Shell command to run in the workspace."),
 		})
 	case "lsp":
-		return objectSchema([]string{"operation"}, map[string]any{
-			"operation": enumSchema("LSP operation to run.", []string{"documentSymbol", "workspaceSymbol", "hover"}),
+		return objectSchema([]string{"operation", "filePath", "line", "character"}, map[string]any{
+			"operation": enumSchema("LSP operation to run.", []string{
+				"goToDefinition",
+				"findReferences",
+				"hover",
+				"documentSymbol",
+				"workspaceSymbol",
+				"goToImplementation",
+				"prepareCallHierarchy",
+				"incomingCalls",
+				"outgoingCalls",
+			}),
 			"filePath":  stringSchema("File path for document-level operations."),
 			"query":     stringSchema("Workspace symbol search query."),
-			"line":      integerSchema("One-based line number for hover."),
+			"line":      integerSchema("One-based line number."),
+			"character": integerSchema("One-based character offset."),
 		})
 	case "webfetch":
 		return objectSchema([]string{"url"}, map[string]any{

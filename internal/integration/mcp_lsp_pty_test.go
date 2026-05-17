@@ -42,7 +42,7 @@ func TestMCPManagerLocalTools(t *testing.T) {
 func TestLSPFallbackTool(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "main.go")
-	if err := os.WriteFile(file, []byte("package main\n\ntype Server struct{}\n\nfunc Run() {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("package main\n\ntype Server struct{}\n\nfunc Run() {}\n\nfunc main() { Run() }\n"), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	result, err := Execute(context.Background(), Request{
@@ -55,6 +55,30 @@ func TestLSPFallbackTool(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "Server") || !strings.Contains(result.Output, "Run") {
 		t.Fatalf("lsp output = %q", result.Output)
+	}
+
+	definition, err := Execute(context.Background(), Request{
+		Name:      "lsp",
+		Directory: root,
+		Params:    map[string]any{"operation": "goToDefinition", "filePath": "main.go", "line": 7, "character": 15},
+	})
+	if err != nil {
+		t.Fatalf("lsp goToDefinition Execute() error = %v", err)
+	}
+	if !strings.Contains(definition.Output, `"line": 5`) || !strings.Contains(definition.Output, "func Run()") {
+		t.Fatalf("goToDefinition output = %q", definition.Output)
+	}
+
+	references, err := Execute(context.Background(), Request{
+		Name:      "lsp",
+		Directory: root,
+		Params:    map[string]any{"operation": "findReferences", "filePath": "main.go", "line": 7, "character": 15},
+	})
+	if err != nil {
+		t.Fatalf("lsp findReferences Execute() error = %v", err)
+	}
+	if !strings.Contains(references.Output, `"line": 5`) || !strings.Contains(references.Output, `"line": 7`) {
+		t.Fatalf("findReferences output = %q", references.Output)
 	}
 }
 

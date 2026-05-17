@@ -16,6 +16,13 @@ type symbolInfo struct {
 	Line int    `json:"line"`
 }
 
+type lspLocation struct {
+	Path      string `json:"path"`
+	Line      int    `json:"line"`
+	Character int    `json:"character"`
+	Preview   string `json:"preview,omitempty"`
+}
+
 func lspTool(request Request) (Result, error) {
 	operation, err := requireString(request.Params, "operation")
 	if err != nil {
@@ -23,6 +30,8 @@ func lspTool(request Request) (Result, error) {
 	}
 	filePath := optionalString(request.Params, "filePath", ".")
 	file := resolvePath(request.Directory, filePath)
+	line := optionalInt(request.Params, "line", 1)
+	character := optionalInt(request.Params, "character", 1)
 	switch operation {
 	case "documentSymbol":
 		symbols, err := documentSymbols(file)
@@ -38,7 +47,6 @@ func lspTool(request Request) (Result, error) {
 		}
 		return jsonResult(operation, symbols)
 	case "hover":
-		line := optionalInt(request.Params, "line", 1)
 		text, err := lineAt(file, line)
 		if err != nil {
 			return Result{}, err
@@ -50,8 +58,20 @@ func lspTool(request Request) (Result, error) {
 			},
 			Output: strings.TrimSpace(text),
 		}, nil
+	case "goToDefinition", "goToImplementation", "prepareCallHierarchy":
+		result, err := definitionLikeLocations(file, line, character)
+		if err != nil {
+			return Result{}, err
+		}
+		return jsonResult(operation+" "+filePath, result)
+	case "findReferences", "incomingCalls", "outgoingCalls":
+		result, err := referenceLikeLocations(resolvePath(request.Directory, "."), file, line, character)
+		if err != nil {
+			return Result{}, err
+		}
+		return jsonResult(operation+" "+filePath, result)
 	default:
-		return Result{}, fmt.Errorf("no LSP server available for %s; fallback supports documentSymbol, workspaceSymbol, and hover", operation)
+		return Result{}, fmt.Errorf("unsupported LSP operation %q", operation)
 	}
 }
 
@@ -117,6 +137,110 @@ func lineAt(file string, line int) (string, error) {
 		return "", fmt.Errorf("line %d out of range", line)
 	}
 	return lines[line-1], nil
+}
+
+func definitionLikeLocations(file string, line int, character int) ([]lspLocation, error) {
+	ident, err := identifierAt(file, line, character)
+	if err != nil {
+		return nil, err
+	}
+	if ident == "" {
+		return []lspLocation{}, nil
+	}
+	symbols, err := documentSymbols(file)
+	if err != nil {
+		return nil, err
+	}
+	result := []lspLocation{}
+	for _, symbol := range symbols {
+		if symbol.Name != ident {
+			continue
+		}
+		preview, _ := lineAt(symbol.Path, symbol.Line)
+		result = append(result, lspLocation{
+			Path:      symbol.Path,
+			Line:      symbol.Line,
+			Character: 1,
+			Preview:   strings.TrimSpace(preview),
+		})
+	}
+	return result, nil
+}
+
+func referenceLikeLocations(root string, file string, line int, character int) ([]lspLocation, error) {
+	ident, err := identifierAt(file, line, character)
+	if err != nil {
+		return nil, err
+	}
+	if ident == "" {
+		return []lspLocation{}, nil
+	}
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
+	result := []lspLocation{}
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if ignoredOverviewDirs[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if languageForFile(path) == "" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || isBinary(data) {
+			return nil
+		}
+		for index, text := range splitLines(string(data)) {
+			for _, loc := range re.FindAllStringIndex(text, -1) {
+				result = append(result, lspLocation{
+					Path:      path,
+					Line:      index + 1,
+					Character: loc[0] + 1,
+					Preview:   strings.TrimSpace(text),
+				})
+				if len(result) >= 200 {
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+func identifierAt(file string, line int, character int) (string, error) {
+	text, err := lineAt(file, line)
+	if err != nil {
+		return "", err
+	}
+	if character < 1 {
+		character = 1
+	}
+	runes := []rune(text)
+	index := min(character-1, len(runes))
+	start := index
+	if start == len(runes) && start > 0 {
+		start--
+	}
+	for start > 0 && isIdentifierRune(runes[start-1]) {
+		start--
+	}
+	end := index
+	for end < len(runes) && isIdentifierRune(runes[end]) {
+		end++
+	}
+	if end <= start {
+		return "", nil
+	}
+	return string(runes[start:end]), nil
+}
+
+func isIdentifierRune(r rune) bool {
+	return r == '_' || r == '$' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
 }
 
 func jsonResult(title string, value any) (Result, error) {
