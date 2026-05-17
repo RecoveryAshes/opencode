@@ -1127,6 +1127,154 @@ func TestQuestionPermissionHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestV2HTTPAPICompatibility(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	root := t.TempDir()
+	writeServerFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"enabled_providers": ["anthropic", "local-ai"],
+		"provider": {
+			"local-ai": {
+				"name": "Local AI",
+				"models": {
+					"local-model": {"name": "Local Model"}
+				}
+			}
+		}
+	}`)
+
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{
+		Version:  "test",
+		Sessions: store,
+		Runtime: &runtime.PromptRuntime{
+			Messages: store,
+			Client:   &serverFakeChatClient{},
+		},
+	}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"v2"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	resp, err = http.Get(server.URL + "/api/session?limit=10")
+	if err != nil {
+		t.Fatalf("GET /api/session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var sessionsPage map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&sessionsPage); err != nil {
+		t.Fatalf("decode v2 sessions: %v", err)
+	}
+	items := sessionsPage["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != string(created.ID) {
+		t.Fatalf("sessions page = %#v, want created session", sessionsPage)
+	}
+	if _, ok := sessionsPage["cursor"].(map[string]any); !ok {
+		t.Fatalf("sessions cursor = %#v, want cursor object", sessionsPage["cursor"])
+	}
+
+	prompt := `{"prompt":{"text":"hello v2"},"delivery":"background"}`
+	resp, err = http.Post(server.URL+"/api/session/"+string(created.ID)+"/prompt", "application/json", strings.NewReader(prompt))
+	if err != nil {
+		t.Fatalf("POST /api/session/id/prompt error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("v2 prompt status = %d, want 200", resp.StatusCode)
+	}
+	var promptMessage map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&promptMessage); err != nil {
+		t.Fatalf("decode prompt message: %v", err)
+	}
+	if promptMessage["role"] != "user" {
+		t.Fatalf("prompt message = %#v, want user role", promptMessage)
+	}
+
+	resp, err = http.Get(server.URL + "/api/session/" + string(created.ID) + "/message?order=asc")
+	if err != nil {
+		t.Fatalf("GET /api/session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var messagesPage map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&messagesPage); err != nil {
+		t.Fatalf("decode v2 messages: %v", err)
+	}
+	messages := messagesPage["items"].([]any)
+	if len(messages) != 1 || messages[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("messages page = %#v, want one user message", messagesPage)
+	}
+
+	resp, err = http.Get(server.URL + "/api/session/" + string(created.ID) + "/context")
+	if err != nil {
+		t.Fatalf("GET /api/session/id/context error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var contextMessages []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&contextMessages); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	if len(contextMessages) != 1 || contextMessages[0]["role"] != "user" {
+		t.Fatalf("context = %#v, want user message", contextMessages)
+	}
+
+	resp, err = http.Post(server.URL+"/api/session/"+string(created.ID)+"/wait", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/session/id/wait error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("wait status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Get(server.URL + "/api/provider?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /api/provider error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var providers []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&providers); err != nil {
+		t.Fatalf("decode v2 providers: %v", err)
+	}
+	if len(providers) != 2 || providers[1]["id"] != "local-ai" {
+		t.Fatalf("providers = %#v, want configured providers", providers)
+	}
+
+	resp, err = http.Get(server.URL + "/api/provider/local-ai?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /api/provider/id error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var provider map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&provider); err != nil {
+		t.Fatalf("decode provider: %v", err)
+	}
+	if provider["id"] != "local-ai" {
+		t.Fatalf("provider = %#v, want local-ai", provider)
+	}
+
+	resp, err = http.Get(server.URL + "/api/model?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /api/model error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var models []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if !hasModel(models, "local-ai", "local-model") {
+		t.Fatalf("models = %#v, want local model", models)
+	}
+}
+
 type serverFakeChatClient struct {
 	request llm.ChatRequest
 }
@@ -1240,6 +1388,15 @@ func hasFileDiff(items []map[string]any, file string, patchContains string) bool
 		}
 		patch, _ := item["patch"].(string)
 		if strings.Contains(patch, patchContains) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasModel(items []map[string]any, providerID string, modelID string) bool {
+	for _, item := range items {
+		if item["providerID"] == providerID && item["id"] == modelID {
 			return true
 		}
 	}

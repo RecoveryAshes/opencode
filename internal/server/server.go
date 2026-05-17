@@ -132,6 +132,11 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/openapi.json", handleJSON(func(_ *http.Request) (any, int, error) {
 		return OpenAPI(opts.Version), http.StatusOK, nil
 	}))
+	mux.HandleFunc("/api/session/", v2SessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
+	mux.HandleFunc("/api/session", v2Sessions(opts.Sessions))
+	mux.HandleFunc("/api/provider/", v2ProviderByID())
+	mux.HandleFunc("/api/provider", v2Providers())
+	mux.HandleFunc("/api/model", v2Models())
 	mux.HandleFunc("/event", handleEvent(opts.Version, opts.Events))
 	mux.HandleFunc("/config", configGet())
 	mux.HandleFunc("/instance/dispose", instanceDispose())
@@ -194,6 +199,33 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/event": map[string]any{
 				"get": map[string]any{"operationId": "event.subscribe"},
+			},
+			"/api/session": map[string]any{
+				"get": map[string]any{"operationId": "v2.session.list"},
+			},
+			"/api/session/{sessionID}/message": map[string]any{
+				"get": map[string]any{"operationId": "v2.session.messages"},
+			},
+			"/api/session/{sessionID}/prompt": map[string]any{
+				"post": map[string]any{"operationId": "v2.session.prompt"},
+			},
+			"/api/session/{sessionID}/compact": map[string]any{
+				"post": map[string]any{"operationId": "v2.session.compact"},
+			},
+			"/api/session/{sessionID}/wait": map[string]any{
+				"post": map[string]any{"operationId": "v2.session.wait"},
+			},
+			"/api/session/{sessionID}/context": map[string]any{
+				"get": map[string]any{"operationId": "v2.session.context"},
+			},
+			"/api/provider": map[string]any{
+				"get": map[string]any{"operationId": "v2.provider.list"},
+			},
+			"/api/provider/{providerID}": map[string]any{
+				"get": map[string]any{"operationId": "v2.provider.get"},
+			},
+			"/api/model": map[string]any{
+				"get": map[string]any{"operationId": "v2.model.list"},
 			},
 			"/instance/dispose": map[string]any{
 				"post": map[string]any{"operationId": "instance.dispose"},
