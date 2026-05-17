@@ -1,8 +1,6 @@
 package server
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -128,14 +126,24 @@ func ptyByID(manager *integration.PTYManager) http.HandlerFunc {
 			}
 		}
 		if len(parts) == 2 && parts[1] == "connect-token" && r.Method == http.MethodPost {
-			if _, ok := manager.Get(id); !ok {
-				return nil, http.StatusNotFound, fmt.Errorf("pty session not found")
-			}
-			ticket, err := randomToken(16)
+			token, ok, err := manager.IssueConnectToken(id)
 			if err != nil {
 				return nil, http.StatusInternalServerError, err
 			}
-			return map[string]any{"ticket": ticket, "expires_in": 60}, http.StatusOK, nil
+			if !ok {
+				return nil, http.StatusNotFound, fmt.Errorf("pty session not found")
+			}
+			return token, http.StatusOK, nil
+		}
+		if len(parts) == 2 && parts[1] == "connect" && r.Method == http.MethodGet {
+			if _, ok := manager.Get(id); !ok {
+				return nil, http.StatusNotFound, fmt.Errorf("pty session not found")
+			}
+			ticket := r.URL.Query().Get("ticket")
+			if ticket != "" && !manager.ConsumeConnectToken(id, ticket) {
+				return nil, http.StatusForbidden, fmt.Errorf("invalid pty ticket")
+			}
+			return true, http.StatusOK, nil
 		}
 		if len(parts) == 2 && parts[1] == "input" && r.Method == http.MethodPost {
 			var payload struct {
@@ -163,12 +171,4 @@ func statusFromGenericError(err error) int {
 		return http.StatusOK
 	}
 	return http.StatusBadRequest
-}
-
-func randomToken(bytesLen int) (string, error) {
-	data := make([]byte, bytesLen)
-	if _, err := rand.Read(data); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
-	}
-	return hex.EncodeToString(data), nil
 }

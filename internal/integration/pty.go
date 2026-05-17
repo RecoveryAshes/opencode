@@ -3,6 +3,8 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,6 +52,7 @@ type PTYSize struct {
 type PTYManager struct {
 	mu       sync.Mutex
 	sessions map[string]*ptySession
+	tickets  map[string]ptyTicket
 }
 
 type ptySession struct {
@@ -64,9 +67,17 @@ type ioWriteCloser interface {
 	Close() error
 }
 
+type ptyTicket struct {
+	PTYID     string
+	ExpiresAt time.Time
+}
+
 // NewPTYManager creates an empty PTY manager.
 func NewPTYManager() *PTYManager {
-	return &PTYManager{sessions: map[string]*ptySession{}}
+	return &PTYManager{
+		sessions: map[string]*ptySession{},
+		tickets:  map[string]ptyTicket{},
+	}
 }
 
 // Shells lists common local shells.
@@ -250,6 +261,33 @@ func (manager *PTYManager) Buffer(id string) (string, bool) {
 	return session.buffer.String(), true
 }
 
+// IssueConnectToken creates a short-lived single-use ticket for PTY WebSocket connection.
+func (manager *PTYManager) IssueConnectToken(id string) (map[string]any, bool, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.sessions[id] == nil {
+		return nil, false, nil
+	}
+	token, err := randomPTYToken(16)
+	if err != nil {
+		return nil, true, err
+	}
+	manager.tickets[token] = ptyTicket{PTYID: id, ExpiresAt: time.Now().Add(time.Minute)}
+	return map[string]any{"ticket": token, "expires_in": 60}, true, nil
+}
+
+// ConsumeConnectToken validates and consumes a PTY WebSocket ticket.
+func (manager *PTYManager) ConsumeConnectToken(id string, token string) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	ticket, ok := manager.tickets[token]
+	if !ok {
+		return false
+	}
+	delete(manager.tickets, token)
+	return ticket.PTYID == id && time.Now().Before(ticket.ExpiresAt)
+}
+
 func candidateName(path string) string {
 	if index := strings.LastIndex(path, "/"); index >= 0 {
 		return path[index+1:]
@@ -266,6 +304,14 @@ func upsertEnv(env []string, key string, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func randomPTYToken(bytesLen int) (string, error) {
+	data := make([]byte, bytesLen)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate pty token: %w", err)
+	}
+	return hex.EncodeToString(data), nil
 }
 
 type safeBuffer struct {

@@ -117,6 +117,20 @@ func TestPTYManagerLifecycle(t *testing.T) {
 	if updated.Title != "renamed" || updated.Size == nil || updated.Size.Rows != 24 || updated.Size.Cols != 120 {
 		t.Fatalf("updated = %#v, want title and size", updated)
 	}
+	token, ok, err := manager.IssueConnectToken(info.ID)
+	if err != nil {
+		t.Fatalf("IssueConnectToken() error = %v", err)
+	}
+	if !ok || token["ticket"] == "" || token["expires_in"] != 60 {
+		t.Fatalf("token = %#v, ok = %v, want connect token", token, ok)
+	}
+	ticket := token["ticket"].(string)
+	if !manager.ConsumeConnectToken(info.ID, ticket) {
+		t.Fatalf("ConsumeConnectToken() = false, want true")
+	}
+	if manager.ConsumeConnectToken(info.ID, ticket) {
+		t.Fatalf("ConsumeConnectToken() reused ticket = true, want false")
+	}
 	if !manager.Remove(info.ID) {
 		t.Fatalf("Remove() = false")
 	}

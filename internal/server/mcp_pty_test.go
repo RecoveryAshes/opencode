@@ -127,4 +127,23 @@ func TestPTYHTTPAPI(t *testing.T) {
 	if token["ticket"] == "" || token["expires_in"] != float64(60) {
 		t.Fatalf("token = %#v, want connect token shape", token)
 	}
+	ticket := token["ticket"].(string)
+
+	resp, err = http.Get(server.URL + "/pty/" + info.ID + "/connect?ticket=" + ticket)
+	if err != nil {
+		t.Fatalf("GET /pty/id/connect error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("connect status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Get(server.URL + "/pty/" + info.ID + "/connect?ticket=" + ticket)
+	if err != nil {
+		t.Fatalf("GET /pty/id/connect reused ticket error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("reused connect status = %d, want 403", resp.StatusCode)
+	}
 }
