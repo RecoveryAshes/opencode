@@ -133,6 +133,59 @@ func TestPromptRuntimeUsesSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"provider": {
+			"openai-compatible": {
+				"api": "https://provider-api.test/v1",
+				"options": {
+					"apiKey": "config-key",
+					"baseURL": "https://configured.test/v1",
+					"headers": {"X-Provider": "provider"}
+				},
+				"models": {
+					"friendly-model": {
+						"id": "actual-model",
+						"options": {
+							"headers": {"X-Model": "model"}
+						}
+					}
+				}
+			}
+		}
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "friendly-model"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.BaseURL != "https://configured.test/v1" ||
+		client.request.APIKey != "config-key" ||
+		client.request.Model != "actual-model" {
+		t.Fatalf("provider request = %#v, want configured base URL, key, and api model", client.request)
+	}
+	if client.request.Headers["X-Provider"] != "provider" || client.request.Headers["X-Model"] != "model" {
+		t.Fatalf("headers = %#v, want provider and model headers", client.request.Headers)
+	}
+}
+
 func TestPromptRuntimeHonorsDisabledTools(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

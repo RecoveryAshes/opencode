@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/RecoveryAshes/opencode/internal/config"
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
@@ -25,6 +26,7 @@ type PromptRuntime struct {
 	Client   ChatClient
 	CWD      string
 	Root     string
+	Config   config.Info
 	// MaxToolIterations caps provider/tool feedback loops for one assistant turn.
 	MaxToolIterations int
 }
@@ -58,7 +60,11 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 
 	model := modelRef(userMessage)
-	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, localToolDefinitions(userMessage.Info.Tools))
+	providerConfig, err := runtime.providerConfig()
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, localToolDefinitions(userMessage.Info.Tools), providerConfig)
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -88,7 +94,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	})
 }
 
-func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition, providerConfig config.Info) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
 	maxIterations := runtime.MaxToolIterations
 	if maxIterations <= 0 {
 		maxIterations = 4
@@ -101,6 +107,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, err
 		}
+		applyConfiguredProviderOptions(&request, providerConfig, model)
 		request.Tools = definitions
 		next, err := client.Chat(ctx, request)
 		if err != nil {
@@ -118,6 +125,96 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 		}
 		messages = append(messages, toolResultMessage(next, executed))
 	}
+}
+
+func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
+	if runtime.Config != nil {
+		return runtime.Config, nil
+	}
+	directory := defaultString(runtime.CWD, ".")
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		return config.Info{}, nil
+	}
+	loaded, err := config.Load(config.LoadOptions{Directory: directory, Worktree: defaultString(runtime.Root, directory)})
+	if err != nil {
+		return nil, err
+	}
+	return loaded.Info, nil
+}
+
+func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef) {
+	providers, ok := info["provider"].(map[string]any)
+	if !ok {
+		return
+	}
+	rawProvider, ok := providers[model.ProviderID].(map[string]any)
+	if !ok {
+		return
+	}
+	if rawOptions, ok := rawProvider["options"].(map[string]any); ok {
+		applyChatOptions(request, rawOptions)
+	}
+	rawModels, _ := rawProvider["models"].(map[string]any)
+	rawModel, _ := rawModels[model.ModelID].(map[string]any)
+	if apiID, ok := rawModel["id"].(string); ok && apiID != "" {
+		request.Model = apiID
+	}
+	apiURL := stringFromConfig(rawProvider["api"])
+	if modelProvider, ok := rawModel["provider"].(map[string]any); ok {
+		apiURL = defaultString(stringFromConfig(modelProvider["api"]), apiURL)
+	}
+	if apiURL != "" && request.BaseURL == "" {
+		request.BaseURL = apiURL
+	}
+	if rawModelOptions, ok := rawModel["options"].(map[string]any); ok {
+		applyChatOptions(request, rawModelOptions)
+	}
+	if rawHeaders, ok := rawModel["headers"].(map[string]any); ok {
+		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
+	}
+}
+
+func applyChatOptions(request *llm.ChatRequest, options map[string]any) {
+	if value := stringFromConfig(options["apiKey"]); value != "" {
+		request.APIKey = value
+	}
+	if value := stringFromConfig(options["baseURL"]); value != "" {
+		request.BaseURL = value
+	}
+	if rawHeaders, ok := options["headers"].(map[string]any); ok {
+		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
+	}
+}
+
+func mergeHeaders(left map[string]string, right map[string]string) map[string]string {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	result := map[string]string{}
+	for key, value := range left {
+		result[key] = value
+	}
+	for key, value := range right {
+		result[key] = value
+	}
+	return result
+}
+
+func stringMapFromConfig(input map[string]any) map[string]string {
+	result := map[string]string{}
+	for key, value := range input {
+		if text, ok := value.(string); ok {
+			result[key] = text
+		}
+	}
+	return result
+}
+
+func stringFromConfig(input any) string {
+	if text, ok := input.(string); ok {
+		return text
+	}
+	return ""
 }
 
 func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
