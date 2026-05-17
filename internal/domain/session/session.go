@@ -153,6 +153,7 @@ type MessageInfo struct {
 	ProviderID string          `json:"providerID,omitempty"`
 	Mode       string          `json:"mode,omitempty"`
 	Path       *PathInfo       `json:"path,omitempty"`
+	Summary    bool            `json:"summary,omitempty"`
 	Cost       *float64        `json:"cost,omitempty"`
 	Tokens     *TokenUsage     `json:"tokens,omitempty"`
 	Variant    string          `json:"variant,omitempty"`
@@ -233,6 +234,7 @@ type AssistantInput struct {
 	Path     PathInfo
 	Text     string
 	Tools    []ToolExecution
+	Summary  bool
 	Finish   string
 	Tokens   TokenUsage
 	Cost     float64

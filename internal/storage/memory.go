@@ -616,6 +616,7 @@ func createAssistantMessage(sessionID session.ID, input session.AssistantInput) 
 			ProviderID: model.ProviderID,
 			Mode:       agent,
 			Path:       &path,
+			Summary:    input.Summary,
 			Cost:       &cost,
 			Tokens:     &input.Tokens,
 			Variant:    model.Variant,

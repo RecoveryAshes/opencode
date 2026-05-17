@@ -463,6 +463,9 @@ func OpenAPI(version string) map[string]any {
 			"/session/{sessionID}/abort": map[string]any{
 				"post": map[string]any{"operationId": "session.abort"},
 			},
+			"/session/{sessionID}/summarize": map[string]any{
+				"post": map[string]any{"operationId": "session.summarize"},
+			},
 			"/session/{sessionID}/share": map[string]any{
 				"post":   map[string]any{"operationId": "session.share"},
 				"delete": map[string]any{"operationId": "session.unshare"},
@@ -892,20 +895,23 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo
 		if r.Method != http.MethodPost {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
-		repo, ok := messages.(session.DiffRepository)
-		if ok {
-			diffs, err := repo.Diff(r.Context(), sessionID)
-			if err != nil {
-				return nil, statusFromError(err), err
-			}
-			if err := repo.SetDiff(r.Context(), sessionID, diffs); err != nil {
-				return nil, statusFromError(err), err
-			}
-		} else if sessionRepo, ok := messages.(session.Repository); ok {
-			_, err := sessionRepo.Update(r.Context(), sessionID, session.UpdateInput{Summary: &session.SummaryInfo{}})
-			if err != nil {
-				return nil, statusFromError(err), err
-			}
+		var payload struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+			Auto       *bool  `json:"auto,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		if payload.ProviderID == "" || payload.ModelID == "" {
+			return nil, http.StatusBadRequest, fmt.Errorf("providerID and modelID are required")
+		}
+		_, err := createCompactionPrompt(r.Context(), sessionID, payload.ProviderID, payload.ModelID, payload.Auto, messages, repo, events)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		if err := refreshSessionDiffSummary(r.Context(), sessionID, messages); err != nil {
+			return nil, statusFromError(err), err
 		}
 		return true, http.StatusOK, nil
 	}
@@ -1174,6 +1180,80 @@ func sessionMessages(r *http.Request, sessionID session.ID, messages session.Mes
 	}
 	result, err := messages.Messages(r.Context(), sessionID, limit)
 	return result, statusFromError(err), err
+}
+
+func createCompactionPrompt(ctx context.Context, sessionID session.ID, providerID string, modelID string, auto *bool, messages session.MessageRepository, repo session.Repository, events *eventBus) (session.WithParts, error) {
+	info, err := repo.Get(ctx, sessionID)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	if info.Revert != nil {
+		if _, err := repo.Update(ctx, sessionID, session.UpdateInput{ClearRevert: true}); err != nil {
+			return session.WithParts{}, err
+		}
+	}
+
+	items, err := messages.Messages(ctx, sessionID, 0)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	agent := defaultString(info.Agent, "build")
+	for index := len(items) - 1; index >= 0; index-- {
+		if items[index].Info.Role == "user" && items[index].Info.Agent != "" {
+			agent = items[index].Info.Agent
+			break
+		}
+	}
+
+	now := session.NowMillis()
+	if _, err := repo.Update(ctx, sessionID, session.UpdateInput{Compacting: &now}); err != nil {
+		return session.WithParts{}, err
+	}
+	defer func() {
+		_, _ = repo.Update(context.WithoutCancel(ctx), sessionID, session.UpdateInput{ClearCompact: true})
+	}()
+
+	isAuto := false
+	if auto != nil {
+		isAuto = *auto
+	}
+	created, err := messages.CreatePrompt(ctx, sessionID, session.PromptInput{
+		Agent: agent,
+		Model: &session.ModelRef{ProviderID: providerID, ModelID: modelID},
+		Parts: []session.Part{{
+			Type: "compaction",
+			Data: map[string]any{
+				"auto": isAuto,
+			},
+		}},
+	})
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	publishMessageEvents(events, sessionID, created)
+	events.publish("session.compaction.started", map[string]any{
+		"sessionID": sessionID,
+		"timestamp": now,
+		"reason":    map[bool]string{true: "auto", false: "manual"}[isAuto],
+	})
+	return created, nil
+}
+
+func refreshSessionDiffSummary(ctx context.Context, sessionID session.ID, messages session.MessageRepository) error {
+	repo, ok := messages.(session.DiffRepository)
+	if ok {
+		diffs, err := repo.Diff(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		return repo.SetDiff(ctx, sessionID, diffs)
+	}
+	sessionRepo, ok := messages.(session.Repository)
+	if !ok {
+		return nil
+	}
+	_, err := sessionRepo.Update(ctx, sessionID, session.UpdateInput{Summary: &session.SummaryInfo{}})
+	return err
 }
 
 type commandPayload struct {

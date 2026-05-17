@@ -612,6 +612,75 @@ func TestSessionLocalSubroutesHTTPAPI(t *testing.T) {
 	if reloaded.Summary == nil || reloaded.Summary.Files != 1 {
 		t.Fatalf("summary = %#v, want persisted diff summary", reloaded.Summary)
 	}
+	if reloaded.Time.Compacting != nil {
+		t.Fatalf("compacting = %#v, want cleared after summarize", reloaded.Time.Compacting)
+	}
+	messages, err := store.Messages(context.Background(), created.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if len(messages) == 0 {
+		t.Fatalf("messages = %#v, want compaction prompt", messages)
+	}
+	compaction := messages[len(messages)-1]
+	if compaction.Info.Role != "user" || compaction.Info.Agent != "build" {
+		t.Fatalf("compaction info = %#v, want user/build", compaction.Info)
+	}
+	if compaction.Info.Model == nil || compaction.Info.Model.ProviderID != "openai-compatible" || compaction.Info.Model.ModelID != "mock-model" {
+		t.Fatalf("compaction model = %#v, want summarize payload model", compaction.Info.Model)
+	}
+	if len(compaction.Parts) != 1 || compaction.Parts[0].Type != "compaction" || compaction.Parts[0].Data["auto"] != false {
+		t.Fatalf("compaction parts = %#v, want manual compaction part", compaction.Parts)
+	}
+}
+
+func TestSessionSummarizeUsesLastUserAgentAndAutoFlag(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"summarize","agent":"build"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/message", "application/json", strings.NewReader(`{"agent":"plan","parts":[{"type":"text","text":"plan first"}],"noReply":true}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("message status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/summarize", "application/json", strings.NewReader(`{"providerID":"anthropic","modelID":"claude-sonnet-4-5","auto":true}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/summarize error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("summarize status = %d, want 200", resp.StatusCode)
+	}
+
+	messages, err := store.Messages(context.Background(), created.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	compaction := messages[len(messages)-1]
+	if compaction.Info.Agent != "plan" {
+		t.Fatalf("compaction agent = %q, want last user agent plan", compaction.Info.Agent)
+	}
+	if compaction.Info.Model == nil || compaction.Info.Model.ProviderID != "anthropic" || compaction.Info.Model.ModelID != "claude-sonnet-4-5" {
+		t.Fatalf("compaction model = %#v, want summarize payload model", compaction.Info.Model)
+	}
+	if len(compaction.Parts) != 1 || compaction.Parts[0].Type != "compaction" || compaction.Parts[0].Data["auto"] != true {
+		t.Fatalf("compaction parts = %#v, want auto compaction part", compaction.Parts)
+	}
 }
 
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
