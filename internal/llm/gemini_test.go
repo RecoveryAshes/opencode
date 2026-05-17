@@ -95,6 +95,45 @@ func TestGeminiChatParsesSSE(t *testing.T) {
 	}
 }
 
+func TestGeminiChatSendsToolDefinitions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		tools := body["tools"].([]any)
+		declarations := tools[0].(map[string]any)["functionDeclarations"].([]any)
+		first := declarations[0].(map[string]any)
+		params := first["parameters"].(map[string]any)
+		if first["name"] != "read" || params["type"] != "object" {
+			t.Fatalf("tools = %#v, want Gemini function declaration", tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "google",
+		Protocol:   "gemini",
+		BaseURL:    mock.URL,
+		Model:      "gemini-2.5-flash",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Tools: []ToolDefinition{{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"filePath": map[string]any{"type": "string"}},
+				"required":   []string{"filePath"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestProviderChatClientRoutesGemini(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

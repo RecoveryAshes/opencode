@@ -110,6 +110,44 @@ func TestAnthropicChatParsesSSE(t *testing.T) {
 	}
 }
 
+func TestAnthropicChatSendsToolDefinitions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		tools := body["tools"].([]any)
+		first := tools[0].(map[string]any)
+		schema := first["input_schema"].(map[string]any)
+		if first["name"] != "read" || schema["type"] != "object" {
+			t.Fatalf("tools = %#v, want Anthropic input_schema", tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewAnthropicClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "anthropic",
+		Protocol:   "anthropic-messages",
+		BaseURL:    mock.URL,
+		Model:      "claude-sonnet-4-5",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Tools: []ToolDefinition{{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"filePath": map[string]any{"type": "string"}},
+				"required":   []string{"filePath"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestProviderChatClientRoutesAnthropic(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

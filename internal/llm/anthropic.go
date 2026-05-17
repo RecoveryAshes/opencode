@@ -42,6 +42,9 @@ func (client *AnthropicClient) Chat(ctx context.Context, request ChatRequest) (C
 	if request.Temperature != nil {
 		body.Temperature = request.Temperature
 	}
+	if len(request.Tools) > 0 {
+		body.Tools = anthropicToolDefinitions(request.Tools)
+	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
 			continue
@@ -102,6 +105,7 @@ type anthropicRequest struct {
 	Stream      bool               `json:"stream"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	Tools       []anthropicToolDef `json:"tools,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -115,6 +119,27 @@ type anthropicContentBlock struct {
 	ID    string         `json:"id,omitempty"`
 	Name  string         `json:"name,omitempty"`
 	Input map[string]any `json:"input,omitempty"`
+}
+
+type anthropicToolDef struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+func anthropicToolDefinitions(tools []ToolDefinition) []anthropicToolDef {
+	result := make([]anthropicToolDef, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		result = append(result, anthropicToolDef{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: defaultToolParameters(tool.Parameters),
+		})
+	}
+	return result
 }
 
 type anthropicResponse struct {

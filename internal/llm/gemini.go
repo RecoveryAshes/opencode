@@ -35,6 +35,9 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 	body := geminiRequest{
 		Contents: make([]geminiContent, 0, len(request.Messages)),
 	}
+	if len(request.Tools) > 0 {
+		body.Tools = geminiToolDefinitions(request.Tools)
+	}
 	if request.MaxTokens != nil || request.Temperature != nil {
 		body.GenerationConfig = &geminiGenerationConfig{
 			MaxOutputTokens: request.MaxTokens,
@@ -97,6 +100,7 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 type geminiRequest struct {
 	Contents         []geminiContent         `json:"contents"`
 	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	Tools            []geminiToolDef         `json:"tools,omitempty"`
 }
 
 type geminiContent struct {
@@ -113,6 +117,43 @@ type geminiPart struct {
 type geminiFunctionCall struct {
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`
+}
+
+type geminiToolDef struct {
+	FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations"`
+}
+
+type geminiFunctionDeclaration struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func geminiToolDefinitions(tools []ToolDefinition) []geminiToolDef {
+	declarations := make([]geminiFunctionDeclaration, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		declarations = append(declarations, geminiFunctionDeclaration{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  sanitizeGeminiSchema(defaultToolParameters(tool.Parameters)),
+		})
+	}
+	if len(declarations) == 0 {
+		return nil
+	}
+	return []geminiToolDef{{FunctionDeclarations: declarations}}
+}
+
+func sanitizeGeminiSchema(schema map[string]any) map[string]any {
+	result := cloneAnyMap(schema)
+	if typ, _ := result["type"].(string); typ != "object" {
+		delete(result, "properties")
+		delete(result, "required")
+	}
+	return result
 }
 
 type geminiGenerationConfig struct {
