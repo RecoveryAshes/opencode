@@ -65,6 +65,7 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 						"name":        "Custom Large",
 						"id":          "custom-large-api",
 						"attachment":  true,
+						"reasoning":   true,
 						"tool_call":   true,
 						"temperature": false,
 						"cost": map[string]any{
@@ -101,7 +102,7 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 						},
 						"provider": map[string]any{
 							"api": "https://custom.local/model-api",
-							"npm": "@ai-sdk/model-custom",
+							"npm": "@ai-sdk/openai-compatible",
 						},
 						"variants": map[string]any{
 							"low": map[string]any{
@@ -136,7 +137,7 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 	if model.ID != "custom-large" ||
 		model.API["id"] != "custom-large-api" ||
 		model.API["url"] != "https://custom.local/model-api" ||
-		model.API["npm"] != "@ai-sdk/model-custom" ||
+		model.API["npm"] != "@ai-sdk/openai-compatible" ||
 		model.Name != "Custom Large" ||
 		!model.Capabilities.Attachment ||
 		!model.Capabilities.Toolcall ||
@@ -152,6 +153,7 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 		model.Cost.ExperimentalOver200K.Input != 5 ||
 		model.Cost.ExperimentalOver200K.Cache.Read != 0.5 ||
 		model.Variants["low"]["reasoningEffort"] != "low" ||
+		model.Variants["medium"]["reasoningEffort"] != "medium" ||
 		model.Variants["custom"]["budgetTokens"] != 5000 ||
 		model.Variants["custom"]["disabled"] != nil ||
 		model.Limit.Context != 200000 ||
@@ -167,6 +169,31 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 	}
 	if _, ok := result.Default["openai"]; ok {
 		t.Fatalf("default includes disabled openai: %#v", result.Default)
+	}
+}
+
+func TestConfiguredReasoningModelGetsDefaultVariants(t *testing.T) {
+	result := ListProviders(config.Info{
+		"enabled_providers": []any{"custom-ai"},
+		"provider": map[string]any{
+			"custom-ai": map[string]any{
+				"models": map[string]any{
+					"gpt-5-compatible": map[string]any{
+						"reasoning": true,
+						"provider": map[string]any{
+							"npm": "@ai-sdk/openai-compatible",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	model := result.All[0].Models["gpt-5-compatible"]
+	if model.Variants["low"]["reasoningEffort"] != "low" ||
+		model.Variants["medium"]["reasoningEffort"] != "medium" ||
+		model.Variants["high"]["reasoningEffort"] != "high" {
+		t.Fatalf("variants = %#v, want default reasoning efforts", model.Variants)
 	}
 }
 

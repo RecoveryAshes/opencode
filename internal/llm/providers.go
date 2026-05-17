@@ -352,9 +352,53 @@ func modelFromConfig(providerID string, modelID string, providerInput map[string
 			ExperimentalOver200K: over200KCostFromConfig(cost["context_over_200k"]),
 		}
 	}
-	model.Variants = variantsFromConfig(input["variants"])
 	model.Capabilities = capabilitiesFromConfig(input, model.Capabilities)
+	configVariants, disabledVariants := variantsFromConfig(input["variants"])
+	model.Variants = mergeModelVariants(defaultReasoningVariants(model), configVariants, disabledVariants)
 	return model
+}
+
+func defaultReasoningVariants(model PublicModel) map[string]map[string]any {
+	if !model.Capabilities.Reasoning {
+		return nil
+	}
+	id := strings.ToLower(model.ID)
+	for _, blocked := range []string{"deepseek-chat", "deepseek-reasoner", "deepseek-r1", "deepseek-v3", "minimax", "glm", "kimi", "k2p", "qwen", "big-pickle", "grok"} {
+		if strings.Contains(id, blocked) {
+			return nil
+		}
+	}
+	apiNPM, _ := model.API["npm"].(string)
+	switch apiNPM {
+	case "@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/openai-compatible", "@ai-sdk/github-copilot", "@ai-sdk/xai", "@ai-sdk/deepinfra", "@ai-sdk/togetherai", "@ai-sdk/cerebras", "venice-ai-sdk-provider":
+		return map[string]map[string]any{
+			"low":    {"reasoningEffort": "low"},
+			"medium": {"reasoningEffort": "medium"},
+			"high":   {"reasoningEffort": "high"},
+		}
+	default:
+		return nil
+	}
+}
+
+func mergeModelVariants(base map[string]map[string]any, override map[string]map[string]any, disabled map[string]bool) map[string]map[string]any {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	result := map[string]map[string]any{}
+	for key, value := range base {
+		if disabled[key] {
+			continue
+		}
+		result[key] = cloneProviderAnyMap(value)
+	}
+	for key, value := range override {
+		if disabled[key] {
+			continue
+		}
+		result[key] = cloneProviderAnyMap(value)
+	}
+	return result
 }
 
 func costTiersFromConfig(input any) []CostTier {
@@ -400,25 +444,27 @@ func over200KCostFromConfig(input any) *Over200KModelCost {
 	}
 }
 
-func variantsFromConfig(input any) map[string]map[string]any {
+func variantsFromConfig(input any) (map[string]map[string]any, map[string]bool) {
 	raw, ok := input.(map[string]any)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	result := map[string]map[string]any{}
+	disabled := map[string]bool{}
 	for name, item := range raw {
 		record, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		if boolFromAny(record["disabled"], false) {
+			disabled[name] = true
 			continue
 		}
 		cleaned := cloneProviderAnyMap(record)
 		delete(cleaned, "disabled")
 		result[name] = cleaned
 	}
-	return result
+	return result, disabled
 }
 
 func capabilitiesFromConfig(input map[string]any, fallback Capabilities) Capabilities {
