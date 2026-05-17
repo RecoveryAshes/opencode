@@ -59,12 +59,12 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 		messages = lowerTranscript([]session.WithParts{userMessage})
 	}
 
-	model := modelRef(userMessage)
 	providerConfig, err := runtime.providerConfig()
 	if err != nil {
 		return session.WithParts{}, err
 	}
-	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, localToolDefinitions(userMessage.Info.Tools), providerConfig)
+	model, configuredDefault := modelRef(userMessage, providerConfig)
+	response, tools, usage, effectiveModel, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, localToolDefinitions(userMessage.Info.Tools), providerConfig, configuredDefault)
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -72,7 +72,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	return runtime.Messages.CreateAssistant(ctx, sessionID, session.AssistantInput{
 		ParentID: userMessage.Info.ID,
 		Agent:    defaultString(userMessage.Info.Agent, "build"),
-		Model:    model,
+		Model:    effectiveModel,
 		Path: session.PathInfo{
 			CWD:  defaultString(runtime.CWD, mustGetwd()),
 			Root: defaultString(runtime.Root, defaultString(runtime.CWD, mustGetwd())),
@@ -94,7 +94,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	})
 }
 
-func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, agentName string, definitions []llm.ToolDefinition, providerConfig config.Info) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, agentName string, definitions []llm.ToolDefinition, providerConfig config.Info, configuredDefault bool) (llm.ChatResponse, []session.ToolExecution, llm.Usage, session.ModelRef, error) {
 	maxIterations := runtime.MaxToolIterations
 	if maxIterations <= 0 {
 		maxIterations = 4
@@ -105,23 +105,30 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 	for iteration := 0; ; iteration++ {
 		request, err := llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
 		if err != nil {
-			return llm.ChatResponse{}, nil, llm.Usage{}, err
+			if !configuredDefault {
+				return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+			}
+			model = session.ModelRef{ProviderID: "openai-compatible", ModelID: "gpt-4o-mini"}
+			request, err = llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
+			if err != nil {
+				return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+			}
 		}
 		applyConfiguredProviderOptions(&request, providerConfig, model, agentName, sessionID)
 		request.Tools = definitions
 		next, err := client.Chat(ctx, request)
 		if err != nil {
-			return llm.ChatResponse{}, nil, llm.Usage{}, err
+			return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
 		}
 		response = next
 		usage = mergeUsage(usage, next.Usage)
 		if len(next.ToolCalls) == 0 {
-			return response, tools, usage, nil
+			return response, tools, usage, model, nil
 		}
 		executed := runtime.executeToolCalls(ctx, sessionID, next.ToolCalls)
 		tools = append(tools, executed...)
 		if iteration+1 >= maxIterations {
-			return response, tools, usage, nil
+			return response, tools, usage, model, nil
 		}
 		messages = append(messages, toolResultMessage(next, executed))
 	}
@@ -713,14 +720,29 @@ func textContent(parts []session.Part) string {
 	return output.String()
 }
 
-func modelRef(message session.WithParts) session.ModelRef {
+func modelRef(message session.WithParts, info config.Info) (session.ModelRef, bool) {
 	if message.Info.Model != nil {
-		return *message.Info.Model
+		return *message.Info.Model, false
+	}
+	if configured := stringFromConfig(info["model"]); configured != "" {
+		providerID, modelID := parseModelRef(configured)
+		return session.ModelRef{
+			ProviderID: providerID,
+			ModelID:    modelID,
+		}, true
 	}
 	return session.ModelRef{
 		ProviderID: "openai-compatible",
 		ModelID:    "gpt-4o-mini",
+	}, false
+}
+
+func parseModelRef(value string) (string, string) {
+	providerID, modelID, ok := strings.Cut(value, "/")
+	if !ok {
+		return "openai-compatible", value
 	}
+	return providerID, modelID
 }
 
 func optionalPositive(value int) *int {
