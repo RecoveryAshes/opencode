@@ -33,7 +33,7 @@ func repoCloneTool(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if ref.protocol == "file" {
+	if ref.protocol == "file:" {
 		return Result{}, fmt.Errorf("local file repositories are not supported")
 	}
 	branch := optionalString(request.Params, "branch", "")
@@ -213,7 +213,7 @@ func parseRepositoryReference(input string) (repositoryReference, error) {
 		if len(parts) == 2 {
 			return buildRepositoryReference("github.com", parts, "", "")
 		}
-		if len(parts) >= 2 && strings.Contains(parts[0], ".") {
+		if len(parts) >= 2 && hostLike(parts[0]) {
 			return buildRepositoryReference(parts[0], parts[1:], "", "")
 		}
 	}
@@ -222,9 +222,13 @@ func parseRepositoryReference(input string) (repositoryReference, error) {
 		return repositoryReference{}, fmt.Errorf("repository must be a git URL, host/path reference, or GitHub owner/repo shorthand")
 	}
 	if parsed.Scheme == "file" {
-		return buildRepositoryReference("file", splitRepoPath(parsed.Path), cleaned, "file")
+		return buildFileRepositoryReference(parsed, cleaned)
 	}
-	return buildRepositoryReference(parsed.Host, splitRepoPath(parsed.Path), cleaned, parsed.Scheme)
+	remote := cleaned
+	if parsed.Host == "github.com" {
+		remote = githubRemote(strings.Join(splitRepoPath(parsed.Path), "/"))
+	}
+	return buildRepositoryReference(parsed.Host, splitRepoPath(parsed.Path), remote, parsed.Scheme+":")
 }
 
 func buildRepositoryReference(host string, segments []string, remote string, protocol string) (repositoryReference, error) {
@@ -236,13 +240,13 @@ func buildRepositoryReference(host string, segments []string, remote string, pro
 		}
 		cleanSegments = append(cleanSegments, segment)
 	}
-	if host == "" || strings.HasPrefix(host, "-") || len(cleanSegments) == 0 {
+	if !safeRepositoryHost(host) || len(cleanSegments) == 0 {
 		return repositoryReference{}, fmt.Errorf("repository must be a git URL, host/path reference, or GitHub owner/repo shorthand")
 	}
 	pathName := strings.Join(cleanSegments, "/")
 	if remote == "" {
 		if host == "github.com" {
-			remote = "https://github.com/" + pathName + ".git"
+			remote = githubRemote(pathName)
 		} else {
 			remote = "https://" + host + "/" + pathName + ".git"
 		}
@@ -263,6 +267,54 @@ func buildRepositoryReference(host string, segments []string, remote string, pro
 		label:    label,
 		protocol: protocol,
 	}, nil
+}
+
+func buildFileRepositoryReference(parsed *url.URL, remote string) (repositoryReference, error) {
+	filePath := filepath.Clean(parsed.Path)
+	segments := splitRepoPath(filePath)
+	if len(segments) == 0 {
+		return repositoryReference{}, fmt.Errorf("repository must be a git URL, host/path reference, or GitHub owner/repo shorthand")
+	}
+	cleanSegments := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		cleanSegments = append(cleanSegments, strings.TrimSuffix(segment, ":"))
+	}
+	return repositoryReference{
+		host:     "file",
+		path:     filePath,
+		segments: cleanSegments,
+		repo:     strings.TrimSuffix(segments[len(segments)-1], ".git"),
+		remote:   remote,
+		label:    filePath,
+		protocol: "file:",
+	}, nil
+}
+
+func githubRemote(pathName string) string {
+	base := strings.TrimSpace(os.Getenv("OPENCODE_REPO_CLONE_GITHUB_BASE_URL"))
+	if base == "" {
+		return "https://github.com/" + pathName + ".git"
+	}
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "https://github.com/" + pathName + ".git"
+	}
+	relative, err := url.Parse(pathName + ".git")
+	if err != nil {
+		return "https://github.com/" + pathName + ".git"
+	}
+	return parsed.ResolveReference(relative).String()
+}
+
+func safeRepositoryHost(host string) bool {
+	return host != "" && !strings.HasPrefix(host, "-") && !strings.ContainsAny(host, `/\ `+"\t\r\n")
+}
+
+func hostLike(input string) bool {
+	return strings.Contains(input, ".") || strings.Contains(input, ":") || input == "localhost"
 }
 
 func repositoryCachePath(ref repositoryReference) string {

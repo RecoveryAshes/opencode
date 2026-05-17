@@ -364,6 +364,47 @@ func TestParseRepositoryReferenceSupportsGitSSHShorthand(t *testing.T) {
 	}
 }
 
+func TestParseRepositoryReferenceMatchesTypeScriptUtility(t *testing.T) {
+	t.Setenv("OPENCODE_REPO_CLONE_GITHUB_BASE_URL", "https://mirror.example/repos")
+
+	github, err := parseRepositoryReference("https://github.com/anomalyco/opencode.git#readme")
+	if err != nil {
+		t.Fatalf("parse github reference: %v", err)
+	}
+	if github.protocol != "https:" || github.label != "anomalyco/opencode" || github.remote != "https://mirror.example/repos/anomalyco/opencode.git" {
+		t.Fatalf("github reference = %#v", github)
+	}
+
+	localhost, err := parseRepositoryReference("localhost/team/repo")
+	if err != nil {
+		t.Fatalf("parse localhost reference: %v", err)
+	}
+	if localhost.host != "localhost" || localhost.path != "team/repo" || localhost.remote != "https://localhost/team/repo.git" {
+		t.Fatalf("localhost reference = %#v", localhost)
+	}
+
+	fileRef, err := parseRepositoryReference("file:///tmp/opencode.git")
+	if err != nil {
+		t.Fatalf("parse file reference: %v", err)
+	}
+	if fileRef.protocol != "file:" || fileRef.host != "file" || fileRef.label != "/tmp/opencode.git" {
+		t.Fatalf("file reference = %#v", fileRef)
+	}
+}
+
+func TestRepositoryBranchValidationMatchesTypeScriptUtility(t *testing.T) {
+	for _, branch := range []string{"main", "feature/go_migration-1", "release.v1"} {
+		if !validRepositoryBranch(branch) {
+			t.Fatalf("validRepositoryBranch(%q) = false, want true", branch)
+		}
+	}
+	for _, branch := range []string{"-main", "feature..bad", "feature bad"} {
+		if validRepositoryBranch(branch) {
+			t.Fatalf("validRepositoryBranch(%q) = true, want false", branch)
+		}
+	}
+}
+
 func TestReadDirectoryAndBinaryRejection(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
