@@ -1628,6 +1628,48 @@ func TestRunConfigLoadsLocalConfig(t *testing.T) {
 	}
 }
 
+func TestRunPluginListAndInstallLocalPlugin(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	writeAppFile(t, filepath.Join(xdg, "opencode", "opencode.jsonc"), `{"plugin":["global-plugin"]}`)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{"plugin":["project-plugin"]}`)
+	writeAppFile(t, filepath.Join(root, ".opencode", "plugins", "auto.js"), `export default { id: "auto", server() {} }`)
+	localPlugin := filepath.Join(root, "local-plugin.js")
+	writeAppFile(t, localPlugin, `export default { id: "local", server() {} }`)
+
+	plugins := runAppJSON[[]map[string]any](t, context.Background(), []string{"plugin", "--directory", root, "--json", "list"})
+	if len(plugins) != 3 {
+		t.Fatalf("plugins = %#v, want global, project, autodiscovered", plugins)
+	}
+	if plugins[0]["name"] != "global-plugin" || plugins[0]["scope"] != "global" {
+		t.Fatalf("plugins[0] = %#v, want global plugin", plugins[0])
+	}
+
+	installed := runAppJSON[map[string]any](t, context.Background(), []string{
+		"plugin",
+		"--directory", root,
+		"--json",
+		localPlugin,
+	})
+	if installed["spec"] != localPlugin {
+		t.Fatalf("installed = %#v, want local spec", installed)
+	}
+	updates := installed["updates"].([]any)
+	first := updates[0].(map[string]any)
+	if first["kind"] != "server" || first["mode"] != "add" {
+		t.Fatalf("updates = %#v, want server add", updates)
+	}
+	written := readAppJSON(t, filepath.Join(root, ".opencode", "opencode.json"))
+	list := written["plugin"].([]any)
+	if len(list) != 1 || list[0] != localPlugin {
+		t.Fatalf("written plugin config = %#v, want local plugin", written)
+	}
+}
+
 func TestRunProvidersJSONUsesConfig(t *testing.T) {
 	home := t.TempDir()
 	xdg := filepath.Join(home, ".config")

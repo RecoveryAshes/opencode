@@ -77,6 +77,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return ptyCommand(ctx, args[1:], stdout, stderr)
 	case "skills":
 		return skillsCommand(args[1:], stdout, stderr)
+	case "plugin", "plug":
+		return pluginCommand(args[1:], stdout, stderr)
 	case "formatters":
 		return formattersCommand(args[1:], stdout, stderr)
 	case "lsp":
@@ -1351,6 +1353,75 @@ func skillsCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 }
 
+func pluginCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("plugin", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover local plugin config")
+	worktree := fs.String("worktree", "", "worktree boundary for local plugin config")
+	jsonOutput := fs.Bool("json", false, "write plugin data JSON")
+	global := fs.Bool("global", false, "install in global config")
+	force := fs.Bool("force", false, "replace existing plugin version")
+	fs.BoolVar(global, "g", false, "install in global config")
+	fs.BoolVar(force, "f", false, "replace existing plugin version")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode plugin [--directory DIR] [--worktree DIR] [--json] list")
+		_, _ = fmt.Fprintln(stderr, "usage: opencode plugin [--directory DIR] [--worktree DIR] [--global] [--force] MODULE")
+		return 2
+	}
+	switch fs.Arg(0) {
+	case "list":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode plugin [--directory DIR] [--worktree DIR] [--json] list")
+			return 2
+		}
+		plugins, err := config.ListPlugins(*directory, *worktree)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "list plugins failed: %v\n", err)
+			return 1
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, plugins)
+		}
+		if len(plugins) == 0 {
+			_, _ = fmt.Fprintln(stdout, "No plugins configured")
+			return 0
+		}
+		for _, plugin := range plugins {
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", plugin.Name, plugin.Kind, plugin.Scope, plugin.Source); err != nil {
+				return 1
+			}
+		}
+		return 0
+	default:
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode plugin [--directory DIR] [--worktree DIR] [--global] [--force] MODULE")
+			return 2
+		}
+		result, err := config.InstallPlugin(fs.Arg(0), config.PluginInstallOptions{
+			Directory: *directory,
+			Worktree:  *worktree,
+			Global:    *global,
+			Force:     *force,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "install plugin failed: %v\n", err)
+			return 1
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, result)
+		}
+		for _, update := range result.Updates {
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\n", update.Kind, update.Mode, update.File); err != nil {
+				return 1
+			}
+		}
+		return 0
+	}
+}
+
 func formattersCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("formatters", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -2110,6 +2181,8 @@ commands:
   skills [--directory DIR] [--json] COMMAND
   formatters [--directory DIR] [--json] COMMAND
   lsp [--directory DIR] [--json] COMMAND
+  plugin [--directory DIR] [--worktree DIR] [--global] [--force] MODULE
+  plugin [--directory DIR] [--worktree DIR] [--json] list
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

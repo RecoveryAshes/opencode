@@ -14,6 +14,7 @@ type Discovery struct {
 	Root     string   `json:"root"`
 	Agents   []string `json:"agents"`
 	Commands []string `json:"commands"`
+	Plugins  []string `json:"plugins"`
 	Skills   []string `json:"skills"`
 	Themes   []string `json:"themes"`
 }
@@ -32,6 +33,9 @@ func Discover(root string) (Discovery, error) {
 		return Discovery{}, err
 	}
 	if result.Commands, err = commandFileList(root); err != nil {
+		return Discovery{}, err
+	}
+	if result.Plugins, err = pluginFileList(root); err != nil {
 		return Discovery{}, err
 	}
 	if result.Skills, err = markdownFilesInDirs(
@@ -53,6 +57,14 @@ func Discover(root string) (Discovery, error) {
 		return Discovery{}, err
 	}
 	return result, nil
+}
+
+func pluginFileList(root string) ([]string, error) {
+	return filesInDirs(
+		[]string{".ts", ".js"},
+		filepath.Join(root, ".opencode", "plugin"),
+		filepath.Join(root, ".opencode", "plugins"),
+	)
 }
 
 func externalSkillFiles(directory string, worktree string) ([]string, error) {

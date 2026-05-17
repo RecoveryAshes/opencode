@@ -58,6 +58,7 @@ func Load(opts LoadOptions) (LoadResult, error) {
 	result := LoadResult{
 		Info: Info{},
 	}
+	pluginOrigins := []PluginOrigin{}
 
 	globalDir := GlobalConfigDir()
 	for _, file := range []string{
@@ -65,13 +66,13 @@ func Load(opts LoadOptions) (LoadResult, error) {
 		filepath.Join(globalDir, "opencode.json"),
 		filepath.Join(globalDir, "opencode.jsonc"),
 	} {
-		if err := result.mergeFile(file); err != nil {
+		if err := result.mergeFile(file, &pluginOrigins); err != nil {
 			return LoadResult{}, err
 		}
 	}
 
 	if explicit := os.Getenv("OPENCODE_CONFIG"); explicit != "" {
-		if err := result.mergeFile(explicit); err != nil {
+		if err := result.mergeFile(explicit, &pluginOrigins); err != nil {
 			return LoadResult{}, err
 		}
 	}
@@ -82,7 +83,7 @@ func Load(opts LoadOptions) (LoadResult, error) {
 			return LoadResult{}, err
 		}
 		for _, file := range files {
-			if err := result.mergeFile(file); err != nil {
+			if err := result.mergeFile(file, &pluginOrigins); err != nil {
 				return LoadResult{}, err
 			}
 		}
@@ -101,7 +102,7 @@ func Load(opts LoadOptions) (LoadResult, error) {
 			filepath.Join(dir, "opencode.json"),
 			filepath.Join(dir, "opencode.jsonc"),
 		} {
-			if err := result.mergeFile(file); err != nil {
+			if err := result.mergeFile(file, &pluginOrigins); err != nil {
 				return LoadResult{}, err
 			}
 		}
@@ -114,6 +115,11 @@ func Load(opts LoadOptions) (LoadResult, error) {
 		}
 		result.Info = mergeInfo(result.Info, next)
 		result.Files = append(result.Files, "OPENCODE_CONFIG_CONTENT")
+		specs, err := pluginSpecsFromInfo(next, "OPENCODE_CONFIG_CONTENT")
+		if err != nil {
+			return LoadResult{}, err
+		}
+		pluginOrigins = mergePluginOrigins(pluginOrigins, "OPENCODE_CONFIG_CONTENT", "local", specs)
 	}
 
 	discovery, err := Discover(directory)
@@ -121,6 +127,27 @@ func Load(opts LoadOptions) (LoadResult, error) {
 		return LoadResult{}, err
 	}
 	result.Discovery = discovery
+	for _, dir := range dirs {
+		list, err := DiscoverPlugins(dir)
+		if err != nil {
+			return LoadResult{}, err
+		}
+		pluginOrigins = mergePluginOrigins(pluginOrigins, dir, pluginScopeForSource(dir, directory), list)
+	}
+	if len(pluginOrigins) > 0 {
+		encoded := make([]any, 0, len(pluginOrigins))
+		plugins := make([]any, 0, len(pluginOrigins))
+		for _, origin := range pluginOrigins {
+			encoded = append(encoded, map[string]any{
+				"spec":   origin.Spec,
+				"source": origin.Source,
+				"scope":  origin.Scope,
+			})
+			plugins = append(plugins, origin.Spec)
+		}
+		result.Info["plugin"] = plugins
+		result.Info["plugin_origins"] = encoded
+	}
 	return result, nil
 }
 
@@ -332,7 +359,7 @@ func writableInfo(info Info, global bool) Info {
 	return result
 }
 
-func (result *LoadResult) mergeFile(path string) error {
+func (result *LoadResult) mergeFile(path string, pluginOrigins *[]PluginOrigin) error {
 	if !regularFile(path) {
 		return nil
 	}
@@ -349,6 +376,11 @@ func (result *LoadResult) mergeFile(path string) error {
 	}
 	result.Info = mergeInfo(result.Info, next)
 	result.Files = append(result.Files, path)
+	specs, err := pluginSpecsFromInfo(next, path)
+	if err != nil {
+		return err
+	}
+	*pluginOrigins = mergePluginOrigins(*pluginOrigins, path, pluginScopeForSource(path, ""), specs)
 	return nil
 }
 
