@@ -26,6 +26,7 @@ type Message struct {
 // ChatRequest describes one text-only OpenAI-compatible chat completion.
 type ChatRequest struct {
 	ProviderID  string
+	Protocol    string
 	BaseURL     string
 	APIKey      string
 	AuthHeader  string
@@ -40,11 +41,12 @@ type ChatRequest struct {
 
 // Usage is token accounting returned by OpenAI-compatible providers.
 type Usage struct {
-	InputTokens     int
-	OutputTokens    int
-	ReasoningTokens int
-	CacheReadTokens int
-	TotalTokens     int
+	InputTokens      int
+	OutputTokens     int
+	ReasoningTokens  int
+	CacheReadTokens  int
+	CacheWriteTokens int
+	TotalTokens      int
 }
 
 // ChatResponse is the assistant text and finish metadata returned by a provider.
@@ -250,7 +252,7 @@ func decodeOpenAIChatResponse(data []byte) (ChatResponse, error) {
 	}
 	return ChatResponse{
 		Text:         response.Choices[0].Message.Content,
-		FinishReason: mapFinishReason(response.Choices[0].FinishReason),
+		FinishReason: mapOpenAIFinishReason(response.Choices[0].FinishReason),
 		Usage:        mapOpenAIUsage(response.Usage),
 	}, nil
 }
@@ -290,7 +292,7 @@ func decodeOpenAIChatStream(reader io.Reader) (ChatResponse, error) {
 	}
 	return ChatResponse{
 		Text:         text.String(),
-		FinishReason: mapFinishReason(finish),
+		FinishReason: mapOpenAIFinishReason(finish),
 		Usage:        usage,
 	}, nil
 }
@@ -313,7 +315,7 @@ func mapOpenAIUsage(usage openAIUsage) Usage {
 	return result
 }
 
-func mapFinishReason(reason string) string {
+func mapOpenAIFinishReason(reason string) string {
 	switch reason {
 	case "", "stop":
 		return "stop"

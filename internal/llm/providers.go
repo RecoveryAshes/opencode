@@ -64,7 +64,18 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			return ChatRequest{}, fmt.Errorf("azure provider requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")
 		}
 		return profile.chatRequest(messages, modelID), nil
-	case "anthropic", "google", "google-vertex", "amazon-bedrock", "cohere", "vercel":
+	case "anthropic":
+		profile := anthropicProfile{
+			ProviderID:     "anthropic",
+			DefaultBaseURL: "https://api.anthropic.com/v1",
+			BaseURLEnvVars: []string{"OPENCODE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"},
+			APIKeyEnvVars:  []string{"OPENCODE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"},
+			ModelEnvVars:   []string{"OPENCODE_ANTHROPIC_MODEL", "ANTHROPIC_MODEL"},
+			DefaultModel:   "claude-sonnet-4-5",
+			Headers:        map[string]string{"anthropic-version": "2023-06-01"},
+		}
+		return profile.chatRequest(messages, modelID), nil
+	case "google", "google-vertex", "amazon-bedrock", "cohere", "vercel":
 		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
@@ -111,6 +122,7 @@ type openAIProfile struct {
 func (profile openAIProfile) chatRequest(messages []Message, modelID string) ChatRequest {
 	return ChatRequest{
 		ProviderID:  profile.ProviderID,
+		Protocol:    "openai-compatible",
 		BaseURL:     defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
 		APIKey:      firstEnv(profile.APIKeyEnvVars...),
 		AuthHeader:  profile.AuthHeader,
@@ -121,6 +133,29 @@ func (profile openAIProfile) chatRequest(messages []Message, modelID string) Cha
 		Messages:    messages,
 		Temperature: nil,
 		MaxTokens:   nil,
+	}
+}
+
+type anthropicProfile struct {
+	ProviderID     string
+	DefaultBaseURL string
+	BaseURLEnvVars []string
+	APIKeyEnvVars  []string
+	ModelEnvVars   []string
+	DefaultModel   string
+	Headers        map[string]string
+}
+
+func (profile anthropicProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	return ChatRequest{
+		ProviderID: profile.ProviderID,
+		Protocol:   "anthropic-messages",
+		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:     firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader: "x-api-key",
+		Headers:    cloneStringMap(profile.Headers),
+		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:   messages,
 	}
 }
 

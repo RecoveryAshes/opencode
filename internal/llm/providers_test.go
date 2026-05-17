@@ -100,10 +100,27 @@ func TestResolveChatRequestAzureUsesAPIKeyHeaderAndVersion(t *testing.T) {
 	}
 }
 
-func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
-	if _, err := ResolveChatRequest(nil, "anthropic", "claude"); err == nil || !strings.Contains(err.Error(), "non-OpenAI chat protocol") {
-		t.Fatalf("anthropic error = %v, want unsupported protocol", err)
+func TestResolveChatRequestAnthropicMessages(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://local.anthropic.test/v1")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "anthropic", "claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
 	}
+	if got.Protocol != "anthropic-messages" ||
+		got.BaseURL != "https://local.anthropic.test/v1" ||
+		got.APIKey != "anthropic-key" ||
+		got.AuthHeader != "x-api-key" ||
+		got.Model != "claude-sonnet-4-5" {
+		t.Fatalf("request = %#v, want Anthropic Messages request", got)
+	}
+	if got.Headers["anthropic-version"] != "2023-06-01" {
+		t.Fatalf("headers = %#v, want Anthropic version", got.Headers)
+	}
+}
+
+func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)
 	}

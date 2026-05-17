@@ -25,11 +25,11 @@ type PromptRuntime struct {
 	Root     string
 }
 
-// NewPromptRuntime creates a prompt runtime backed by an OpenAI-compatible client.
+// NewPromptRuntime creates a prompt runtime backed by migrated provider clients.
 func NewPromptRuntime(messages session.MessageRepository) *PromptRuntime {
 	return &PromptRuntime{
 		Messages: messages,
-		Client:   llm.NewOpenAICompatibleClient(),
+		Client:   llm.NewProviderChatClient(),
 	}
 }
 
@@ -41,7 +41,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 	client := runtime.Client
 	if client == nil {
-		client = llm.NewOpenAICompatibleClient()
+		client = llm.NewProviderChatClient()
 	}
 
 	transcript, err := runtime.Messages.Messages(ctx, sessionID, 0)
@@ -79,7 +79,8 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 			Output:    response.Usage.OutputTokens,
 			Reasoning: response.Usage.ReasoningTokens,
 			Cache: session.CacheUsage{
-				Read: response.Usage.CacheReadTokens,
+				Read:  response.Usage.CacheReadTokens,
+				Write: response.Usage.CacheWriteTokens,
 			},
 		},
 		Cost: 0,

@@ -10,11 +10,15 @@ import (
 )
 
 type fakeChatClient struct {
-	request llm.ChatRequest
+	request  llm.ChatRequest
+	response llm.ChatResponse
 }
 
 func (client *fakeChatClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	client.request = request
+	if client.response.Text != "" {
+		return client.response, nil
+	}
 	return llm.ChatResponse{
 		Text:         "assistant reply",
 		FinishReason: "stop",
@@ -110,5 +114,49 @@ func TestPromptRuntimeUsesSelectedProvider(t *testing.T) {
 		client.request.APIKey != "router-key" ||
 		client.request.Model != "openai/gpt-4o-mini" {
 		t.Fatalf("provider request = %#v, want openrouter profile", client.request)
+	}
+}
+
+func TestPromptRuntimePersistsAnthropicCacheUsage(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "anthropic", ModelID: "claude-sonnet-4-5"},
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{
+		response: llm.ChatResponse{
+			Text:         "assistant reply",
+			FinishReason: "stop",
+			Usage: llm.Usage{
+				InputTokens:      3,
+				OutputTokens:     4,
+				CacheReadTokens:  1,
+				CacheWriteTokens: 2,
+				TotalTokens:      7,
+			},
+		},
+	}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "anthropic" || client.request.Protocol != "anthropic-messages" {
+		t.Fatalf("provider request = %#v, want Anthropic Messages protocol", client.request)
+	}
+	if assistant.Info.Tokens == nil || assistant.Info.Tokens.Cache.Read != 1 || assistant.Info.Tokens.Cache.Write != 2 {
+		t.Fatalf("assistant tokens = %#v, want cache read/write", assistant.Info.Tokens)
 	}
 }
