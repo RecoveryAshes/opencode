@@ -14,10 +14,16 @@ import (
 )
 
 type v2Cursor struct {
-	ID        string `json:"id"`
-	Time      int64  `json:"time"`
-	Order     string `json:"order"`
-	Direction string `json:"direction"`
+	ID          string  `json:"id"`
+	Time        int64   `json:"time"`
+	Order       string  `json:"order"`
+	Direction   string  `json:"direction"`
+	Directory   string  `json:"directory,omitempty"`
+	Path        *string `json:"path,omitempty"`
+	WorkspaceID string  `json:"workspaceID,omitempty"`
+	Roots       bool    `json:"roots,omitempty"`
+	Start       int64   `json:"start,omitempty"`
+	Search      string  `json:"search,omitempty"`
 }
 
 type v2Page struct {
@@ -44,13 +50,17 @@ func v2Sessions(repo session.Repository) http.HandlerFunc {
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
+		if cursor != nil && hasV2SessionCursorFilter(r) {
+			return nil, http.StatusBadRequest, fmt.Errorf("cursor cannot be combined with order or filters")
+		}
+		if cursor != nil && hasV2SessionCursorRoutingMismatch(r, cursor) {
+			return nil, http.StatusBadRequest, fmt.Errorf("cursor routing does not match request")
+		}
 		if cursor != nil {
 			order = cursor.Order
 		}
-		items, err := repo.List(r.Context(), session.ListFilter{
-			Search: r.URL.Query().Get("search"),
-			Limit:  limit,
-		})
+		filter := v2SessionListFilter(r, cursor)
+		items, err := repo.List(r.Context(), filter)
 		if err != nil {
 			return nil, statusFromError(err), err
 		}
@@ -60,7 +70,7 @@ func v2Sessions(repo session.Repository) http.HandlerFunc {
 			return nil, http.StatusBadRequest, fmt.Errorf("invalid order %q", order)
 		}
 		items = applySessionCursor(items, cursor, limit)
-		return v2Page{Items: items, Cursor: sessionCursors(items, order)}, http.StatusOK, nil
+		return v2Page{Items: items, Cursor: sessionCursors(items, order, filter)}, http.StatusOK, nil
 	})
 }
 
@@ -254,23 +264,29 @@ func decodeV2Cursor(value string) (*v2Cursor, error) {
 	if err := json.Unmarshal(data, &cursor); err != nil {
 		return nil, err
 	}
+	if cursor.Order != "asc" && cursor.Order != "desc" {
+		return nil, fmt.Errorf("invalid cursor order %q", cursor.Order)
+	}
+	if cursor.Direction != "previous" && cursor.Direction != "next" {
+		return nil, fmt.Errorf("invalid cursor direction %q", cursor.Direction)
+	}
 	return &cursor, nil
 }
 
-func encodeV2Cursor(id string, created int64, order string, direction string) string {
-	data, _ := json.Marshal(v2Cursor{ID: id, Time: created, Order: order, Direction: direction})
+func encodeV2Cursor(cursor v2Cursor) string {
+	data, _ := json.Marshal(cursor)
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
-func sessionCursors(items []session.Info, order string) v2Cursors {
+func sessionCursors(items []session.Info, order string, filter session.ListFilter) v2Cursors {
 	if len(items) == 0 {
 		return v2Cursors{}
 	}
 	first := items[0]
 	last := items[len(items)-1]
 	return v2Cursors{
-		Previous: encodeV2Cursor(string(first.ID), first.Time.Created, order, "previous"),
-		Next:     encodeV2Cursor(string(last.ID), last.Time.Created, order, "next"),
+		Previous: encodeV2SessionCursor(first, order, "previous", filter),
+		Next:     encodeV2SessionCursor(last, order, "next", filter),
 	}
 }
 
@@ -281,9 +297,65 @@ func messageCursors(items []map[string]any, order string) v2Cursors {
 	first := items[0]
 	last := items[len(items)-1]
 	return v2Cursors{
-		Previous: encodeV2Cursor(stringValueMap(first, "id"), int64ValueMap(first, "created"), order, "previous"),
-		Next:     encodeV2Cursor(stringValueMap(last, "id"), int64ValueMap(last, "created"), order, "next"),
+		Previous: encodeV2Cursor(v2Cursor{ID: stringValueMap(first, "id"), Time: int64ValueMap(first, "created"), Order: order, Direction: "previous"}),
+		Next:     encodeV2Cursor(v2Cursor{ID: stringValueMap(last, "id"), Time: int64ValueMap(last, "created"), Order: order, Direction: "next"}),
 	}
+}
+
+func encodeV2SessionCursor(info session.Info, order string, direction string, filter session.ListFilter) string {
+	cursor := v2Cursor{
+		ID:          string(info.ID),
+		Time:        info.Time.Created,
+		Order:       order,
+		Direction:   direction,
+		Directory:   filter.Directory,
+		WorkspaceID: filter.WorkspaceID,
+		Roots:       filter.Roots,
+		Start:       filter.Start,
+		Search:      filter.Search,
+	}
+	cursor.Path = filter.Path
+	return encodeV2Cursor(cursor)
+}
+
+func v2SessionListFilter(r *http.Request, cursor *v2Cursor) session.ListFilter {
+	if cursor != nil {
+		return session.ListFilter{
+			Search:      cursor.Search,
+			WorkspaceID: cursor.WorkspaceID,
+			Directory:   cursor.Directory,
+			Path:        cursor.Path,
+			Roots:       cursor.Roots,
+			Start:       cursor.Start,
+		}
+	}
+	return session.ListFilter{
+		Search:      r.URL.Query().Get("search"),
+		WorkspaceID: workspaceIDFromRequest(r),
+		Directory:   r.URL.Query().Get("directory"),
+		Path:        optionalQueryString(r, "path"),
+		Roots:       parseBoolQuery(r.URL.Query().Get("roots")),
+		Start:       parseInt64Query(r.URL.Query().Get("start")),
+	}
+}
+
+func hasV2SessionCursorFilter(r *http.Request) bool {
+	query := r.URL.Query()
+	for _, key := range []string{"order", "path", "roots", "start", "search"} {
+		if query.Has(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasV2SessionCursorRoutingMismatch(r *http.Request, cursor *v2Cursor) bool {
+	query := r.URL.Query()
+	if query.Has("directory") && query.Get("directory") != cursor.Directory {
+		return true
+	}
+	workspaceID := workspaceIDFromRequest(r)
+	return workspaceID != "" && workspaceID != cursor.WorkspaceID
 }
 
 func applySessionCursor(items []session.Info, cursor *v2Cursor, limit int) []session.Info {

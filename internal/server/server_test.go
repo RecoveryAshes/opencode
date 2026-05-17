@@ -214,6 +214,101 @@ func TestSessionListRootsAndMessagesBeforeHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestV2SessionListFiltersAndCursorHTTPAPI(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	old, err := store.Create(context.Background(), session.CreateInput{
+		Title:       "Alpha",
+		WorkspaceID: "wrk_1",
+		Directory:   "/tmp/project",
+		Path:        "packages/opencode",
+	})
+	if err != nil {
+		t.Fatalf("Create(old) error = %v", err)
+	}
+	newer, err := store.Create(context.Background(), session.CreateInput{
+		Title:       "Beta",
+		WorkspaceID: "wrk_1",
+		Directory:   "/tmp/project",
+		Path:        "packages/opencode/server",
+	})
+	if err != nil {
+		t.Fatalf("Create(newer) error = %v", err)
+	}
+	child, err := store.Fork(context.Background(), newer.ID, nil)
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	other, err := store.Create(context.Background(), session.CreateInput{
+		Title:       "Gamma",
+		WorkspaceID: "wrk_2",
+		Directory:   "/tmp/other",
+		Path:        "other",
+	})
+	if err != nil {
+		t.Fatalf("Create(other) error = %v", err)
+	}
+
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/session?limit=10&workspace=wrk_1&directory=%2Ftmp%2Fproject&path=packages&roots=true&search=a")
+	if err != nil {
+		t.Fatalf("GET /api/session filters error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var page map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode v2 filter page: %v", err)
+	}
+	items := page["items"].([]any)
+	if len(items) != 2 || items[0].(map[string]any)["id"] != string(newer.ID) || items[1].(map[string]any)["id"] != string(old.ID) {
+		t.Fatalf("filtered items = %#v, want newer/old root sessions only", items)
+	}
+	for _, excluded := range []session.ID{child.ID, other.ID} {
+		for _, item := range items {
+			if item.(map[string]any)["id"] == string(excluded) {
+				t.Fatalf("filtered items = %#v, unexpectedly included %s", items, excluded)
+			}
+		}
+	}
+
+	resp, err = http.Get(server.URL + "/api/session?limit=1&workspace=wrk_1&directory=%2Ftmp%2Fproject&path=packages&roots=true&search=a")
+	if err != nil {
+		t.Fatalf("GET /api/session cursor first page error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode v2 first page: %v", err)
+	}
+	items = page["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != string(newer.ID) {
+		t.Fatalf("first page = %#v, want newer", page)
+	}
+	cursor := page["cursor"].(map[string]any)["next"].(string)
+
+	resp, err = http.Get(server.URL + "/api/session?limit=1&cursor=" + url.QueryEscape(cursor) + "&workspace=wrk_1&directory=%2Ftmp%2Fproject")
+	if err != nil {
+		t.Fatalf("GET /api/session cursor next page error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode v2 next page: %v", err)
+	}
+	items = page["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != string(old.ID) {
+		t.Fatalf("next page = %#v, want old session with cursor-preserved filters", page)
+	}
+
+	resp, err = http.Get(server.URL + "/api/session?limit=1&cursor=" + url.QueryEscape(cursor) + "&search=beta")
+	if err != nil {
+		t.Fatalf("GET /api/session cursor with filter error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cursor plus filter status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestSessionMessageHTTPAPI(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
 	defer server.Close()
