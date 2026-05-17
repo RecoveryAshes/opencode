@@ -155,7 +155,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 			}
 		}
 		applyConfiguredProviderOptions(&request, providerConfig, model, agentName, sessionID)
-		request.Tools = definitions
+		request.Tools = providerToolDefinitions(definitions, request.ProviderID, request.Model)
 		next, err := client.Chat(ctx, request)
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
@@ -673,6 +673,176 @@ func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
 		})
 	}
 	return result
+}
+
+func providerToolDefinitions(definitions []llm.ToolDefinition, providerID string, modelID string) []llm.ToolDefinition {
+	if len(definitions) == 0 {
+		return nil
+	}
+	result := make([]llm.ToolDefinition, 0, len(definitions))
+	for _, definition := range definitions {
+		definition.Parameters = providerToolSchema(definition.Parameters, providerID, modelID)
+		result = append(result, definition)
+	}
+	return result
+}
+
+func providerToolSchema(schema map[string]any, providerID string, modelID string) map[string]any {
+	result := cloneRuntimeAnyMap(schema)
+	lowerModel := strings.ToLower(modelID)
+	if providerID == "moonshotai" || strings.Contains(lowerModel, "kimi") {
+		result = sanitizeMoonshotSchema(result).(map[string]any)
+	}
+	if providerID == "google" || strings.Contains(lowerModel, "gemini") {
+		result = sanitizeGeminiToolSchema(result).(map[string]any)
+	}
+	return result
+}
+
+func sanitizeMoonshotSchema(input any) any {
+	switch value := input.(type) {
+	case map[string]any:
+		if ref, ok := value["$ref"].(string); ok {
+			return map[string]any{"$ref": ref}
+		}
+		result := map[string]any{}
+		for key, item := range value {
+			result[key] = sanitizeMoonshotSchema(item)
+		}
+		if items, ok := result["items"].([]any); ok {
+			if len(items) > 0 {
+				result["items"] = items[0]
+			} else {
+				result["items"] = map[string]any{}
+			}
+		}
+		return result
+	case []any:
+		result := make([]any, 0, len(value))
+		for _, item := range value {
+			result = append(result, sanitizeMoonshotSchema(item))
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func sanitizeGeminiToolSchema(input any) any {
+	switch value := input.(type) {
+	case map[string]any:
+		result := map[string]any{}
+		for key, item := range value {
+			if key == "enum" {
+				if rawEnum, ok := item.([]any); ok {
+					result[key] = stringEnumValues(rawEnum)
+					continue
+				}
+			}
+			result[key] = sanitizeGeminiToolSchema(item)
+		}
+		if _, hasEnum := result["enum"]; hasEnum && (result["type"] == "integer" || result["type"] == "number") {
+			result["type"] = "string"
+		}
+		if result["type"] == "object" {
+			if properties, ok := result["properties"].(map[string]any); ok {
+				if required, ok := result["required"].([]any); ok {
+					result["required"] = existingRequiredFields(required, properties)
+				}
+			}
+		}
+		if result["type"] == "array" && !schemaHasCombiner(result) {
+			items, ok := result["items"]
+			if !ok || items == nil {
+				result["items"] = map[string]any{}
+			}
+			if itemMap, ok := result["items"].(map[string]any); ok && !schemaHasIntent(itemMap) {
+				itemMap["type"] = "string"
+			}
+		}
+		if typ, ok := result["type"].(string); ok && typ != "object" && !schemaHasCombiner(result) {
+			delete(result, "properties")
+			delete(result, "required")
+		}
+		return result
+	case []any:
+		result := make([]any, 0, len(value))
+		for _, item := range value {
+			result = append(result, sanitizeGeminiToolSchema(item))
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func schemaHasCombiner(schema map[string]any) bool {
+	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+		if _, ok := schema[key].([]any); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaHasIntent(schema map[string]any) bool {
+	if schemaHasCombiner(schema) {
+		return true
+	}
+	for _, key := range []string{"type", "properties", "items", "prefixItems", "enum", "const", "$ref", "additionalProperties", "patternProperties", "required", "not", "if", "then", "else"} {
+		if _, ok := schema[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func stringEnumValues(values []any) []any {
+	result := make([]any, 0, len(values))
+	for _, value := range values {
+		result = append(result, fmt.Sprint(value))
+	}
+	return result
+}
+
+func existingRequiredFields(required []any, properties map[string]any) []any {
+	result := []any{}
+	for _, field := range required {
+		name, ok := field.(string)
+		if !ok {
+			continue
+		}
+		if _, exists := properties[name]; exists {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+func cloneRuntimeAnyMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	result := map[string]any{}
+	for key, value := range input {
+		result[key] = cloneRuntimeAny(value)
+	}
+	return result
+}
+
+func cloneRuntimeAny(input any) any {
+	switch value := input.(type) {
+	case map[string]any:
+		return cloneRuntimeAnyMap(value)
+	case []any:
+		result := make([]any, 0, len(value))
+		for _, item := range value {
+			result = append(result, cloneRuntimeAny(item))
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 func toolDescription(tool integration.Tool) string {

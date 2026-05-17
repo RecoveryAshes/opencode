@@ -1178,7 +1178,148 @@ func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
 	}
 }
 
+func TestProviderToolSchemaSanitizesGeminiSchemas(t *testing.T) {
+	input := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{
+				"enum": []any{1, 2},
+				"type": "integer",
+			},
+			"ratio": map[string]any{
+				"type": "number",
+				"enum": []any{0.5, 1},
+			},
+			"tags": map[string]any{
+				"type": "array",
+			},
+			"bad": map[string]any{
+				"type": "string",
+				"properties": map[string]any{
+					"x": map[string]any{"type": "string"},
+				},
+				"required": []any{"x"},
+			},
+			"combined": map[string]any{
+				"type":       "string",
+				"oneOf":      []any{map[string]any{"type": "string"}},
+				"properties": map[string]any{"kept": map[string]any{"type": "string"}},
+				"required":   []any{"kept"},
+			},
+		},
+		"required": []any{"mode", "missing"},
+	}
+
+	got := providerToolSchema(input, "google", "gemini-3-pro")
+	properties := got["properties"].(map[string]any)
+	mode := properties["mode"].(map[string]any)
+	if mode["type"] != "string" || !anyStringSliceEqual(mode["enum"], []string{"1", "2"}) {
+		t.Fatalf("mode schema = %#v, want integer enum converted to string enum", mode)
+	}
+	ratio := properties["ratio"].(map[string]any)
+	if ratio["type"] != "string" || !anyStringSliceEqual(ratio["enum"], []string{"0.5", "1"}) {
+		t.Fatalf("ratio schema = %#v, want number enum converted to string enum", ratio)
+	}
+	if !anyStringSliceEqual(got["required"], []string{"mode"}) {
+		t.Fatalf("required = %#v, want only existing properties", got["required"])
+	}
+	tags := properties["tags"].(map[string]any)
+	items := tags["items"].(map[string]any)
+	if items["type"] != "string" {
+		t.Fatalf("tags items = %#v, want empty array items defaulted to string", items)
+	}
+	bad := properties["bad"].(map[string]any)
+	if _, ok := bad["properties"]; ok {
+		t.Fatalf("bad schema = %#v, did not want properties on non-object type", bad)
+	}
+	if _, ok := bad["required"]; ok {
+		t.Fatalf("bad schema = %#v, did not want required on non-object type", bad)
+	}
+	combined := properties["combined"].(map[string]any)
+	if _, ok := combined["properties"]; !ok {
+		t.Fatalf("combined schema = %#v, want combiner schema to keep properties", combined)
+	}
+	if _, ok := combined["required"]; !ok {
+		t.Fatalf("combined schema = %#v, want combiner schema to keep required", combined)
+	}
+
+	originalMode := input["properties"].(map[string]any)["mode"].(map[string]any)
+	if originalMode["type"] != "integer" || !anyValueSliceEqual(originalMode["enum"], []any{1, 2}) {
+		t.Fatalf("input schema mutated unexpectedly: %#v", originalMode)
+	}
+}
+
+func TestProviderToolSchemaSanitizesMoonshotSchemas(t *testing.T) {
+	input := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"ref": map[string]any{
+				"$ref":        "#/$defs/Thing",
+				"description": "Moonshot rejects siblings beside $ref",
+			},
+			"tuple": map[string]any{
+				"type": "array",
+				"items": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"type": "number"},
+				},
+			},
+			"emptyTuple": map[string]any{
+				"type":  "array",
+				"items": []any{},
+			},
+		},
+	}
+
+	got := providerToolSchema(input, "moonshotai", "kimi-k2")
+	properties := got["properties"].(map[string]any)
+	ref := properties["ref"].(map[string]any)
+	if len(ref) != 1 || ref["$ref"] != "#/$defs/Thing" {
+		t.Fatalf("ref schema = %#v, want only $ref", ref)
+	}
+	tuple := properties["tuple"].(map[string]any)
+	items := tuple["items"].(map[string]any)
+	if items["type"] != "string" {
+		t.Fatalf("tuple items = %#v, want first tuple item schema", tuple["items"])
+	}
+	emptyTuple := properties["emptyTuple"].(map[string]any)
+	if _, ok := emptyTuple["items"].(map[string]any); !ok {
+		t.Fatalf("empty tuple items = %#v, want empty schema object", emptyTuple["items"])
+	}
+
+	originalRef := input["properties"].(map[string]any)["ref"].(map[string]any)
+	if originalRef["description"] == nil {
+		t.Fatalf("input schema mutated unexpectedly: %#v", originalRef)
+	}
+}
+
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func anyStringSliceEqual(value any, want []string) bool {
+	items, ok := value.([]any)
+	if !ok || len(items) != len(want) {
+		return false
+	}
+	for index, item := range items {
+		if item != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func anyValueSliceEqual(value any, want []any) bool {
+	items, ok := value.([]any)
+	if !ok || len(items) != len(want) {
+		return false
+	}
+	for index, item := range items {
+		if item != want[index] {
+			return false
+		}
+	}
+	return true
 }
