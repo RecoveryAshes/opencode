@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/config"
@@ -56,6 +57,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return configCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
+	case "models":
+		return models(args[1:], stdout, stderr)
 	case "tools":
 		return tools(args[1:], stdout, stderr)
 	case "tool":
@@ -736,6 +739,70 @@ func providers(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func models(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("models", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	verbose := fs.Bool("verbose", false, "include model metadata JSON after each model id")
+	refresh := fs.Bool("refresh", false, "accepted for TypeScript CLI compatibility; Go reads current local provider metadata")
+	directory := fs.String("directory", ".", "directory used to load provider config")
+	worktree := fs.String("worktree", "", "worktree boundary for provider config discovery")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]")
+		return 2
+	}
+	if *refresh {
+		_, _ = fmt.Fprintln(stderr, "warning: --refresh is not needed in the Go provider registry")
+	}
+	cfg, err := config.Load(config.LoadOptions{
+		Directory: *directory,
+		Worktree:  *worktree,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load provider config failed: %v\n", err)
+		return 1
+	}
+	list := llm.ListProviders(cfg.Info)
+	providerFilter := ""
+	if fs.NArg() == 1 {
+		providerFilter = fs.Arg(0)
+	}
+	for _, provider := range list.All {
+		if providerFilter != "" && provider.ID != providerFilter {
+			continue
+		}
+		for _, modelID := range sortedModelIDs(provider.Models) {
+			if _, err := fmt.Fprintf(stdout, "%s/%s\n", provider.ID, modelID); err != nil {
+				return 1
+			}
+			if *verbose {
+				if err := writeJSON(stdout, provider.Models[modelID]); err != 0 {
+					return err
+				}
+			}
+		}
+		if providerFilter != "" {
+			return 0
+		}
+	}
+	if providerFilter != "" {
+		_, _ = fmt.Fprintf(stderr, "provider not found: %s\n", providerFilter)
+		return 2
+	}
+	return 0
+}
+
+func sortedModelIDs(models map[string]llm.PublicModel) []string {
+	result := make([]string, 0, len(models))
+	for id := range models {
+		result = append(result, id)
+	}
+	slices.Sort(result)
+	return result
+}
+
 func tools(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -863,6 +930,7 @@ commands:
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
   providers [--json] [--directory DIR] [--worktree DIR]
+  models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools
   tool [--directory DIR] [--params JSON | --params-file PATH] NAME
   retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]

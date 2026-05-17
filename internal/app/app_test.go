@@ -699,6 +699,41 @@ func TestRunProvidersJSONUsesConfig(t *testing.T) {
 	}
 }
 
+func TestRunModelsCommand(t *testing.T) {
+	root := t.TempDir()
+	isolateAppConfig(t, root)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"enabled_providers": ["openai-compatible"]
+	}`)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"models", "--directory", root, "openai-compatible"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "openai-compatible/gpt-4o-mini") {
+		t.Fatalf("stdout = %q, want provider/model ids", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"models", "--directory", root, "--verbose", "openai-compatible"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("verbose exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "openai-compatible/gpt-4o-mini") || !strings.Contains(stdout.String(), `"providerID":"openai-compatible"`) {
+		t.Fatalf("verbose stdout = %q, want model id and metadata", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"models", "--directory", root, "missing"}, &stdout, &stderr, "test")
+	if code != 2 || !strings.Contains(stderr.String(), "provider not found: missing") {
+		t.Fatalf("missing provider code = %d stderr = %q, want provider not found", code, stderr.String())
+	}
+}
+
 func writeAppFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
