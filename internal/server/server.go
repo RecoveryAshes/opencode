@@ -154,6 +154,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
 	mux.HandleFunc("/command", commandList())
 	mux.HandleFunc("/config/providers", configProviders())
+	mux.HandleFunc("/provider/", providerByPath())
 	mux.HandleFunc("/provider", providersList())
 	mux.HandleFunc("/find/file", findFile())
 	mux.HandleFunc("/find/symbol", findSymbol())
@@ -274,6 +275,15 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/provider": map[string]any{
 				"get": map[string]any{"operationId": "provider.list"},
+			},
+			"/provider/auth": map[string]any{
+				"get": map[string]any{"operationId": "provider.auth"},
+			},
+			"/provider/{providerID}/oauth/authorize": map[string]any{
+				"post": map[string]any{"operationId": "provider.oauth.authorize"},
+			},
+			"/provider/{providerID}/oauth/callback": map[string]any{
+				"post": map[string]any{"operationId": "provider.oauth.callback"},
 			},
 			"/command": map[string]any{
 				"get": map[string]any{"operationId": "command.list"},
@@ -526,6 +536,104 @@ func providersList() http.HandlerFunc {
 		}
 		return llm.ListProviders(cfg.Info), http.StatusOK, nil
 	})
+}
+
+type providerAuthMethod struct {
+	Type    string               `json:"type"`
+	Label   string               `json:"label"`
+	Prompts []providerAuthPrompt `json:"prompts,omitempty"`
+}
+
+type providerAuthPrompt struct {
+	Type        string                 `json:"type"`
+	Key         string                 `json:"key"`
+	Message     string                 `json:"message"`
+	Placeholder string                 `json:"placeholder,omitempty"`
+	Options     []providerAuthOption   `json:"options,omitempty"`
+	When        *providerAuthCondition `json:"when,omitempty"`
+}
+
+type providerAuthOption struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Hint  string `json:"hint,omitempty"`
+}
+
+type providerAuthCondition struct {
+	Key   string `json:"key"`
+	Op    string `json:"op"`
+	Value string `json:"value"`
+}
+
+type providerAuthAPIError struct {
+	Name string                   `json:"name"`
+	Data providerAuthAPIErrorData `json:"data"`
+}
+
+type providerAuthAPIErrorData struct {
+	ProviderID string `json:"providerID,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+}
+
+func providerByPath() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		rest := strings.TrimPrefix(r.URL.Path, "/provider/")
+		if rest == r.URL.Path || rest == "" {
+			return nil, http.StatusBadRequest, fmt.Errorf("invalid provider route")
+		}
+		if rest == "auth" {
+			if r.Method != http.MethodGet {
+				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+			}
+			if _, err := loadRequestConfig(r); err != nil {
+				return nil, statusFromError(err), err
+			}
+			return map[string][]providerAuthMethod{}, http.StatusOK, nil
+		}
+
+		parts := strings.Split(rest, "/")
+		if len(parts) != 3 || parts[1] != "oauth" || (parts[2] != "authorize" && parts[2] != "callback") {
+			return nil, http.StatusNotFound, fmt.Errorf("unknown provider route")
+		}
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		var payload struct {
+			Method any               `json:"method"`
+			Inputs map[string]string `json:"inputs,omitempty"`
+			Code   string            `json:"code,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return providerAuthError("BadRequest", providerAuthAPIErrorData{ProviderID: parts[0], Kind: "Body", Message: err.Error()}), http.StatusBadRequest, nil
+		}
+		if _, ok := numberFromAny(payload.Method); !ok {
+			return providerAuthError("BadRequest", providerAuthAPIErrorData{ProviderID: parts[0], Field: "method", Kind: "Body", Message: "method must be a number"}), http.StatusBadRequest, nil
+		}
+		return providerAuthError("ProviderAuthOauthMissing", providerAuthAPIErrorData{
+			ProviderID: parts[0],
+			Message:    "provider OAuth hooks are not available in the Go sidecar yet",
+		}), http.StatusBadRequest, nil
+	})
+}
+
+func providerAuthError(name string, data providerAuthAPIErrorData) providerAuthAPIError {
+	return providerAuthAPIError{Name: name, Data: data}
+}
+
+func numberFromAny(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case int:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func loadRequestConfig(r *http.Request) (config.LoadResult, error) {

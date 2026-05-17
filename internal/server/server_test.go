@@ -869,6 +869,68 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	if _, ok := configBody["all"]; ok {
 		t.Fatalf("config providers body = %#v, did not want all key", configBody)
 	}
+
+	resp, err = http.Get(server.URL + "/provider/auth?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /provider/auth error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /provider/auth status = %d, want 200", resp.StatusCode)
+	}
+	var authMethods map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&authMethods); err != nil {
+		t.Fatalf("decode provider auth methods: %v", err)
+	}
+	if len(authMethods) != 0 {
+		t.Fatalf("auth methods = %#v, want empty until plugin auth hooks migrate", authMethods)
+	}
+
+	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":"bad"}`))
+	if err != nil {
+		t.Fatalf("POST /provider/id/oauth/authorize invalid error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("provider authorize invalid status = %d, want 400", resp.StatusCode)
+	}
+	var authError map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&authError); err != nil {
+		t.Fatalf("decode provider authorize invalid error: %v", err)
+	}
+	if authError["name"] != "BadRequest" {
+		t.Fatalf("provider authorize invalid error = %#v, want BadRequest", authError)
+	}
+
+	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":0}`))
+	if err != nil {
+		t.Fatalf("POST /provider/id/oauth/authorize error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("provider authorize status = %d, want 400", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authError); err != nil {
+		t.Fatalf("decode provider authorize error: %v", err)
+	}
+	if authError["name"] != "ProviderAuthOauthMissing" || authError["data"].(map[string]any)["providerID"] != "local-ai" {
+		t.Fatalf("provider authorize error = %#v, want ProviderAuthOauthMissing", authError)
+	}
+
+	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/callback?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":0,"code":"abc"}`))
+	if err != nil {
+		t.Fatalf("POST /provider/id/oauth/callback error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("provider callback status = %d, want 400", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authError); err != nil {
+		t.Fatalf("decode provider callback error: %v", err)
+	}
+	if authError["name"] != "ProviderAuthOauthMissing" {
+		t.Fatalf("provider callback error = %#v, want ProviderAuthOauthMissing", authError)
+	}
 }
 
 func TestFileHTTPAPI(t *testing.T) {
