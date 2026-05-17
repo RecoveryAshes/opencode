@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v brew >/dev/null 2>&1; then
+  echo "Homebrew is required to bootstrap local Go migration tools." >&2
+  exit 1
+fi
+
+for formula in golangci-lint jq sqlite3; do
+  if ! brew list --formula "$formula" >/dev/null 2>&1; then
+    brew install "$formula"
+  fi
+done
+
+{
+  echo "# Go Migration Tool Versions"
+  echo
+  echo "- go: $(go version)"
+  echo "- bun: $(bun --version)"
+  echo "- node: $(node --version)"
+  echo "- golangci-lint: $(golangci-lint version | head -n 1)"
+  echo "- sqlite3: $(sqlite3 --version)"
+  echo "- jq: $(jq --version)"
+} > docs/go-tool-versions.md
