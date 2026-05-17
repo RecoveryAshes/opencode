@@ -24,16 +24,17 @@ import (
 
 // Options configures the Go sidecar listener.
 type Options struct {
-	Hostname string
-	Port     int
-	Version  string
-	Sessions session.Repository
-	Messages session.MessageRepository
-	Runtime  *runtime.PromptRuntime
-	MCP      *integration.MCPManager
-	PTY      *integration.PTYManager
-	Interact *integration.InteractionManager
-	Events   *eventBus
+	Hostname  string
+	Port      int
+	Version   string
+	Sessions  session.Repository
+	Messages  session.MessageRepository
+	Runtime   *runtime.PromptRuntime
+	MCP       *integration.MCPManager
+	PTY       *integration.PTYManager
+	Interact  *integration.InteractionManager
+	Workspace *integration.WorkspaceStore
+	Events    *eventBus
 }
 
 // SessionRepository is the storage contract required by the HTTP server.
@@ -116,6 +117,9 @@ func NewHandler(opts Options) http.Handler {
 	if opts.Interact == nil {
 		opts.Interact = integration.NewInteractionManager()
 	}
+	if opts.Workspace == nil {
+		opts.Workspace = integration.NewWorkspaceStore()
+	}
 	if opts.Events == nil {
 		opts.Events = newEventBus()
 	}
@@ -165,6 +169,15 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/formatter", formatterStatus())
 	mux.HandleFunc("/lsp", lspStatus())
 	mux.HandleFunc("/project/current", projectCurrent())
+	mux.HandleFunc("/project/git/init", projectInitGit(opts.Workspace))
+	mux.HandleFunc("/project/", projectByID(opts.Workspace))
+	mux.HandleFunc("/project", projectList(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace/adapter", workspaceAdapters(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace/sync-list", workspaceSyncList(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace/status", workspaceStatus(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace/warp", workspaceWarp(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace/", workspaceByID(opts.Workspace))
+	mux.HandleFunc("/experimental/workspace", workspaceRoot(opts.Workspace))
 	mux.HandleFunc("/question/", questionByID(opts.Interact, opts.Events))
 	mux.HandleFunc("/question", questions(opts.Interact))
 	mux.HandleFunc("/permission/", permissionByID(opts.Interact, opts.Events))
@@ -268,6 +281,34 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/project/current": map[string]any{
 				"get": map[string]any{"operationId": "project.current"},
+			},
+			"/project/git/init": map[string]any{
+				"post": map[string]any{"operationId": "project.initGit"},
+			},
+			"/project": map[string]any{
+				"get": map[string]any{"operationId": "project.list"},
+			},
+			"/project/{projectID}": map[string]any{
+				"patch": map[string]any{"operationId": "project.update"},
+			},
+			"/experimental/workspace/adapter": map[string]any{
+				"get": map[string]any{"operationId": "experimental.workspace.adapter.list"},
+			},
+			"/experimental/workspace": map[string]any{
+				"get":  map[string]any{"operationId": "experimental.workspace.list"},
+				"post": map[string]any{"operationId": "experimental.workspace.create"},
+			},
+			"/experimental/workspace/sync-list": map[string]any{
+				"post": map[string]any{"operationId": "experimental.workspace.syncList"},
+			},
+			"/experimental/workspace/status": map[string]any{
+				"get": map[string]any{"operationId": "experimental.workspace.status"},
+			},
+			"/experimental/workspace/warp": map[string]any{
+				"post": map[string]any{"operationId": "experimental.workspace.warp"},
+			},
+			"/experimental/workspace/{workspaceID}": map[string]any{
+				"delete": map[string]any{"operationId": "experimental.workspace.remove"},
 			},
 			"/question": map[string]any{
 				"get": map[string]any{"operationId": "question.list"},

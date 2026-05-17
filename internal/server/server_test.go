@@ -1275,6 +1275,159 @@ func TestV2HTTPAPICompatibility(t *testing.T) {
 	}
 }
 
+func TestProjectWorkspaceHTTPAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	root := t.TempDir()
+	root = serverRealPath(t, root)
+	runServerCommand(t, root, "git", "init", "--quiet")
+	runServerCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runServerCommand(t, root, "git", "config", "user.name", "Test User")
+	writeServerFile(t, filepath.Join(root, "README.md"), "hello\n")
+	runServerCommand(t, root, "git", "add", "README.md")
+	runServerCommand(t, root, "git", "commit", "--quiet", "-m", "init")
+
+	server := httptest.NewServer(NewHandler(Options{Workspace: integration.NewWorkspaceStore()}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/project?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /project error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var projects []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
+		t.Fatalf("decode projects: %v", err)
+	}
+	if len(projects) != 1 || projects[0]["vcs"] != "git" || projects[0]["worktree"] != root {
+		t.Fatalf("projects = %#v, want current git project", projects)
+	}
+	projectID := projects[0]["id"].(string)
+
+	req, err := http.NewRequest(http.MethodPatch, server.URL+"/project/"+projectID+"?directory="+urlQueryEscape(root), strings.NewReader(`{"name":"Migrated"}`))
+	if err != nil {
+		t.Fatalf("new project patch request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH /project/id error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var updated map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode updated project: %v", err)
+	}
+	if updated["name"] != "Migrated" {
+		t.Fatalf("updated project = %#v, want name", updated)
+	}
+
+	resp, err = http.Get(server.URL + "/experimental/workspace/adapter?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /experimental/workspace/adapter error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var adapters []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&adapters); err != nil {
+		t.Fatalf("decode adapters: %v", err)
+	}
+	if len(adapters) != 1 || adapters[0]["type"] != "worktree" {
+		t.Fatalf("adapters = %#v, want worktree adapter", adapters)
+	}
+
+	body := `{"type":"worktree"}`
+	resp, err = http.Post(server.URL+"/experimental/workspace?directory="+urlQueryEscape(root), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /experimental/workspace error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create workspace status = %d, want 200", resp.StatusCode)
+	}
+	var workspace map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&workspace); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+	if workspace["type"] != "worktree" || workspace["projectID"] != projectID || workspace["directory"] == "" {
+		t.Fatalf("workspace = %#v, want local worktree workspace", workspace)
+	}
+	workspaceID := workspace["id"].(string)
+
+	resp, err = http.Get(server.URL + "/experimental/workspace?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /experimental/workspace error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var workspaces []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&workspaces); err != nil {
+		t.Fatalf("decode workspaces: %v", err)
+	}
+	if len(workspaces) != 1 || workspaces[0]["id"] != workspaceID {
+		t.Fatalf("workspaces = %#v, want created workspace", workspaces)
+	}
+
+	resp, err = http.Get(server.URL + "/experimental/workspace/status?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /experimental/workspace/status error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var statuses []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&statuses); err != nil {
+		t.Fatalf("decode statuses: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0]["workspaceID"] != workspaceID || statuses[0]["status"] != "connected" {
+		t.Fatalf("statuses = %#v, want connected workspace", statuses)
+	}
+
+	resp, err = http.Post(server.URL+"/experimental/workspace/warp?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"id":`+quoteJSON(workspaceID)+`,"sessionID":"ses_test","copyChanges":false}`))
+	if err != nil {
+		t.Fatalf("POST /experimental/workspace/warp error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("warp status = %d, want 204", resp.StatusCode)
+	}
+
+	req, err = http.NewRequest(http.MethodDelete, server.URL+"/experimental/workspace/"+workspaceID+"?directory="+urlQueryEscape(root), nil)
+	if err != nil {
+		t.Fatalf("new workspace delete request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /experimental/workspace/id error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete workspace status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestProjectInitGitHTTPAPI(t *testing.T) {
+	root := t.TempDir()
+	root = serverRealPath(t, root)
+	server := httptest.NewServer(NewHandler(Options{Workspace: integration.NewWorkspaceStore()}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/project/git/init?directory="+urlQueryEscape(root), "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /project/git/init error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("init git status = %d, want 200", resp.StatusCode)
+	}
+	var project map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		t.Fatalf("decode project: %v", err)
+	}
+	if project["vcs"] != "git" || project["worktree"] != root {
+		t.Fatalf("project = %#v, want initialized git project", project)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		t.Fatalf(".git missing after init: %v", err)
+	}
+}
+
 type serverFakeChatClient struct {
 	request llm.ChatRequest
 }
@@ -1361,6 +1514,15 @@ func runServerCommand(t *testing.T, dir string, name string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, output)
 	}
+}
+
+func serverRealPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", path, err)
+	}
+	return resolved
 }
 
 func hasNamedItem(items []map[string]any, name string) bool {
