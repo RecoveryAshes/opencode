@@ -365,6 +365,102 @@ func TestRunDBRejectsInvalidCommandShape(t *testing.T) {
 	}
 }
 
+func TestRunExportSessionJSON(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Export Me",
+	})
+	sessionID := created["id"].(string)
+	prompt := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--text", "hello export", sessionID,
+	})
+	promptInfo := prompt["info"].(map[string]any)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, []string{"export", "--db", dbPath, sessionID}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var exported map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &exported); err != nil {
+		t.Fatalf("decode export JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	info, ok := exported["info"].(map[string]any)
+	if !ok || info["id"] != sessionID || info["title"] != "Export Me" {
+		t.Fatalf("export info = %#v, want session info", exported["info"])
+	}
+	messages, ok := exported["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("export messages = %#v, want one message", exported["messages"])
+	}
+	message := messages[0].(map[string]any)
+	messageInfo := message["info"].(map[string]any)
+	if messageInfo["id"] != promptInfo["id"] || messageInfo["role"] != "user" {
+		t.Fatalf("message info = %#v, want exported prompt", message["info"])
+	}
+	parts := message["parts"].([]any)
+	part := parts[0].(map[string]any)
+	if part["type"] != "text" || part["text"] != "hello export" {
+		t.Fatalf("exported part = %#v, want text part", part)
+	}
+}
+
+func TestRunExportLatestAndSanitize(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+	first := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Older",
+	})
+	_ = runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--text", "older secret", first["id"].(string),
+	})
+	second := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Latest",
+	})
+	secondID := second["id"].(string)
+	_ = runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--text", "latest secret", secondID,
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, []string{"export", "--db", dbPath, "--sanitize"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var exported map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &exported); err != nil {
+		t.Fatalf("decode sanitized export JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	info := exported["info"].(map[string]any)
+	if info["id"] != secondID || info["title"] != "[redacted:session-title:"+secondID+"]" {
+		t.Fatalf("sanitized info = %#v, want latest redacted session", info)
+	}
+	messages := exported["messages"].([]any)
+	message := messages[0].(map[string]any)
+	parts := message["parts"].([]any)
+	part := parts[0].(map[string]any)
+	partID := part["id"].(string)
+	if part["text"] != "[redacted:text:"+partID+"]" {
+		t.Fatalf("sanitized part = %#v, want redacted text", part)
+	}
+}
+
+func TestRunExportMissingSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"export", "--db", dbPath, "ses_missing"}, &stdout, &stderr, "test")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Session not found: ses_missing") {
+		t.Fatalf("stderr = %q, want missing session", stderr.String())
+	}
+}
+
 func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {

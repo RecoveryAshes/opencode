@@ -60,6 +60,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return configCommand(args[1:], stdout, stderr)
 	case "db":
 		return dbCommand(ctx, args[1:], stdout, stderr)
+	case "export":
+		return exportCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1092,6 +1094,215 @@ func dbShell(ctx context.Context, path string, stderr io.Writer) int {
 	return 0
 }
 
+func exportCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "SQLite database path; empty uses OPENCODE_DB or in-memory storage")
+	sanitize := fs.Bool("sanitize", false, "redact sensitive transcript and file data")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode export [--db PATH] [--sanitize] [SESSION_ID]")
+		return 2
+	}
+	sessionRepo, messageRepo, _, closeRepo, err := openRepositories(*dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
+		return 1
+	}
+	defer closeRepo()
+
+	var info session.Info
+	if fs.NArg() == 1 {
+		id, err := session.ParseID(fs.Arg(0))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "invalid session id: %v\n", err)
+			return 2
+		}
+		info, err = sessionRepo.Get(ctx, id)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Session not found: %s\n", id)
+			return 1
+		}
+	} else {
+		list, err := sessionRepo.List(ctx, session.ListFilter{Limit: 1})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "list sessions failed: %v\n", err)
+			return 1
+		}
+		if len(list) == 0 {
+			_, _ = fmt.Fprintln(stderr, "No sessions found")
+			return 1
+		}
+		info = list[0]
+	}
+	messages, err := messageRepo.Messages(ctx, info.ID, 0)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "export messages failed: %v\n", err)
+		return 1
+	}
+	result := exportData{Info: info, Messages: messages}
+	if *sanitize {
+		result = sanitizeExport(result)
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(result); err != nil {
+		return 1
+	}
+	return 0
+}
+
+type exportData struct {
+	Info     session.Info        `json:"info"`
+	Messages []session.WithParts `json:"messages"`
+}
+
+func sanitizeExport(input exportData) exportData {
+	output := input
+	output.Info.Title = redactExportString("session-title", string(output.Info.ID), output.Info.Title)
+	output.Info.Directory = redactExportString("session-directory", string(output.Info.ID), output.Info.Directory)
+	if output.Info.Revert != nil {
+		revert := *output.Info.Revert
+		revert.Snapshot = redactExportString("revert-snapshot", string(output.Info.ID), revert.Snapshot)
+		revert.Diff = redactExportString("revert-diff", string(output.Info.ID), revert.Diff)
+		output.Info.Revert = &revert
+	}
+	output.Messages = make([]session.WithParts, len(input.Messages))
+	for i, message := range input.Messages {
+		output.Messages[i] = sanitizeExportMessage(message)
+	}
+	return output
+}
+
+func sanitizeExportMessage(message session.WithParts) session.WithParts {
+	message.Info.System = redactExportString("system", string(message.Info.ID), message.Info.System)
+	if message.Info.Path != nil {
+		path := *message.Info.Path
+		path.CWD = redactExportString("cwd", string(message.Info.ID), path.CWD)
+		path.Root = redactExportString("root", string(message.Info.ID), path.Root)
+		message.Info.Path = &path
+	}
+	parts := message.Parts
+	message.Parts = make([]session.Part, len(parts))
+	for i, part := range parts {
+		message.Parts[i] = sanitizeExportPart(part)
+	}
+	return message
+}
+
+func sanitizeExportPart(part session.Part) session.Part {
+	part.Data = cloneExportMap(part.Data)
+	id := string(part.ID)
+	switch part.Type {
+	case "text":
+		redactExportMapString(part.Data, "text", "text", id)
+		redactExportMapObject(part.Data, "metadata", "text-metadata", id)
+	case "reasoning":
+		redactExportMapString(part.Data, "text", "reasoning", id)
+		redactExportMapObject(part.Data, "metadata", "reasoning-metadata", id)
+	case "file":
+		redactExportMapString(part.Data, "url", "file-url", id)
+		redactExportMapString(part.Data, "filename", "file-name", id)
+		if source, ok := part.Data["source"].(map[string]any); ok {
+			redactExportMapString(source, "path", "file-path", id)
+			redactExportMapString(source, "name", "file-symbol", id)
+			redactExportMapString(source, "uri", "file-uri", id)
+			redactExportMapString(source, "clientName", "file-client", id)
+			redactExportSpan(source, "text", id)
+		}
+	case "tool":
+		redactExportMapObject(part.Data, "metadata", "tool-metadata", id)
+		if state, ok := part.Data["state"].(map[string]any); ok {
+			redactExportMapObject(state, "input", "tool-input", id)
+			redactExportMapString(state, "raw", "tool-raw", id)
+			redactExportMapString(state, "title", "tool-title", id)
+			redactExportMapString(state, "output", "tool-output", id)
+			redactExportMapObject(state, "metadata", "tool-state-metadata", id)
+		}
+	case "patch":
+		redactExportMapString(part.Data, "hash", "patch", id)
+		if files, ok := part.Data["files"].([]any); ok {
+			next := make([]any, len(files))
+			for i, file := range files {
+				if value, ok := file.(string); ok {
+					next[i] = redactExportString("patch-file", fmt.Sprintf("%s-%d", id, i), value)
+				} else {
+					next[i] = file
+				}
+			}
+			part.Data["files"] = next
+		}
+	case "snapshot":
+		redactExportMapString(part.Data, "snapshot", "snapshot", id)
+	case "step-start", "step-finish":
+		redactExportMapString(part.Data, "snapshot", "snapshot", id)
+	case "subtask":
+		redactExportMapString(part.Data, "prompt", "subtask-prompt", id)
+		redactExportMapString(part.Data, "description", "subtask-description", id)
+		redactExportMapString(part.Data, "command", "subtask-command", id)
+	}
+	return part
+}
+
+func redactExportMapString(values map[string]any, key string, kind string, id string) {
+	if value, ok := values[key].(string); ok {
+		values[key] = redactExportString(kind, id, value)
+	}
+}
+
+func redactExportMapObject(values map[string]any, key string, kind string, id string) {
+	record, ok := values[key].(map[string]any)
+	if !ok || len(record) == 0 {
+		return
+	}
+	values[key] = map[string]any{"redacted": fmt.Sprintf("%s:%s", kind, id)}
+}
+
+func redactExportSpan(values map[string]any, key string, id string) {
+	span, ok := values[key].(map[string]any)
+	if !ok {
+		return
+	}
+	if value, ok := span["value"].(string); ok {
+		span["value"] = redactExportString("file-text", id, value)
+	}
+}
+
+func redactExportString(kind string, id string, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return value
+	}
+	return fmt.Sprintf("[redacted:%s:%s]", kind, id)
+}
+
+func cloneExportMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = cloneExportValue(value)
+	}
+	return output
+}
+
+func cloneExportValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneExportMap(typed)
+	case []any:
+		output := make([]any, len(typed))
+		for i, item := range typed {
+			output[i] = cloneExportValue(item)
+		}
+		return output
+	default:
+		return typed
+	}
+}
+
 func tool(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tool", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1165,6 +1376,7 @@ commands:
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
   db [--db PATH] [--format tsv|json] COMMAND [QUERY]
+  export [--db PATH] [--sanitize] [SESSION_ID]
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools
