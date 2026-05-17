@@ -92,6 +92,73 @@ func TestResponsesChatParsesSSE(t *testing.T) {
 	}
 }
 
+func TestResponsesChatParsesFunctionCall(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"output":[{
+				"type":"function_call",
+				"id":"fc_1",
+				"call_id":"call_1",
+				"name":"read",
+				"arguments":"{\"filePath\":\"README.md\"}"
+			}],
+			"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}
+		}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewResponsesClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "openai",
+		Protocol:   "openai-responses",
+		BaseURL:    mock.URL,
+		Model:      "gpt-5.2",
+		Messages:   []Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "stop" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one Responses function call", got)
+	}
+	if got.ToolCalls[0].ID != "call_1" || got.ToolCalls[0].Name != "read" || got.ToolCalls[0].Arguments["filePath"] != "README.md" {
+		t.Fatalf("tool call = %#v, want read README.md", got.ToolCalls[0])
+	}
+}
+
+func TestResponsesChatStreamParsesFunctionCall(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"glob","arguments":""}}`,
+			`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"pattern\""}`,
+			`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":":\"*.go\"}"}`,
+			`data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","call_id":"call_1","name":"glob","arguments":"{\"pattern\":\"*.go\"}"}`,
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewResponsesClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "openai",
+		Protocol:   "openai-responses",
+		BaseURL:    mock.URL,
+		Model:      "gpt-5.2",
+		Messages:   []Message{{Role: "user", Content: "glob"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "stop" || got.Usage.TotalTokens != 3 || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want streamed Responses function call", got)
+	}
+	if got.ToolCalls[0].ID != "call_1" || got.ToolCalls[0].Name != "glob" || got.ToolCalls[0].Arguments["pattern"] != "*.go" {
+		t.Fatalf("tool call = %#v, want glob *.go", got.ToolCalls[0])
+	}
+}
+
 func TestResponsesChatSupportsAzureAuthAndQuery(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("api-version"); got != "2024-10-21" {

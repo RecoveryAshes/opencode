@@ -162,11 +162,8 @@ func responsesToolDefinitions(tools []ToolDefinition) []responsesToolDef {
 }
 
 type responsesJSON struct {
-	Output []struct {
-		Type    string             `json:"type"`
-		Content []responsesContent `json:"content"`
-	} `json:"output"`
-	OutputText        string `json:"output_text"`
+	Output            []responsesOutputItem `json:"output"`
+	OutputText        string                `json:"output_text"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
@@ -174,14 +171,29 @@ type responsesJSON struct {
 }
 
 type responsesStreamEvent struct {
-	Type     string `json:"type"`
-	Delta    string `json:"delta"`
-	Response *struct {
+	Type        string              `json:"type"`
+	Delta       string              `json:"delta"`
+	OutputIndex int                 `json:"output_index"`
+	ItemID      string              `json:"item_id"`
+	CallID      string              `json:"call_id"`
+	Name        string              `json:"name"`
+	Arguments   string              `json:"arguments"`
+	Item        responsesOutputItem `json:"item"`
+	Response    *struct {
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
 		Usage responsesUsage `json:"usage"`
 	} `json:"response"`
+}
+
+type responsesOutputItem struct {
+	Type      string             `json:"type"`
+	ID        string             `json:"id"`
+	CallID    string             `json:"call_id"`
+	Name      string             `json:"name"`
+	Arguments string             `json:"arguments"`
+	Content   []responsesContent `json:"content"`
 }
 
 type responsesUsage struct {
@@ -203,21 +215,32 @@ func decodeResponsesJSON(data []byte) (ChatResponse, error) {
 	}
 	var text strings.Builder
 	text.WriteString(response.OutputText)
+	toolCalls := []ToolCall{}
 	for _, item := range response.Output {
-		for _, content := range item.Content {
-			if content.Type != "output_text" {
-				continue
+		switch item.Type {
+		case "message":
+			for _, content := range item.Content {
+				if content.Type != "output_text" {
+					continue
+				}
+				text.WriteString(content.Text)
 			}
-			text.WriteString(content.Text)
+		case "function_call":
+			call, err := responsesToolCall(item.ID, item.CallID, item.Name, item.Arguments)
+			if err != nil {
+				return ChatResponse{}, err
+			}
+			toolCalls = append(toolCalls, call)
 		}
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("responses response did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapResponsesFinishReason(reasonFromIncomplete(response.IncompleteDetails)),
 		Usage:        mapResponsesUsage(response.Usage),
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
@@ -227,6 +250,7 @@ func decodeResponsesStream(reader io.Reader) (ChatResponse, error) {
 	var text strings.Builder
 	usage := Usage{}
 	reason := ""
+	toolCalls := map[int]responsesOutputItem{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -240,8 +264,32 @@ func decodeResponsesStream(reader io.Reader) (ChatResponse, error) {
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
 			return ChatResponse{}, fmt.Errorf("decode Responses stream event: %w", err)
 		}
-		if event.Type == "response.output_text.delta" {
+		switch event.Type {
+		case "response.output_text.delta":
 			text.WriteString(event.Delta)
+		case "response.output_item.added":
+			if event.Item.Type == "function_call" {
+				toolCalls[event.OutputIndex] = event.Item
+			}
+		case "response.function_call_arguments.delta":
+			item := toolCalls[event.OutputIndex]
+			item.Arguments += event.Delta
+			if event.ItemID != "" {
+				item.ID = event.ItemID
+			}
+			toolCalls[event.OutputIndex] = item
+		case "response.function_call_arguments.done":
+			item := toolCalls[event.OutputIndex]
+			item.Type = "function_call"
+			item.ID = defaultString(defaultString(event.ItemID, item.ID), event.CallID)
+			item.CallID = defaultString(event.CallID, item.CallID)
+			item.Name = defaultString(event.Name, item.Name)
+			item.Arguments = defaultString(event.Arguments, item.Arguments)
+			toolCalls[event.OutputIndex] = item
+		case "response.output_item.done":
+			if event.Item.Type == "function_call" {
+				toolCalls[event.OutputIndex] = event.Item
+			}
 		}
 		if event.Response != nil {
 			usage = mapResponsesUsage(event.Response.Usage)
@@ -251,13 +299,55 @@ func decodeResponsesStream(reader io.Reader) (ChatResponse, error) {
 	if err := scanner.Err(); err != nil {
 		return ChatResponse{}, fmt.Errorf("read Responses stream: %w", err)
 	}
-	if text.Len() == 0 {
+	calls, err := responsesToolCalls(toolCalls)
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	if text.Len() == 0 && len(calls) == 0 {
 		return ChatResponse{}, fmt.Errorf("responses stream did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapResponsesFinishReason(reason),
 		Usage:        usage,
+		ToolCalls:    calls,
+	}, nil
+}
+
+func responsesToolCalls(items map[int]responsesOutputItem) ([]ToolCall, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	result := make([]ToolCall, 0, len(items))
+	for index := 0; index < len(items); index++ {
+		item, ok := items[index]
+		if !ok {
+			continue
+		}
+		call, err := responsesToolCall(item.ID, item.CallID, item.Name, item.Arguments)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, call)
+	}
+	return result, nil
+}
+
+func responsesToolCall(id string, callID string, name string, arguments string) (ToolCall, error) {
+	if name == "" {
+		return ToolCall{}, fmt.Errorf("responses function call did not include a name")
+	}
+	args := map[string]any{}
+	if strings.TrimSpace(arguments) != "" {
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return ToolCall{}, fmt.Errorf("decode responses function call %s arguments: %w", name, err)
+		}
+	}
+	return ToolCall{
+		ID:        defaultString(callID, id),
+		Name:      name,
+		Arguments: args,
+		Raw:       arguments,
 	}, nil
 }
 
