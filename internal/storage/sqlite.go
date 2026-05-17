@@ -405,6 +405,9 @@ func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 		sessionSchema,
 		messageSchema,
 		partSchema,
+		todoSchema,
+		sessionDiffSchema,
+		sessionStatusSchema,
 		eventSequenceSchema,
 		eventSchema,
 		`CREATE INDEX IF NOT EXISTS session_project_idx ON session(project_id)`,
@@ -413,6 +416,7 @@ func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx ON message(session_id, time_created, id)`,
 		`CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part(message_id, id)`,
 		`CREATE INDEX IF NOT EXISTS part_session_idx ON part(session_id)`,
+		`CREATE INDEX IF NOT EXISTS todo_session_idx ON todo(session_id)`,
 		`CREATE INDEX IF NOT EXISTS event_aggregate_seq_idx ON event(aggregate_id, seq)`,
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
@@ -431,6 +435,197 @@ id, worktree, name, time_created, time_updated, sandboxes
 		return fmt.Errorf("ensure project: %w", err)
 	}
 	return nil
+}
+
+// SetTodos replaces the per-session todo list.
+func (store *SQLiteSessionStore) SetTodos(ctx context.Context, id session.ID, todos []session.TodoInfo) error {
+	if _, err := store.Get(ctx, id); err != nil {
+		return err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin todo transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM todo WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete todos: %w", err)
+	}
+	for position, todo := range todos {
+		now := session.NowMillis()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO todo (
+session_id, content, status, priority, position, time_created, time_updated
+) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, todo.Content, todo.Status, todo.Priority, position, now, now); err != nil {
+			return fmt.Errorf("insert todo: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit todos: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// Todos returns the per-session todo list in display order.
+func (store *SQLiteSessionStore) Todos(ctx context.Context, id session.ID) ([]session.TodoInfo, error) {
+	if _, err := store.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT content, status, priority FROM todo WHERE session_id = ? ORDER BY position ASC`, id)
+	if err != nil {
+		return nil, fmt.Errorf("list todos: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	result := []session.TodoInfo{}
+	for rows.Next() {
+		var todo session.TodoInfo
+		if err := rows.Scan(&todo.Content, &todo.Status, &todo.Priority); err != nil {
+			return nil, fmt.Errorf("scan todo: %w", err)
+		}
+		result = append(result, todo)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate todos: %w", err)
+	}
+	return result, nil
+}
+
+// SetStatus stores a runtime status for a session. Idle clears runtime state.
+func (store *SQLiteSessionStore) SetStatus(ctx context.Context, id session.ID, status session.StatusInfo) error {
+	if _, err := store.Get(ctx, id); err != nil {
+		return err
+	}
+	if status.Type == "" || status.Type == "idle" {
+		if _, err := store.db.ExecContext(ctx, `DELETE FROM session_status WHERE session_id = ?`, id); err != nil {
+			return fmt.Errorf("delete session status: %w", err)
+		}
+		return nil
+	}
+	data, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("encode session status: %w", err)
+	}
+	now := session.NowMillis()
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO session_status (session_id, data, time_updated)
+VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, time_updated = excluded.time_updated`, id, string(data), now); err != nil {
+		return fmt.Errorf("set session status: %w", err)
+	}
+	return nil
+}
+
+// Status returns one runtime status, defaulting to idle.
+func (store *SQLiteSessionStore) Status(ctx context.Context, id session.ID) (session.StatusInfo, error) {
+	if _, err := store.Get(ctx, id); err != nil {
+		return session.StatusInfo{}, err
+	}
+	row := store.db.QueryRowContext(ctx, `SELECT data FROM session_status WHERE session_id = ?`, id)
+	status, err := scanStatus(row)
+	if errors.Is(err, session.ErrNotFound) {
+		return session.StatusInfo{Type: "idle"}, nil
+	}
+	return status, err
+}
+
+// Statuses returns non-idle runtime statuses.
+func (store *SQLiteSessionStore) Statuses(ctx context.Context) (map[session.ID]session.StatusInfo, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT session_id, data FROM session_status ORDER BY time_updated DESC, session_id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list session statuses: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	result := map[session.ID]session.StatusInfo{}
+	for rows.Next() {
+		var id string
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("scan session status: %w", err)
+		}
+		var status session.StatusInfo
+		if err := json.Unmarshal([]byte(raw), &status); err != nil {
+			return nil, fmt.Errorf("decode session status: %w", err)
+		}
+		result[session.ID(id)] = status
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session statuses: %w", err)
+	}
+	return result, nil
+}
+
+// SetDiff stores the current session diff snapshot and mirrors summary counts.
+func (store *SQLiteSessionStore) SetDiff(ctx context.Context, id session.ID, diffs []map[string]any) error {
+	if _, err := store.Get(ctx, id); err != nil {
+		return err
+	}
+	data, err := json.Marshal(diffs)
+	if err != nil {
+		return fmt.Errorf("encode session diff: %w", err)
+	}
+	summary := summaryFromDiffs(diffs)
+	var additions sql.NullInt64
+	var deletions sql.NullInt64
+	var files sql.NullInt64
+	if summary != nil {
+		additions = sql.NullInt64{Int64: int64(summary.Additions), Valid: true}
+		deletions = sql.NullInt64{Int64: int64(summary.Deletions), Valid: true}
+		files = sql.NullInt64{Int64: int64(summary.Files), Valid: true}
+	}
+	now := session.NowMillis()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin diff transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if len(diffs) == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM session_diff WHERE session_id = ?`, id); err != nil {
+			return fmt.Errorf("delete session diff: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO session_diff (session_id, data, time_updated)
+VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, time_updated = excluded.time_updated`, id, string(data), now); err != nil {
+		return fmt.Errorf("set session diff: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session SET
+summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, time_updated = ?
+WHERE id = ?`, additions, deletions, files, nullableString(string(data), len(diffs) > 0), now, id); err != nil {
+		return fmt.Errorf("update session diff summary: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit diff: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// Diff returns the current session diff snapshot.
+func (store *SQLiteSessionStore) Diff(ctx context.Context, id session.ID) ([]map[string]any, error) {
+	info, err := store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	row := store.db.QueryRowContext(ctx, `SELECT data FROM session_diff WHERE session_id = ?`, id)
+	diffs, err := scanDiff(row)
+	if errors.Is(err, session.ErrNotFound) {
+		if info.Summary != nil && info.Summary.Diffs != nil {
+			return cloneDiffs(info.Summary.Diffs), nil
+		}
+		return []map[string]any{}, nil
+	}
+	return diffs, err
 }
 
 // AppendEvents stores sync events using the legacy event/event_sequence schema.
@@ -851,6 +1046,43 @@ func decodePart(id string, sessionID string, messageID string, data string) (ses
 	}, nil
 }
 
+type singleStringScanner interface {
+	Scan(...any) error
+}
+
+func scanStatus(scanner singleStringScanner) (session.StatusInfo, error) {
+	var raw string
+	if err := scanner.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return session.StatusInfo{}, session.ErrNotFound
+		}
+		return session.StatusInfo{}, fmt.Errorf("scan session status: %w", err)
+	}
+	var status session.StatusInfo
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return session.StatusInfo{}, fmt.Errorf("decode session status: %w", err)
+	}
+	return status, nil
+}
+
+func scanDiff(scanner singleStringScanner) ([]map[string]any, error) {
+	var raw string
+	if err := scanner.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, session.ErrNotFound
+		}
+		return nil, fmt.Errorf("scan session diff: %w", err)
+	}
+	var diffs []map[string]any
+	if err := json.Unmarshal([]byte(raw), &diffs); err != nil {
+		return nil, fmt.Errorf("decode session diff: %w", err)
+	}
+	if diffs == nil {
+		return []map[string]any{}, nil
+	}
+	return diffs, nil
+}
+
 type sessionScanner interface {
 	Scan(...any) error
 }
@@ -1112,6 +1344,32 @@ time_created integer NOT NULL,
 time_updated integer NOT NULL,
 data text NOT NULL,
 CONSTRAINT fk_part_message_id_message_id_fk FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE
+)`
+
+const todoSchema = `CREATE TABLE IF NOT EXISTS todo (
+session_id text NOT NULL,
+content text NOT NULL,
+status text NOT NULL,
+priority text NOT NULL,
+position integer NOT NULL,
+time_created integer NOT NULL,
+time_updated integer NOT NULL,
+PRIMARY KEY (session_id, position),
+CONSTRAINT fk_todo_session_id_session_id_fk FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+)`
+
+const sessionDiffSchema = `CREATE TABLE IF NOT EXISTS session_diff (
+session_id text NOT NULL PRIMARY KEY,
+data text NOT NULL,
+time_updated integer NOT NULL,
+CONSTRAINT fk_session_diff_session_id_session_id_fk FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+)`
+
+const sessionStatusSchema = `CREATE TABLE IF NOT EXISTS session_status (
+session_id text NOT NULL PRIMARY KEY,
+data text NOT NULL,
+time_updated integer NOT NULL,
+CONSTRAINT fk_session_status_session_id_session_id_fk FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
 )`
 
 const eventSequenceSchema = `CREATE TABLE IF NOT EXISTS event_sequence (

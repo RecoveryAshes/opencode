@@ -308,6 +308,71 @@ func TestSessionForkRevertShareHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSessionStateHTTPAPI(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"state"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	if err := store.SetTodos(context.Background(), created.ID, []session.TodoInfo{{Content: "migrate", Status: "pending", Priority: "high"}}); err != nil {
+		t.Fatalf("SetTodos() error = %v", err)
+	}
+	if err := store.SetStatus(context.Background(), created.ID, session.StatusInfo{Type: "busy"}); err != nil {
+		t.Fatalf("SetStatus() error = %v", err)
+	}
+	if err := store.SetDiff(context.Background(), created.ID, []map[string]any{{"file": "main.go", "additions": 1.0}}); err != nil {
+		t.Fatalf("SetDiff() error = %v", err)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(created.ID) + "/todo")
+	if err != nil {
+		t.Fatalf("GET /session/id/todo error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var todos []session.TodoInfo
+	if err := json.NewDecoder(resp.Body).Decode(&todos); err != nil {
+		t.Fatalf("decode todos: %v", err)
+	}
+	if len(todos) != 1 || todos[0].Content != "migrate" {
+		t.Fatalf("todos = %#v, want migrate", todos)
+	}
+
+	resp, err = http.Get(server.URL + "/session/status")
+	if err != nil {
+		t.Fatalf("GET /session/status error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var statuses map[string]session.StatusInfo
+	if err := json.NewDecoder(resp.Body).Decode(&statuses); err != nil {
+		t.Fatalf("decode statuses: %v", err)
+	}
+	if statuses[string(created.ID)].Type != "busy" {
+		t.Fatalf("statuses = %#v, want busy", statuses)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(created.ID) + "/diff")
+	if err != nil {
+		t.Fatalf("GET /session/id/diff error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var diffs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&diffs); err != nil {
+		t.Fatalf("decode diffs: %v", err)
+	}
+	if len(diffs) != 1 || diffs[0]["file"] != "main.go" {
+		t.Fatalf("diffs = %#v, want main.go", diffs)
+	}
+}
+
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	store := storage.NewMemorySessionStore()
 	client := &serverFakeChatClient{}

@@ -94,6 +94,68 @@ func TestMemorySessionStoreMetadataAndFilters(t *testing.T) {
 	}
 }
 
+func TestMemorySessionStoreTodoStatusAndDiff(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "state"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	todos := []session.TodoInfo{{Content: "migrate", Status: "in_progress", Priority: "high"}}
+	if err := store.SetTodos(ctx, info.ID, todos); err != nil {
+		t.Fatalf("SetTodos() error = %v", err)
+	}
+	gotTodos, err := store.Todos(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Todos() error = %v", err)
+	}
+	if len(gotTodos) != 1 || gotTodos[0].Content != "migrate" {
+		t.Fatalf("todos = %#v, want migrate", gotTodos)
+	}
+
+	status := session.StatusInfo{Type: "busy"}
+	if err := store.SetStatus(ctx, info.ID, status); err != nil {
+		t.Fatalf("SetStatus() error = %v", err)
+	}
+	statuses, err := store.Statuses(ctx)
+	if err != nil {
+		t.Fatalf("Statuses() error = %v", err)
+	}
+	if statuses[info.ID].Type != "busy" {
+		t.Fatalf("statuses = %#v, want busy", statuses)
+	}
+	if err := store.SetStatus(ctx, info.ID, session.StatusInfo{Type: "idle"}); err != nil {
+		t.Fatalf("SetStatus(idle) error = %v", err)
+	}
+	statuses, err = store.Statuses(ctx)
+	if err != nil {
+		t.Fatalf("Statuses() error = %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Fatalf("statuses after idle = %#v, want empty", statuses)
+	}
+
+	diffs := []map[string]any{{"file": "main.go", "additions": 2.0, "deletions": 1.0}}
+	if err := store.SetDiff(ctx, info.ID, diffs); err != nil {
+		t.Fatalf("SetDiff() error = %v", err)
+	}
+	gotDiffs, err := store.Diff(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if len(gotDiffs) != 1 || gotDiffs[0]["file"] != "main.go" {
+		t.Fatalf("diffs = %#v, want main.go", gotDiffs)
+	}
+	updated, err := store.Get(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if updated.Summary == nil || updated.Summary.Additions != 2 || updated.Summary.Deletions != 1 || updated.Summary.Files != 1 {
+		t.Fatalf("summary = %#v, want diff summary", updated.Summary)
+	}
+}
+
 func TestMemorySessionStoreMessages(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemorySessionStore()

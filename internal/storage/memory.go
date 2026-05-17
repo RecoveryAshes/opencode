@@ -18,6 +18,9 @@ type MemorySessionStore struct {
 	sessions map[session.ID]session.Info
 	order    []session.ID
 	messages map[session.ID][]session.WithParts
+	todos    map[session.ID][]session.TodoInfo
+	statuses map[session.ID]session.StatusInfo
+	diffs    map[session.ID][]map[string]any
 }
 
 // NewMemorySessionStore creates an empty session store.
@@ -26,6 +29,9 @@ func NewMemorySessionStore() *MemorySessionStore {
 		sessions: map[session.ID]session.Info{},
 		order:    []session.ID{},
 		messages: map[session.ID][]session.WithParts{},
+		todos:    map[session.ID][]session.TodoInfo{},
+		statuses: map[session.ID]session.StatusInfo{},
+		diffs:    map[session.ID][]map[string]any{},
 	}
 }
 
@@ -234,10 +240,117 @@ func (store *MemorySessionStore) Remove(_ context.Context, id session.ID) error 
 	}
 	delete(store.sessions, id)
 	delete(store.messages, id)
+	delete(store.todos, id)
+	delete(store.statuses, id)
+	delete(store.diffs, id)
 	store.order = slices.DeleteFunc(store.order, func(candidate session.ID) bool {
 		return candidate == id
 	})
 	return nil
+}
+
+// SetTodos replaces the per-session todo list.
+func (store *MemorySessionStore) SetTodos(_ context.Context, id session.ID, todos []session.TodoInfo) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if _, ok := store.sessions[id]; !ok {
+		return session.ErrNotFound
+	}
+	store.todos[id] = cloneTodos(todos)
+	return nil
+}
+
+// Todos returns the per-session todo list in display order.
+func (store *MemorySessionStore) Todos(_ context.Context, id session.ID) ([]session.TodoInfo, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[id]; !ok {
+		return nil, session.ErrNotFound
+	}
+	return cloneTodos(store.todos[id]), nil
+}
+
+// SetStatus stores a runtime status for a session. Idle clears runtime state.
+func (store *MemorySessionStore) SetStatus(_ context.Context, id session.ID, status session.StatusInfo) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if _, ok := store.sessions[id]; !ok {
+		return session.ErrNotFound
+	}
+	if status.Type == "" || status.Type == "idle" {
+		delete(store.statuses, id)
+		return nil
+	}
+	store.statuses[id] = cloneStatus(status)
+	return nil
+}
+
+// Status returns one runtime status, defaulting to idle.
+func (store *MemorySessionStore) Status(_ context.Context, id session.ID) (session.StatusInfo, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[id]; !ok {
+		return session.StatusInfo{}, session.ErrNotFound
+	}
+	status, ok := store.statuses[id]
+	if !ok {
+		return session.StatusInfo{Type: "idle"}, nil
+	}
+	return cloneStatus(status), nil
+}
+
+// Statuses returns non-idle runtime statuses.
+func (store *MemorySessionStore) Statuses(_ context.Context) (map[session.ID]session.StatusInfo, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	result := make(map[session.ID]session.StatusInfo, len(store.statuses))
+	for id, status := range store.statuses {
+		if _, ok := store.sessions[id]; ok {
+			result[id] = cloneStatus(status)
+		}
+	}
+	return result, nil
+}
+
+// SetDiff stores the current session diff snapshot and mirrors summary counts.
+func (store *MemorySessionStore) SetDiff(_ context.Context, id session.ID, diffs []map[string]any) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	info, ok := store.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	cloned := cloneDiffs(diffs)
+	store.diffs[id] = cloned
+	info.Summary = summaryFromDiffs(cloned)
+	info.Time.Updated = session.NowMillis()
+	store.sessions[id] = info
+	store.moveToFront(id)
+	return nil
+}
+
+// Diff returns the current session diff snapshot.
+func (store *MemorySessionStore) Diff(_ context.Context, id session.ID) ([]map[string]any, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[id]; !ok {
+		return nil, session.ErrNotFound
+	}
+	if diffs, ok := store.diffs[id]; ok {
+		return cloneDiffs(diffs), nil
+	}
+	info := store.sessions[id]
+	if info.Summary != nil {
+		return cloneDiffs(info.Summary.Diffs), nil
+	}
+	return []map[string]any{}, nil
 }
 
 // Messages returns messages in creation order.
@@ -624,6 +737,62 @@ func cloneTokens(input *session.TokenUsage) *session.TokenUsage {
 	}
 	tokens := *input
 	return &tokens
+}
+
+func cloneTodos(input []session.TodoInfo) []session.TodoInfo {
+	if input == nil {
+		return nil
+	}
+	return append([]session.TodoInfo(nil), input...)
+}
+
+func cloneStatus(input session.StatusInfo) session.StatusInfo {
+	status := input
+	if input.Action != nil {
+		action := *input.Action
+		status.Action = &action
+	}
+	return status
+}
+
+func cloneDiffs(input []map[string]any) []map[string]any {
+	if input == nil {
+		return nil
+	}
+	result := make([]map[string]any, 0, len(input))
+	for _, item := range input {
+		next := make(map[string]any, len(item))
+		for key, value := range item {
+			next[key] = value
+		}
+		result = append(result, next)
+	}
+	return result
+}
+
+func summaryFromDiffs(diffs []map[string]any) *session.SummaryInfo {
+	if len(diffs) == 0 {
+		return nil
+	}
+	summary := &session.SummaryInfo{Files: len(diffs), Diffs: cloneDiffs(diffs)}
+	for _, diff := range diffs {
+		summary.Additions += numericInt(diff["additions"])
+		summary.Deletions += numericInt(diff["deletions"])
+	}
+	return summary
+}
+
+func numericInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
 }
 
 // IsNotFound reports whether an error represents a missing record.

@@ -165,6 +165,51 @@ func TestPromptRuntimeHonorsDisabledTools(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimePersistsTodoToolMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "todos"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "plan"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{
+		responses: []llm.ChatResponse{
+			{
+				FinishReason: "tool-calls",
+				ToolCalls: []llm.ToolCall{{
+					ID:   "call_todo",
+					Name: "todo",
+					Arguments: map[string]any{"todos": []map[string]string{{
+						"content":  "migrate session state",
+						"status":   "in_progress",
+						"priority": "high",
+					}}},
+				}},
+			},
+			{Text: "done", FinishReason: "stop"},
+		},
+	}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	todos, err := store.Todos(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Todos() error = %v", err)
+	}
+	if len(todos) != 1 || todos[0].Content != "migrate session state" || todos[0].Priority != "high" {
+		t.Fatalf("todos = %#v, want persisted todo tool metadata", todos)
+	}
+}
+
 func TestPromptRuntimeUsesOpenAIResponsesProtocol(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

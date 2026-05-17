@@ -52,6 +52,32 @@ type RevertInfo struct {
 	Diff      string    `json:"diff,omitempty"`
 }
 
+// TodoInfo stores one session todo item.
+type TodoInfo struct {
+	Content  string `json:"content"`
+	Status   string `json:"status"`
+	Priority string `json:"priority"`
+}
+
+// StatusAction stores optional retry/action metadata for a session status.
+type StatusAction struct {
+	Reason   string `json:"reason"`
+	Provider string `json:"provider"`
+	Title    string `json:"title"`
+	Message  string `json:"message"`
+	Label    string `json:"label"`
+	Link     string `json:"link,omitempty"`
+}
+
+// StatusInfo mirrors the legacy runtime status union.
+type StatusInfo struct {
+	Type    string        `json:"type"`
+	Attempt int           `json:"attempt,omitempty"`
+	Message string        `json:"message,omitempty"`
+	Action  *StatusAction `json:"action,omitempty"`
+	Next    int64         `json:"next,omitempty"`
+}
+
 // Info is the public session DTO used by the HTTP API.
 type Info struct {
 	ID          ID            `json:"id"`
@@ -237,6 +263,25 @@ type MessageRepository interface {
 	RemoveMessage(context.Context, ID, MessageID) error
 	RemovePart(context.Context, ID, MessageID, PartID) error
 	UpdatePart(context.Context, Part) (Part, error)
+}
+
+// TodoRepository stores the per-session todo list used by the TUI and tools.
+type TodoRepository interface {
+	SetTodos(context.Context, ID, []TodoInfo) error
+	Todos(context.Context, ID) ([]TodoInfo, error)
+}
+
+// StatusRepository stores runtime-only session status values.
+type StatusRepository interface {
+	SetStatus(context.Context, ID, StatusInfo) error
+	Status(context.Context, ID) (StatusInfo, error)
+	Statuses(context.Context) (map[ID]StatusInfo, error)
+}
+
+// DiffRepository stores the current session diff snapshot.
+type DiffRepository interface {
+	SetDiff(context.Context, ID, []map[string]any) error
+	Diff(context.Context, ID) ([]map[string]any, error)
 }
 
 // CreateInput is the session creation payload accepted by the HTTP API.

@@ -58,7 +58,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 
 	model := modelRef(userMessage)
-	response, tools, usage, err := runtime.runProviderLoop(ctx, client, messages, model, localToolDefinitions(userMessage.Info.Tools))
+	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, localToolDefinitions(userMessage.Info.Tools))
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -88,7 +88,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	})
 }
 
-func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
 	maxIterations := runtime.MaxToolIterations
 	if maxIterations <= 0 {
 		maxIterations = 4
@@ -111,7 +111,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatCl
 		if len(next.ToolCalls) == 0 {
 			return response, tools, usage, nil
 		}
-		executed := runtime.executeToolCalls(ctx, next.ToolCalls)
+		executed := runtime.executeToolCalls(ctx, sessionID, next.ToolCalls)
 		tools = append(tools, executed...)
 		if iteration+1 >= maxIterations {
 			return response, tools, usage, nil
@@ -176,7 +176,7 @@ func toolDescription(tool integration.Tool) string {
 	}
 }
 
-func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []session.ToolExecution {
+func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, sessionID session.ID, calls []llm.ToolCall) []session.ToolExecution {
 	if len(calls) == 0 {
 		return nil
 	}
@@ -203,10 +203,28 @@ func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, calls []llm.
 			execution.Title = output.Title
 			execution.Output = output.Output
 			execution.Metadata = output.Metadata
+			if err := runtime.persistTodoTool(ctx, sessionID, call.Name, output.Metadata); err != nil {
+				execution.Error = err.Error()
+			}
 		}
 		result = append(result, execution)
 	}
 	return result
+}
+
+func (runtime *PromptRuntime) persistTodoTool(ctx context.Context, sessionID session.ID, tool string, metadata map[string]any) error {
+	if tool != "todo" && tool != "todowrite" {
+		return nil
+	}
+	store, ok := runtime.Messages.(session.TodoRepository)
+	if !ok {
+		return nil
+	}
+	todos, err := todosFromMetadata(metadata)
+	if err != nil {
+		return err
+	}
+	return store.SetTodos(ctx, sessionID, todos)
 }
 
 func finishReason(reason string, tools []session.ToolExecution) string {
@@ -255,6 +273,27 @@ func toolResultMessage(response llm.ChatResponse, tools []session.ToolExecution)
 		output.WriteString("</tool_call>\n")
 	}
 	return llm.Message{Role: "user", Content: output.String()}
+}
+
+func todosFromMetadata(metadata map[string]any) ([]session.TodoInfo, error) {
+	raw, ok := metadata["todos"]
+	if !ok {
+		return []session.TodoInfo{}, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("encode todo metadata: %w", err)
+	}
+	var todos []session.TodoInfo
+	if err := json.Unmarshal(data, &todos); err != nil {
+		return nil, fmt.Errorf("decode todo metadata: %w", err)
+	}
+	for index := range todos {
+		if todos[index].Priority == "" {
+			todos[index].Priority = "medium"
+		}
+	}
+	return todos, nil
 }
 
 func mergeUsage(left llm.Usage, right llm.Usage) llm.Usage {

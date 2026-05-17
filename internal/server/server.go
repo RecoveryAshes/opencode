@@ -148,9 +148,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/event", handleEvent(opts.Version, opts.Events))
 	mux.HandleFunc("/config", configGet())
 	mux.HandleFunc("/instance/dispose", instanceDispose())
-	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
-		return map[string]any{}, http.StatusOK, nil
-	}))
+	mux.HandleFunc("/session/status", sessionStatus(opts.Sessions))
 	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
 	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
 	mux.HandleFunc("/command", commandList())
@@ -542,6 +540,23 @@ func optionalQueryString(r *http.Request, key string) *string {
 	return &value
 }
 
+func sessionStatus(repo session.Repository) http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		statuses, ok := repo.(session.StatusRepository)
+		if !ok {
+			return map[string]any{}, http.StatusOK, nil
+		}
+		result, err := statuses.Statuses(r.Context())
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		return result, http.StatusOK, nil
+	})
+}
+
 func tools() http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		if r.Method != http.MethodGet {
@@ -732,13 +747,23 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		if r.Method != http.MethodGet {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
-		return []any{}, http.StatusOK, nil
+		repo, ok := messages.(session.TodoRepository)
+		if !ok {
+			return []session.TodoInfo{}, http.StatusOK, nil
+		}
+		result, err := repo.Todos(r.Context(), sessionID)
+		return result, statusFromError(err), err
 	}
 	if len(parts) == 1 && parts[0] == "diff" {
 		if r.Method != http.MethodGet {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
-		return []any{}, http.StatusOK, nil
+		repo, ok := messages.(session.DiffRepository)
+		if !ok {
+			return []map[string]any{}, http.StatusOK, nil
+		}
+		result, err := repo.Diff(r.Context(), sessionID)
+		return result, statusFromError(err), err
 	}
 	if len(parts) == 1 && parts[0] == "share" {
 		repo, ok := messages.(session.Repository)
