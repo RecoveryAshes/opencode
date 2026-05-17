@@ -1187,10 +1187,8 @@ func createCompactionPrompt(ctx context.Context, sessionID session.ID, providerI
 	if err != nil {
 		return session.WithParts{}, err
 	}
-	if info.Revert != nil {
-		if _, err := repo.Update(ctx, sessionID, session.UpdateInput{ClearRevert: true}); err != nil {
-			return session.WithParts{}, err
-		}
+	if err := cleanupSessionRevert(ctx, info, messages, repo, events); err != nil {
+		return session.WithParts{}, err
 	}
 
 	items, err := messages.Messages(ctx, sessionID, 0)
@@ -1237,6 +1235,64 @@ func createCompactionPrompt(ctx context.Context, sessionID session.ID, providerI
 		"reason":    map[bool]string{true: "auto", false: "manual"}[isAuto],
 	})
 	return created, nil
+}
+
+func cleanupSessionRevert(ctx context.Context, info session.Info, messages session.MessageRepository, repo session.Repository, events *eventBus) error {
+	if info.Revert == nil {
+		return nil
+	}
+	items, err := messages.Messages(ctx, info.ID, 0)
+	if err != nil {
+		return err
+	}
+	if info.Revert.PartID != nil {
+		for _, item := range items {
+			if item.Info.ID != info.Revert.MessageID {
+				continue
+			}
+			remove := false
+			removeParts := []session.PartID{}
+			for _, part := range item.Parts {
+				if part.ID == *info.Revert.PartID {
+					remove = true
+				}
+				if !remove {
+					continue
+				}
+				removeParts = append(removeParts, part.ID)
+			}
+			for _, partID := range removeParts {
+				if err := messages.RemovePart(ctx, info.ID, item.Info.ID, partID); err != nil {
+					return fmt.Errorf("remove reverted part %s from message %s: %w", partID, item.Info.ID, err)
+				}
+				events.publish("message.part.removed", map[string]any{
+					"sessionID": info.ID,
+					"messageID": item.Info.ID,
+					"partID":    partID,
+				})
+			}
+			break
+		}
+	} else {
+		remove := false
+		for _, item := range items {
+			if item.Info.ID == info.Revert.MessageID {
+				remove = true
+			}
+			if !remove {
+				continue
+			}
+			if err := messages.RemoveMessage(ctx, info.ID, item.Info.ID); err != nil {
+				return fmt.Errorf("remove reverted message %s: %w", item.Info.ID, err)
+			}
+			events.publish("message.removed", map[string]any{
+				"sessionID": info.ID,
+				"messageID": item.Info.ID,
+			})
+		}
+	}
+	_, err = repo.Update(ctx, info.ID, session.UpdateInput{ClearRevert: true})
+	return err
 }
 
 func refreshSessionDiffSummary(ctx context.Context, sessionID session.ID, messages session.MessageRepository) error {

@@ -829,9 +829,6 @@ func cloneDiffs(input []map[string]any) []map[string]any {
 }
 
 func summaryFromDiffs(diffs []map[string]any) *session.SummaryInfo {
-	if len(diffs) == 0 {
-		return nil
-	}
 	summary := &session.SummaryInfo{Files: len(diffs), Diffs: cloneDiffs(diffs)}
 	for _, diff := range diffs {
 		summary.Additions += numericInt(diff["additions"])

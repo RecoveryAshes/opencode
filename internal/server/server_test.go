@@ -683,6 +683,111 @@ func TestSessionSummarizeUsesLastUserAgentAndAutoFlag(t *testing.T) {
 	}
 }
 
+func TestSessionSummarizeCleansRevertedMessages(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	created, err := store.Create(context.Background(), session.CreateInput{Title: "revert cleanup"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	keepID := session.MessageID("msg_keep")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &keepID,
+		Parts:     []session.Part{{Type: "text", Data: map[string]any{"text": "keep"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(keep) error = %v", err)
+	}
+	revertID := session.MessageID("msg_revert")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &revertID,
+		Parts:     []session.Part{{Type: "text", Data: map[string]any{"text": "remove"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(revert) error = %v", err)
+	}
+	afterID := session.MessageID("msg_after")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &afterID,
+		Parts:     []session.Part{{Type: "text", Data: map[string]any{"text": "remove after"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(after) error = %v", err)
+	}
+	if _, err := store.Update(context.Background(), created.ID, session.UpdateInput{Revert: &session.RevertInfo{MessageID: revertID}}); err != nil {
+		t.Fatalf("Update(revert) error = %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/session/"+string(created.ID)+"/summarize", "application/json", strings.NewReader(`{"providerID":"openai-compatible","modelID":"mock-model"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/summarize error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("summarize status = %d, want 200", resp.StatusCode)
+	}
+
+	messages, err := store.Messages(context.Background(), created.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if len(messages) != 2 || messages[0].Info.ID != keepID || messages[1].Parts[0].Type != "compaction" {
+		t.Fatalf("messages = %#v, want keep message and new compaction only", messages)
+	}
+	reloaded, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if reloaded.Revert != nil || reloaded.Summary == nil {
+		t.Fatalf("session = %#v, want revert cleared and summary refreshed", reloaded)
+	}
+}
+
+func TestSessionSummarizeCleansRevertedParts(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	created, err := store.Create(context.Background(), session.CreateInput{Title: "part cleanup"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	promptID := session.MessageID("msg_parts")
+	keptPart := session.PartID("prt_keep")
+	revertPart := session.PartID("prt_revert")
+	afterPart := session.PartID("prt_after")
+	message, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &promptID,
+		Parts: []session.Part{
+			{ID: keptPart, Type: "text", Data: map[string]any{"text": "keep"}},
+			{ID: revertPart, Type: "text", Data: map[string]any{"text": "remove"}},
+			{ID: afterPart, Type: "text", Data: map[string]any{"text": "remove after"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt(parts) error = %v", err)
+	}
+	if _, err := store.Update(context.Background(), created.ID, session.UpdateInput{Revert: &session.RevertInfo{MessageID: message.Info.ID, PartID: &revertPart}}); err != nil {
+		t.Fatalf("Update(revert part) error = %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/session/"+string(created.ID)+"/summarize", "application/json", strings.NewReader(`{"providerID":"openai-compatible","modelID":"mock-model"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/summarize error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("summarize status = %d, want 200", resp.StatusCode)
+	}
+
+	cleaned, err := store.GetMessage(context.Background(), created.ID, promptID)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	if len(cleaned.Parts) != 1 || cleaned.Parts[0].ID != keptPart {
+		t.Fatalf("parts = %#v, want only pre-revert part retained", cleaned.Parts)
+	}
+}
+
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	store := storage.NewMemorySessionStore()
 	client := &serverFakeChatClient{}

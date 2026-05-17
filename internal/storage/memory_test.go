@@ -169,6 +169,16 @@ func TestMemorySessionStoreTodoStatusAndDiff(t *testing.T) {
 	if updated.Summary == nil || updated.Summary.Additions != 2 || updated.Summary.Deletions != 1 || updated.Summary.Files != 1 {
 		t.Fatalf("summary = %#v, want diff summary", updated.Summary)
 	}
+	if err := store.SetDiff(ctx, info.ID, []map[string]any{}); err != nil {
+		t.Fatalf("SetDiff(empty) error = %v", err)
+	}
+	updated, err = store.Get(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Get(empty diff summary) error = %v", err)
+	}
+	if updated.Summary == nil || updated.Summary.Additions != 0 || updated.Summary.Deletions != 0 || updated.Summary.Files != 0 {
+		t.Fatalf("empty diff summary = %#v, want zero summary", updated.Summary)
+	}
 }
 
 func TestMemorySessionStoreListRootsStartAndMessagePage(t *testing.T) {
