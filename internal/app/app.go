@@ -44,6 +44,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return 0
 	case "serve":
 		return serve(ctx, args[1:], stdout, stderr, version)
+	case "run":
+		return runPrompt(ctx, args[1:], stdout, stderr)
 	case "session":
 		return sessionCommand(ctx, args[1:], stdout, stderr)
 	case "retry-delay":
@@ -65,6 +67,91 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		}
 		return 2
 	}
+}
+
+func runPrompt(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "SQLite database path; empty uses in-memory storage")
+	text := fs.String("text", "", "text prompt to run")
+	textFile := fs.String("text-file", "", "file containing prompt text, or - for stdin")
+	title := fs.String("title", "", "session title")
+	agent := fs.String("agent", "build", "agent name")
+	provider := fs.String("provider", "openai-compatible", "provider id")
+	model := fs.String("model", "gpt-4o-mini", "model id")
+	jsonOutput := fs.Bool("json", false, "write full assistant message JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode run [--db PATH] [--text TEXT | --text-file PATH] [--json] [PROMPT]")
+		return 2
+	}
+	if *text != "" && *textFile != "" {
+		_, _ = fmt.Fprintln(stderr, "--text and --text-file are mutually exclusive")
+		return 2
+	}
+	promptText := *text
+	if promptText == "" && *textFile == "" && fs.NArg() == 1 {
+		promptText = fs.Arg(0)
+	}
+	var err error
+	if *textFile != "" {
+		promptText, err = readPromptText("", *textFile, os.Stdin)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "read prompt text failed: %v\n", err)
+			return 2
+		}
+	}
+	if strings.TrimSpace(promptText) == "" {
+		_, _ = fmt.Fprintln(stderr, "prompt text is required")
+		return 2
+	}
+
+	sessionRepo, messageRepo, closeRepo, err := openRepositories(*dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
+		return 1
+	}
+	defer closeRepo()
+
+	sessionTitle := *title
+	if sessionTitle == "" {
+		sessionTitle = promptTitle(promptText)
+	}
+	info, err := sessionRepo.Create(ctx, session.CreateInput{Title: sessionTitle})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "create session failed: %v\n", err)
+		return 1
+	}
+	user, err := messageRepo.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Agent: *agent,
+		Model: &session.ModelRef{ProviderID: *provider, ModelID: *model},
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": promptText},
+		}},
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "create prompt failed: %v\n", err)
+		return 1
+	}
+	assistant, err := runtime.NewPromptRuntime(messageRepo).Reply(ctx, info.ID, user)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "create assistant reply failed: %v\n", err)
+		return 1
+	}
+	if *jsonOutput {
+		return writeJSON(stdout, assistant)
+	}
+	textReply := messageText(assistant)
+	if textReply == "" {
+		textReply = assistant.Info.Finish
+	}
+	if _, err := fmt.Fprintln(stdout, textReply); err != nil {
+		return 1
+	}
+	return 0
 }
 
 func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, version string) int {
@@ -457,6 +544,30 @@ func readPromptText(text string, textFile string, stdin io.Reader) (string, erro
 	return string(data), err
 }
 
+func promptTitle(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return "New session"
+	}
+	if len(text) <= 60 {
+		return text
+	}
+	return text[:60]
+}
+
+func messageText(message session.WithParts) string {
+	parts := []string{}
+	for _, part := range message.Parts {
+		if part.Type != "text" {
+			continue
+		}
+		if text, ok := part.Data["text"].(string); ok && text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func parseProviderModel(model string) (string, string) {
 	if model == "" {
 		return "openai-compatible", "gpt-4o-mini"
@@ -622,6 +733,7 @@ func printUsage(w io.Writer) error {
 commands:
   version
   serve [--hostname HOST] [--port PORT] [--db PATH]
+  run [--db PATH] [--text TEXT | --text-file PATH] [--json] [PROMPT]
   session [--db PATH] COMMAND
   commands [--directory DIR]
   providers

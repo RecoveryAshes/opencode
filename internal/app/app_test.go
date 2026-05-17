@@ -314,6 +314,68 @@ func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestRunPromptCreatesSessionAndPrintsAssistantText(t *testing.T) {
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode llm request: %v", err)
+		}
+		messages := request["messages"].([]any)
+		first := messages[0].(map[string]any)
+		if first["content"] != "hello run" {
+			t.Fatalf("first message = %#v, want hello run", first)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"run reply"},"finish_reason":"stop"}]}`))
+	}))
+	defer llmServer.Close()
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", llmServer.URL)
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
+	dbPath := filepath.Join(t.TempDir(), "run.db")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"run", "--db", dbPath, "--model", "local-model", "hello run"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "run reply" {
+		t.Fatalf("stdout = %q, want run reply", stdout.String())
+	}
+
+	sessions := runAppJSON[[]map[string]any](t, context.Background(), []string{"session", "--db", dbPath, "list"})
+	if len(sessions) != 1 || sessions[0]["title"] != "hello run" {
+		t.Fatalf("sessions = %#v, want persisted run session", sessions)
+	}
+}
+
+func TestRunPromptJSONOutput(t *testing.T) {
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"json reply"},"finish_reason":"stop"}]}`))
+	}))
+	defer llmServer.Close()
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", llmServer.URL)
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"run", "--json", "--text", "hello json"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var assistant map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &assistant); err != nil {
+		t.Fatalf("decode stdout JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	info := assistant["info"].(map[string]any)
+	parts := assistant["parts"].([]any)
+	first := parts[0].(map[string]any)
+	if info["role"] != "assistant" || first["text"] != "json reply" {
+		t.Fatalf("assistant = %#v, want JSON assistant reply", assistant)
+	}
+}
+
 func TestRunCommandsAndSessionCommand(t *testing.T) {
 	root := t.TempDir()
 	commandPath := filepath.Join(root, ".opencode", "command", "ship.md")
