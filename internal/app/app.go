@@ -627,8 +627,22 @@ func retryDelay(args []string, stdout io.Writer, stderr io.Writer) int {
 func providers(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("providers", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	jsonOutput := fs.Bool("json", false, "write provider list JSON")
+	directory := fs.String("directory", ".", "directory used to load provider config")
+	worktree := fs.String("worktree", "", "worktree boundary for provider config discovery")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *jsonOutput {
+		cfg, err := config.Load(config.LoadOptions{
+			Directory: *directory,
+			Worktree:  *worktree,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "load provider config failed: %v\n", err)
+			return 1
+		}
+		return writeJSON(stdout, llm.ListProviders(cfg.Info))
 	}
 	if _, err := fmt.Fprintln(stdout, strings.Join(llm.ProviderIDs(), "\n")); err != nil {
 		return 1
@@ -762,7 +776,7 @@ commands:
   session [--db PATH] COMMAND
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
-  providers
+  providers [--json] [--directory DIR] [--worktree DIR]
   tools
   tool [--directory DIR] [--params JSON | --params-file PATH] NAME
   retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]

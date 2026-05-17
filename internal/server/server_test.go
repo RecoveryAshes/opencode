@@ -344,6 +344,81 @@ func TestConfigHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	writeServerFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"enabled_providers": ["anthropic", "local-ai"],
+		"provider": {
+			"local-ai": {
+				"name": "Local AI",
+				"models": {
+					"local-model": {
+						"name": "Local Model",
+						"limit": {"context": 32000, "output": 2048}
+					}
+				}
+			}
+		}
+	}`)
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/provider?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /provider error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /provider status = %d, want 200", resp.StatusCode)
+	}
+	var providerBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&providerBody); err != nil {
+		t.Fatalf("decode provider response: %v", err)
+	}
+	all, ok := providerBody["all"].([]any)
+	if !ok || len(all) != 2 {
+		t.Fatalf("all = %#v, want two providers", providerBody["all"])
+	}
+	if all[0].(map[string]any)["id"] != "anthropic" || all[1].(map[string]any)["id"] != "local-ai" {
+		t.Fatalf("all = %#v, want anthropic and local-ai", all)
+	}
+	defaults := providerBody["default"].(map[string]any)
+	if defaults["local-ai"] != "local-model" {
+		t.Fatalf("default = %#v, want local model", defaults)
+	}
+	if connected, ok := providerBody["connected"].([]any); !ok || len(connected) != 0 {
+		t.Fatalf("connected = %#v, want empty list", providerBody["connected"])
+	}
+
+	resp, err = http.Get(server.URL + "/config/providers?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /config/providers error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config/providers status = %d, want 200", resp.StatusCode)
+	}
+	var configBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&configBody); err != nil {
+		t.Fatalf("decode config providers response: %v", err)
+	}
+	if _, ok := configBody["providers"].([]any); !ok {
+		t.Fatalf("config providers body = %#v, want providers array", configBody)
+	}
+	if _, ok := configBody["all"]; ok {
+		t.Fatalf("config providers body = %#v, did not want all key", configBody)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()

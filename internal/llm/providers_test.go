@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/RecoveryAshes/opencode/internal/config"
 )
 
 func clearBedrockAuthEnv(t *testing.T) {
@@ -42,6 +44,87 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
+	}
+}
+
+func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
+	result := ListProviders(config.Info{
+		"enabled_providers":  []any{"anthropic", "custom-ai"},
+		"disabled_providers": []any{"openai"},
+		"provider": map[string]any{
+			"custom-ai": map[string]any{
+				"name": "Custom AI",
+				"env":  []any{"CUSTOM_AI_KEY"},
+				"options": map[string]any{
+					"baseURL": "https://custom.local/v1",
+				},
+				"models": map[string]any{
+					"custom-large": map[string]any{
+						"name":        "Custom Large",
+						"attachment":  true,
+						"tool_call":   true,
+						"temperature": false,
+						"cost": map[string]any{
+							"input":      1.25,
+							"output":     2.5,
+							"cache_read": 0.1,
+						},
+						"limit": map[string]any{
+							"context": 200000,
+							"output":  8192,
+						},
+						"modalities": map[string]any{
+							"input":  []any{"text", "image"},
+							"output": []any{"text"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	if len(result.All) != 2 {
+		t.Fatalf("providers = %#v, want anthropic and custom-ai", result.All)
+	}
+	if result.All[0].ID != "anthropic" || result.All[1].ID != "custom-ai" {
+		t.Fatalf("provider order = %#v, want built-in then custom", result.All)
+	}
+	custom := result.All[1]
+	if custom.Name != "Custom AI" || custom.Env[0] != "CUSTOM_AI_KEY" || custom.Options["baseURL"] != "https://custom.local/v1" {
+		t.Fatalf("custom provider = %#v, want config provider fields", custom)
+	}
+	model := custom.Models["custom-large"]
+	if model.Name != "Custom Large" ||
+		!model.Capabilities.Attachment ||
+		!model.Capabilities.Toolcall ||
+		model.Capabilities.Temperature ||
+		model.Cost.Input != 1.25 ||
+		model.Cost.Cache.Read != 0.1 ||
+		model.Limit.Context != 200000 ||
+		model.Limit.Output != 8192 ||
+		!model.Capabilities.Input.Image {
+		t.Fatalf("custom model = %#v, want config model fields", model)
+	}
+	if result.Default["custom-ai"] != "custom-large" {
+		t.Fatalf("default = %#v, want custom-large", result.Default)
+	}
+	if _, ok := result.Default["openai"]; ok {
+		t.Fatalf("default includes disabled openai: %#v", result.Default)
+	}
+}
+
+func TestConfigProvidersUsesProvidersKey(t *testing.T) {
+	result := ConfigProviders(config.Info{
+		"disabled_providers": []any{"openai"},
+	})
+	if len(result.Providers) == 0 {
+		t.Fatalf("providers is empty")
+	}
+	if result.Providers[0].ID == "openai" {
+		t.Fatalf("providers starts with disabled openai: %#v", result.Providers[0])
+	}
+	if _, ok := result.Default["openai"]; ok {
+		t.Fatalf("default includes disabled openai: %#v", result.Default)
 	}
 }
 

@@ -526,6 +526,42 @@ func TestRunConfigLoadsLocalConfig(t *testing.T) {
 	}
 }
 
+func TestRunProvidersJSONUsesConfig(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"enabled_providers": ["openai-compatible"],
+		"provider": {
+			"openai-compatible": {
+				"models": {
+					"local-model": {"name": "Local Model"}
+				}
+			}
+		}
+	}`)
+
+	got := runAppJSON[map[string]any](t, context.Background(), []string{"providers", "--json", "--directory", root})
+	all, ok := got["all"].([]any)
+	if !ok || len(all) != 1 {
+		t.Fatalf("all = %#v, want one provider", got["all"])
+	}
+	provider := all[0].(map[string]any)
+	if provider["id"] != "openai-compatible" {
+		t.Fatalf("provider = %#v, want openai-compatible", provider)
+	}
+	models := provider["models"].(map[string]any)
+	if _, ok := models["local-model"]; !ok {
+		t.Fatalf("models = %#v, want local-model", models)
+	}
+}
+
 func writeAppFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -136,9 +136,8 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
 	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
 	mux.HandleFunc("/command", commands())
-	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
-		return llm.AllProviders(), http.StatusOK, nil
-	}))
+	mux.HandleFunc("/config/providers", configProviders())
+	mux.HandleFunc("/provider", providersList())
 	mux.HandleFunc("/mcp/", mcpByName(opts.MCP))
 	mux.HandleFunc("/mcp", mcpRoot(opts.MCP))
 	mux.HandleFunc("/pty/shells", handleJSON(func(r *http.Request) (any, int, error) {
@@ -178,6 +177,9 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/config": map[string]any{
 				"get": map[string]any{"operationId": "config.get"},
+			},
+			"/config/providers": map[string]any{
+				"get": map[string]any{"operationId": "config.providers"},
 			},
 			"/tool": map[string]any{
 				"get": map[string]any{"operationId": "tool.list"},
@@ -264,6 +266,40 @@ func configGet() http.HandlerFunc {
 			Worktree:  r.URL.Query().Get("worktree"),
 		})
 		return result, statusFromError(err), err
+	})
+}
+
+func configProviders() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		cfg, err := loadRequestConfig(r)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		return llm.ConfigProviders(cfg.Info), http.StatusOK, nil
+	})
+}
+
+func providersList() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		cfg, err := loadRequestConfig(r)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		return llm.ListProviders(cfg.Info), http.StatusOK, nil
+	})
+}
+
+func loadRequestConfig(r *http.Request) (config.LoadResult, error) {
+	directory := defaultString(r.URL.Query().Get("directory"), r.Header.Get("x-opencode-directory"))
+	return config.Load(config.LoadOptions{
+		Directory: defaultString(directory, "."),
+		Worktree:  r.URL.Query().Get("worktree"),
 	})
 }
 
