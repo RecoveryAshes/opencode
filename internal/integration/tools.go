@@ -637,6 +637,14 @@ func optionalInt(params map[string]any, key string, fallback int) int {
 	return fallback
 }
 
+func optionalPositiveInt(params map[string]any, key string, fallback int) int {
+	value := optionalInt(params, key, fallback)
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
 func resolvePath(directory string, value string) string {
 	if filepath.IsAbs(value) {
 		return filepath.Clean(value)

@@ -86,3 +86,13 @@ func TestLSPSchemaMatchesTypeScriptOperationSet(t *testing.T) {
 		}
 	}
 }
+
+func TestWebSearchSchemaIncludesTypeScriptParameters(t *testing.T) {
+	schema := ToolSchema("websearch")
+	props := schema["properties"].(map[string]any)
+	for _, name := range []string{"query", "numResults", "livecrawl", "type", "contextMaxCharacters"} {
+		if _, ok := props[name]; !ok {
+			t.Fatalf("websearch schema missing %q: %#v", name, props)
+		}
+	}
+}

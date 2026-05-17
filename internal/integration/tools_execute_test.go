@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,6 +215,51 @@ func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
 	}
 }
 
+func TestWebSearchForwardsTypeScriptParametersToBridge(t *testing.T) {
+	var captured map[string]string
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		captured = map[string]string{
+			"q":                    query.Get("q"),
+			"numResults":           query.Get("numResults"),
+			"livecrawl":            query.Get("livecrawl"),
+			"type":                 query.Get("type"),
+			"contextMaxCharacters": query.Get("contextMaxCharacters"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []string{"ok"}})
+	}))
+	defer bridge.Close()
+	t.Setenv("OPENCODE_WEBSEARCH_ENDPOINT", bridge.URL+"/search?existing=1")
+
+	result, err := Execute(context.Background(), Request{
+		Name: "websearch",
+		Params: map[string]any{
+			"query":                "go migration",
+			"numResults":           float64(5),
+			"livecrawl":            "preferred",
+			"type":                 "deep",
+			"contextMaxCharacters": float64(12000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("websearch Execute() error = %v", err)
+	}
+	want := map[string]string{
+		"q":                    "go migration",
+		"numResults":           "5",
+		"livecrawl":            "preferred",
+		"type":                 "deep",
+		"contextMaxCharacters": "12000",
+	}
+	if !mapsEqual(captured, want) {
+		t.Fatalf("captured query = %#v, want %#v", captured, want)
+	}
+	if result.Metadata["provider"] != "endpoint" || result.Metadata["livecrawl"] != "preferred" || result.Metadata["type"] != "deep" {
+		t.Fatalf("websearch metadata = %#v", result.Metadata)
+	}
+}
+
 func TestQuestionTaskAndTaskStatusTools(t *testing.T) {
 	questionResult, err := Execute(context.Background(), Request{
 		Name: "question",
@@ -347,4 +393,16 @@ func TestReadDirectoryAndBinaryRejection(t *testing.T) {
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "binary") {
 		t.Fatalf("binary read error = %v, want binary rejection", err)
 	}
+}
+
+func mapsEqual(left map[string]string, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range right {
+		if left[key] != value {
+			return false
+		}
+	}
+	return true
 }

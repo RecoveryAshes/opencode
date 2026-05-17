@@ -93,8 +93,12 @@ func webSearchTool(ctx context.Context, request Request) (Result, error) {
 	return Result{
 		Title: "Web Search: " + query,
 		Metadata: map[string]any{
-			"provider": "unconfigured",
-			"query":    query,
+			"provider":             "unconfigured",
+			"query":                query,
+			"numResults":           optionalInt(request.Params, "numResults", 8),
+			"livecrawl":            normalizedWebSearchLivecrawl(request),
+			"type":                 normalizedWebSearchType(request),
+			"contextMaxCharacters": optionalPositiveInt(request.Params, "contextMaxCharacters", 0),
 		},
 		Output: output,
 	}, nil
@@ -107,8 +111,21 @@ func remoteWebSearch(ctx context.Context, endpoint string, query string, request
 	}
 	values := parsed.Query()
 	values.Set("q", query)
-	if numResults := optionalInt(request.Params, "numResults", 0); numResults > 0 {
+	numResults := optionalInt(request.Params, "numResults", 8)
+	if numResults > 0 {
 		values.Set("numResults", fmt.Sprint(numResults))
+	}
+	livecrawl := normalizedWebSearchLivecrawl(request)
+	if livecrawl != "" {
+		values.Set("livecrawl", livecrawl)
+	}
+	searchType := normalizedWebSearchType(request)
+	if searchType != "" {
+		values.Set("type", searchType)
+	}
+	contextMaxCharacters := optionalPositiveInt(request.Params, "contextMaxCharacters", 0)
+	if contextMaxCharacters > 0 {
+		values.Set("contextMaxCharacters", fmt.Sprint(contextMaxCharacters))
 	}
 	parsed.RawQuery = values.Encode()
 	webRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
@@ -133,12 +150,36 @@ func remoteWebSearch(ctx context.Context, endpoint string, query string, request
 	return Result{
 		Title: "Web Search: " + query,
 		Metadata: map[string]any{
-			"provider": "endpoint",
-			"query":    query,
-			"endpoint": endpoint,
+			"provider":             "endpoint",
+			"query":                query,
+			"endpoint":             endpoint,
+			"numResults":           numResults,
+			"livecrawl":            livecrawl,
+			"type":                 searchType,
+			"contextMaxCharacters": contextMaxCharacters,
 		},
 		Output: string(data),
 	}, nil
+}
+
+func normalizedWebSearchLivecrawl(request Request) string {
+	value := optionalString(request.Params, "livecrawl", "fallback")
+	switch value {
+	case "fallback", "preferred":
+		return value
+	default:
+		return "fallback"
+	}
+}
+
+func normalizedWebSearchType(request Request) string {
+	value := optionalString(request.Params, "type", "auto")
+	switch value {
+	case "auto", "fast", "deep":
+		return value
+	default:
+		return "auto"
+	}
 }
 
 func acceptHeader(format string) string {

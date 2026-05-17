@@ -75,8 +75,11 @@ func ToolSchema(name string) JSONSchema {
 		})
 	case "websearch":
 		return objectSchema([]string{"query"}, map[string]any{
-			"query":      stringSchema("Search query."),
-			"numResults": integerSchema("Requested number of search results."),
+			"query":                stringSchema("Search query."),
+			"numResults":           integerSchema("Requested number of search results. Defaults to 8."),
+			"livecrawl":            enumSchema("Live crawl mode.", []string{"fallback", "preferred"}),
+			"type":                 enumSchema("Search type.", []string{"auto", "fast", "deep"}),
+			"contextMaxCharacters": integerSchema("Maximum characters for context optimized for LLMs."),
 		})
 	case "question":
 		return objectSchema([]string{"questions"}, map[string]any{
