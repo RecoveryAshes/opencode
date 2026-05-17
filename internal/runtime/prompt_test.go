@@ -212,6 +212,48 @@ func TestPromptRuntimeInheritsPreviousUserModel(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeUsesConfiguredAgentModel(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"model": "custom-only/model",
+		"agent": {
+			"review": {
+				"model": "openrouter/openai/gpt-4o-mini",
+				"variant": "high"
+			}
+		}
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Agent: "review",
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENROUTER_BASE_URL", "https://local.openrouter.test/api/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "openrouter" || client.request.Model != "openai/gpt-4o-mini" {
+		t.Fatalf("provider request = %#v, want configured agent model", client.request)
+	}
+	if assistant.Info.ProviderID != "openrouter" || assistant.Info.ModelID != "openai/gpt-4o-mini" || assistant.Info.Variant != "high" {
+		t.Fatalf("assistant info = %#v, want configured agent model and variant", assistant.Info)
+	}
+}
+
 func TestPromptRuntimeFallsBackFromUnresolvedConfiguredDefaultModel(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()
