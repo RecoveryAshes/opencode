@@ -327,6 +327,85 @@ func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestRunSessionPromptUsesConfiguredAgentModel(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	t.Chdir(root)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"model": "custom-only/model",
+		"agent": {
+			"review": {
+				"model": "openai-compatible/local-model",
+				"variant": "high"
+			}
+		}
+	}`)
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Config Model",
+	})
+	sessionID := created["id"].(string)
+	prompt := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--agent", "review", "--text", "hello config", sessionID,
+	})
+
+	info, ok := prompt["info"].(map[string]any)
+	if !ok {
+		t.Fatalf("prompt info = %#v, want object", prompt["info"])
+	}
+	model, ok := info["model"].(map[string]any)
+	if !ok ||
+		model["providerID"] != "openai-compatible" ||
+		model["modelID"] != "local-model" ||
+		model["variant"] != "high" {
+		t.Fatalf("prompt model = %#v, want configured agent model", info["model"])
+	}
+}
+
+func TestRunSessionPromptInheritsPreviousUserModel(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	t.Chdir(root)
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Previous Model",
+	})
+	sessionID := created["id"].(string)
+	_ = runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--provider", "openrouter", "--model", "openai/gpt-4o-mini", "--text", "first", sessionID,
+	})
+	prompt := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--no-reply", "--text", "second", sessionID,
+	})
+
+	info, ok := prompt["info"].(map[string]any)
+	if !ok {
+		t.Fatalf("prompt info = %#v, want object", prompt["info"])
+	}
+	model, ok := info["model"].(map[string]any)
+	if !ok || model["providerID"] != "openrouter" || model["modelID"] != "openai/gpt-4o-mini" {
+		t.Fatalf("prompt model = %#v, want previous user model", info["model"])
+	}
+}
+
 func TestRunPromptCreatesSessionAndPrintsAssistantText(t *testing.T) {
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -368,6 +447,7 @@ func TestRunPromptJSONOutput(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"json reply"},"finish_reason":"stop"}]}`))
 	}))
 	defer llmServer.Close()
+	isolateAppConfig(t, t.TempDir())
 	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", llmServer.URL)
 	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
 
@@ -458,6 +538,49 @@ func TestRunCommandsAndSessionCommand(t *testing.T) {
 	}
 }
 
+func TestRunSessionCommandUsesConfiguredAgentModelWhenCommandOmitsModel(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"agent": {
+			"build": {
+				"model": "openai-compatible/command-model",
+				"variant": "low"
+			}
+		}
+	}`)
+	commandPath := filepath.Join(root, ".opencode", "command", "plain.md")
+	writeAppFile(t, commandPath, "Plain command")
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	created := runAppJSON[map[string]any](t, ctx, []string{"session", "--db", dbPath, "create", "--title", "Command Config"})
+	sessionID := created["id"].(string)
+	message := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "command",
+		"--directory", root,
+		"--no-reply",
+		sessionID,
+		"plain",
+	})
+
+	info, ok := message["info"].(map[string]any)
+	if !ok {
+		t.Fatalf("message info = %#v, want object", message["info"])
+	}
+	model, ok := info["model"].(map[string]any)
+	if !ok ||
+		model["providerID"] != "openai-compatible" ||
+		model["modelID"] != "command-model" ||
+		model["variant"] != "low" {
+		t.Fatalf("message model = %#v, want configured command fallback model", info["model"])
+	}
+}
+
 func TestRunSessionCommandCreatesAssistantReply(t *testing.T) {
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -480,6 +603,7 @@ func TestRunSessionCommandCreatesAssistantReply(t *testing.T) {
 	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
 
 	root := t.TempDir()
+	isolateAppConfig(t, root)
 	commandPath := filepath.Join(root, ".opencode", "command", "run.md")
 	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
 		t.Fatalf("mkdir command dir: %v", err)
@@ -583,6 +707,20 @@ func writeAppFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func isolateAppConfig(t *testing.T, root string) {
+	t.Helper()
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	t.Setenv("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+	t.Chdir(root)
 }
 
 func TestRunSessionPromptRejectsTextAndTextFileTogether(t *testing.T) {

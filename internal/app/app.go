@@ -79,8 +79,8 @@ func runPrompt(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	textFile := fs.String("text-file", "", "file containing prompt text, or - for stdin")
 	title := fs.String("title", "", "session title")
 	agent := fs.String("agent", "build", "agent name")
-	provider := fs.String("provider", "openai-compatible", "provider id")
-	model := fs.String("model", "gpt-4o-mini", "model id")
+	provider := fs.String("provider", "", "provider id")
+	model := fs.String("model", "", "model id")
 	jsonOutput := fs.Bool("json", false, "write full assistant message JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -126,14 +126,21 @@ func runPrompt(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 		_, _ = fmt.Fprintf(stderr, "create session failed: %v\n", err)
 		return 1
 	}
-	user, err := messageRepo.CreatePrompt(ctx, info.ID, session.PromptInput{
+	input := session.PromptInput{
 		Agent: *agent,
-		Model: &session.ModelRef{ProviderID: *provider, ModelID: *model},
 		Parts: []session.Part{{
 			Type: "text",
 			Data: map[string]any{"text": promptText},
 		}},
-	})
+	}
+	if *provider != "" || *model != "" {
+		input.Model = &session.ModelRef{ProviderID: defaultAppString(*provider, "openai-compatible"), ModelID: defaultAppString(*model, "gpt-4o-mini")}
+	}
+	if err := resolveAppPromptDefaults(ctx, info.ID, &input, messageRepo, "."); err != nil {
+		_, _ = fmt.Fprintf(stderr, "resolve prompt defaults failed: %v\n", err)
+		return 1
+	}
+	user, err := messageRepo.CreatePrompt(ctx, info.ID, input)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create prompt failed: %v\n", err)
 		return 1
@@ -479,8 +486,8 @@ func sessionPrompt(ctx context.Context, repo server.MessageRepository, args []st
 	text := fs.String("text", "", "text prompt to append")
 	textFile := fs.String("text-file", "", "file containing prompt text, or - for stdin")
 	agent := fs.String("agent", "build", "agent name")
-	provider := fs.String("provider", "openai-compatible", "provider id")
-	model := fs.String("model", "gpt-4o-mini", "model id")
+	provider := fs.String("provider", "", "provider id")
+	model := fs.String("model", "", "model id")
 	noReply := fs.Bool("no-reply", false, "store the prompt without running an assistant reply")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -503,15 +510,22 @@ func sessionPrompt(ctx context.Context, repo server.MessageRepository, args []st
 		_, _ = fmt.Fprintf(stderr, "read prompt text failed: %v\n", err)
 		return 2
 	}
-	result, err := repo.CreatePrompt(ctx, id, session.PromptInput{
+	input := session.PromptInput{
 		Agent:   *agent,
-		Model:   &session.ModelRef{ProviderID: *provider, ModelID: *model},
 		NoReply: *noReply,
 		Parts: []session.Part{{
 			Type: "text",
 			Data: map[string]any{"text": promptText},
 		}},
-	})
+	}
+	if *provider != "" || *model != "" {
+		input.Model = &session.ModelRef{ProviderID: defaultAppString(*provider, "openai-compatible"), ModelID: defaultAppString(*model, "gpt-4o-mini")}
+	}
+	if err := resolveAppPromptDefaults(ctx, id, &input, repo, "."); err != nil {
+		_, _ = fmt.Fprintf(stderr, "resolve prompt defaults failed: %v\n", err)
+		return 1
+	}
+	result, err := repo.CreatePrompt(ctx, id, input)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create prompt failed: %v\n", err)
 		return 1
@@ -558,12 +572,11 @@ func sessionRunCommand(ctx context.Context, repo server.MessageRepository, args 
 	}
 	agentName := defaultAppString(rendered.Agent, *agent)
 	providerID, modelID := rendered.Provider, rendered.Model
-	if providerID == "" || modelID == "" {
+	if providerID == "" && modelID == "" && *model != "" {
 		providerID, modelID = parseProviderModel(*model)
 	}
-	result, err := repo.CreatePrompt(ctx, id, session.PromptInput{
+	input := session.PromptInput{
 		Agent:   agentName,
-		Model:   &session.ModelRef{ProviderID: providerID, ModelID: modelID},
 		NoReply: *noReply,
 		Parts: []session.Part{{
 			Type: "text",
@@ -575,7 +588,15 @@ func sessionRunCommand(ctx context.Context, repo server.MessageRepository, args 
 				},
 			},
 		}},
-	})
+	}
+	if providerID != "" || modelID != "" {
+		input.Model = &session.ModelRef{ProviderID: providerID, ModelID: modelID}
+	}
+	if err := resolveAppPromptDefaults(ctx, id, &input, repo, *directory); err != nil {
+		_, _ = fmt.Fprintf(stderr, "resolve command prompt defaults failed: %v\n", err)
+		return 1
+	}
+	result, err := repo.CreatePrompt(ctx, id, input)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create command prompt failed: %v\n", err)
 		return 1
@@ -625,6 +646,14 @@ func messageText(message session.WithParts) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func resolveAppPromptDefaults(ctx context.Context, sessionID session.ID, input *session.PromptInput, repo server.MessageRepository, directory string) error {
+	loaded, err := config.Load(config.LoadOptions{Directory: defaultAppString(directory, ".")})
+	if err != nil {
+		return err
+	}
+	return runtime.ResolvePromptDefaults(ctx, sessionID, input, repo, loaded.Info)
 }
 
 func parseProviderModel(model string) (string, string) {

@@ -5,6 +5,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -29,6 +30,42 @@ type PromptRuntime struct {
 	Config   config.Info
 	// MaxToolIterations caps provider/tool feedback loops for one assistant turn.
 	MaxToolIterations int
+}
+
+// ResolvePromptDefaults applies the model selection rules used by TypeScript
+// before a user prompt is persisted.
+func ResolvePromptDefaults(ctx context.Context, sessionID session.ID, input *session.PromptInput, messages session.MessageRepository, info config.Info) error {
+	if input.Model != nil {
+		if input.Model.Variant == "" {
+			input.Model.Variant = configuredAgentVariant(info, input.Agent)
+		}
+		return nil
+	}
+	if agentModel := configuredAgentModel(info, input.Agent); agentModel != nil {
+		input.Model = agentModel
+		return nil
+	}
+	if messages != nil {
+		items, err := messages.Messages(ctx, sessionID, 0)
+		if err == nil {
+			for index := len(items) - 1; index >= 0; index-- {
+				if items[index].Info.Role == "user" && items[index].Info.Model != nil {
+					model := *items[index].Info.Model
+					input.Model = &model
+					return nil
+				}
+			}
+		}
+		if err != nil && !errors.Is(err, session.ErrNotFound) {
+			return err
+		}
+	}
+	if configured := configuredDefaultModel(info); configured != nil {
+		input.Model = configured
+		return nil
+	}
+	input.Model = &session.ModelRef{ProviderID: "openai-compatible", ModelID: "gpt-4o-mini"}
+	return nil
 }
 
 // NewPromptRuntime creates a prompt runtime backed by migrated provider clients.
@@ -353,6 +390,43 @@ func configuredAgent(info config.Info, agentName string) map[string]any {
 		return nil
 	}
 	return rawAgent
+}
+
+func configuredAgentModel(info config.Info, agentName string) *session.ModelRef {
+	rawAgent := configuredAgent(info, agentName)
+	if rawAgent == nil {
+		return nil
+	}
+	configuredModel := stringFromConfig(rawAgent["model"])
+	if configuredModel == "" {
+		return nil
+	}
+	providerID, modelID := parseModelRef(configuredModel)
+	return &session.ModelRef{
+		ProviderID: providerID,
+		ModelID:    modelID,
+		Variant:    stringFromConfig(rawAgent["variant"]),
+	}
+}
+
+func configuredAgentVariant(info config.Info, agentName string) string {
+	rawAgent := configuredAgent(info, agentName)
+	if rawAgent == nil {
+		return ""
+	}
+	return stringFromConfig(rawAgent["variant"])
+}
+
+func configuredDefaultModel(info config.Info) *session.ModelRef {
+	configured := stringFromConfig(info["model"])
+	if configured == "" {
+		return nil
+	}
+	providerID, modelID := parseModelRef(configured)
+	return &session.ModelRef{
+		ProviderID: providerID,
+		ModelID:    modelID,
+	}
 }
 
 func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, sessionID session.ID) map[string]any {
@@ -770,15 +844,8 @@ func modelRef(message session.WithParts, info config.Info, agentName string, tra
 	if message.Info.Model != nil {
 		return *message.Info.Model, false
 	}
-	if rawAgent := configuredAgent(info, agentName); rawAgent != nil {
-		if configuredModel := stringFromConfig(rawAgent["model"]); configuredModel != "" {
-			providerID, modelID := parseModelRef(configuredModel)
-			return session.ModelRef{
-				ProviderID: providerID,
-				ModelID:    modelID,
-				Variant:    stringFromConfig(rawAgent["variant"]),
-			}, false
-		}
+	if configured := configuredAgentModel(info, agentName); configured != nil {
+		return *configured, false
 	}
 	for index := len(transcript) - 1; index >= 0; index-- {
 		candidate := transcript[index]
@@ -789,12 +856,8 @@ func modelRef(message session.WithParts, info config.Info, agentName string, tra
 			return *candidate.Info.Model, false
 		}
 	}
-	if configured := stringFromConfig(info["model"]); configured != "" {
-		providerID, modelID := parseModelRef(configured)
-		return session.ModelRef{
-			ProviderID: providerID,
-			ModelID:    modelID,
-		}, true
+	if configured := configuredDefaultModel(info); configured != nil {
+		return *configured, true
 	}
 	return session.ModelRef{
 		ProviderID: "openai-compatible",

@@ -1412,35 +1412,7 @@ func executeSessionCommand(ctx context.Context, sessionID session.ID, input comm
 
 func resolvePromptDefaults(ctx context.Context, sessionID session.ID, input *session.PromptInput, messages session.MessageRepository, directory string) error {
 	cfg := loadPromptConfig(directory)
-	if input.Model != nil {
-		if input.Model.Variant == "" {
-			input.Model.Variant = configuredAgentVariant(cfg, input.Agent)
-		}
-		return nil
-	}
-	if agentModel := configuredAgentModel(cfg, input.Agent); agentModel != nil {
-		input.Model = agentModel
-		return nil
-	}
-	items, err := messages.Messages(ctx, sessionID, 0)
-	if err == nil {
-		for index := len(items) - 1; index >= 0; index-- {
-			if items[index].Info.Role == "user" && items[index].Info.Model != nil {
-				model := *items[index].Info.Model
-				input.Model = &model
-				return nil
-			}
-		}
-	}
-	if err != nil && !errors.Is(err, session.ErrNotFound) {
-		return err
-	}
-	if configured := configuredDefaultModel(cfg); configured != nil {
-		input.Model = configured
-		return nil
-	}
-	input.Model = &session.ModelRef{ProviderID: "openai-compatible", ModelID: "gpt-4o-mini"}
-	return nil
+	return runtime.ResolvePromptDefaults(ctx, sessionID, input, messages, cfg)
 }
 
 func loadPromptConfig(directory string) config.Info {
@@ -1449,63 +1421,6 @@ func loadPromptConfig(directory string) config.Info {
 		return config.Info{}
 	}
 	return cfg.Info
-}
-
-func configuredAgentModel(info config.Info, agentName string) *session.ModelRef {
-	agent := configuredAgent(info, agentName)
-	if agent == nil {
-		return nil
-	}
-	modelText, ok := agent["model"].(string)
-	if !ok || modelText == "" {
-		return nil
-	}
-	providerID, modelID := splitProviderModel(modelText)
-	return &session.ModelRef{ProviderID: providerID, ModelID: modelID, Variant: stringFromAny(agent["variant"])}
-}
-
-func configuredAgentVariant(info config.Info, agentName string) string {
-	agent := configuredAgent(info, agentName)
-	if agent == nil {
-		return ""
-	}
-	return stringFromAny(agent["variant"])
-}
-
-func configuredAgent(info config.Info, agentName string) map[string]any {
-	agents, ok := info["agent"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	agent, ok := agents[defaultString(agentName, "build")].(map[string]any)
-	if !ok {
-		return nil
-	}
-	return agent
-}
-
-func configuredDefaultModel(info config.Info) *session.ModelRef {
-	modelText, ok := info["model"].(string)
-	if !ok || modelText == "" {
-		return nil
-	}
-	providerID, modelID := splitProviderModel(modelText)
-	return &session.ModelRef{ProviderID: providerID, ModelID: modelID}
-}
-
-func splitProviderModel(model string) (string, string) {
-	providerID, modelID, ok := strings.Cut(model, "/")
-	if !ok {
-		return "openai-compatible", model
-	}
-	return providerID, modelID
-}
-
-func stringFromAny(input any) string {
-	if value, ok := input.(string); ok {
-		return value
-	}
-	return ""
 }
 
 func publishMessageEvents(events *eventBus, sessionID session.ID, message session.WithParts) {
