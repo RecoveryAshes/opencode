@@ -80,6 +80,23 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestOpenAIResponses(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "https://local.openai.test/v1")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "openai", "gpt-5.2")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.ProviderID != "openai" ||
+		got.Protocol != "openai-responses" ||
+		got.BaseURL != "https://local.openai.test/v1" ||
+		got.APIKey != "openai-key" ||
+		got.Model != "gpt-5.2" {
+		t.Fatalf("request = %#v, want OpenAI Responses profile", got)
+	}
+}
+
 func TestResolveChatRequestAzureUsesAPIKeyHeaderAndVersion(t *testing.T) {
 	t.Setenv("AZURE_OPENAI_RESOURCE_NAME", "opencode-test")
 	t.Setenv("AZURE_OPENAI_API_KEY", "azure-key")

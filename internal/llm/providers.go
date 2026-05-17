@@ -38,7 +38,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 	}
 	switch providerID {
 	case "openai":
-		profile := openAIProfile{
+		profile := responsesProfile{
 			ProviderID:     "openai",
 			DefaultBaseURL: defaultOpenAICompatibleBaseURL,
 			BaseURLEnvVars: []string{"OPENCODE_OPENAI_BASE_URL", "OPENAI_BASE_URL"},
@@ -107,6 +107,32 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
+	}
+}
+
+type responsesProfile struct {
+	ProviderID     string
+	DefaultBaseURL string
+	BaseURLEnvVars []string
+	APIKeyEnvVars  []string
+	ModelEnvVars   []string
+	DefaultModel   string
+	AuthHeader     string
+	AuthScheme     string
+	QueryParams    map[string]string
+}
+
+func (profile responsesProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	return ChatRequest{
+		ProviderID:  profile.ProviderID,
+		Protocol:    "openai-responses",
+		BaseURL:     defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:      firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader:  profile.AuthHeader,
+		AuthScheme:  profile.AuthScheme,
+		QueryParams: cloneStringMap(profile.QueryParams),
+		Model:       defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:    messages,
 	}
 }
 

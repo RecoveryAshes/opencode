@@ -14,6 +14,7 @@ type ProviderChatClient struct {
 	Anthropic        *AnthropicClient
 	Gemini           *GeminiClient
 	Bedrock          *BedrockClient
+	Responses        *ResponsesClient
 }
 
 // NewProviderChatClient creates the default runtime provider client.
@@ -24,6 +25,7 @@ func NewProviderChatClient() *ProviderChatClient {
 		Anthropic:        &AnthropicClient{HTTPClient: httpClient},
 		Gemini:           &GeminiClient{HTTPClient: httpClient},
 		Bedrock:          &BedrockClient{HTTPClient: httpClient},
+		Responses:        &ResponsesClient{HTTPClient: httpClient},
 	}
 }
 
@@ -54,6 +56,12 @@ func (client *ProviderChatClient) Chat(ctx context.Context, request ChatRequest)
 			bedrock = NewBedrockClient()
 		}
 		return bedrock.Chat(ctx, request)
+	case "openai-responses":
+		responses := client.Responses
+		if responses == nil {
+			responses = NewResponsesClient()
+		}
+		return responses.Chat(ctx, request)
 	default:
 		return ChatResponse{}, fmt.Errorf("unsupported chat protocol %q", request.Protocol)
 	}

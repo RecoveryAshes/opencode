@@ -117,6 +117,39 @@ func TestPromptRuntimeUsesSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeUsesOpenAIResponsesProtocol(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai", ModelID: "gpt-5.2"},
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENAI_BASE_URL", "https://local.openai.test/v1")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "openai" ||
+		client.request.Protocol != "openai-responses" ||
+		client.request.BaseURL != "https://local.openai.test/v1" ||
+		client.request.APIKey != "openai-key" {
+		t.Fatalf("provider request = %#v, want OpenAI Responses protocol", client.request)
+	}
+}
+
 func TestPromptRuntimePersistsAnthropicCacheUsage(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()
