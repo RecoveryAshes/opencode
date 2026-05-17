@@ -82,28 +82,43 @@ func permissionByID(manager *integration.InteractionManager, events *eventBus) h
 		if action != "reply" {
 			return nil, http.StatusNotFound, fmt.Errorf("unknown permission route")
 		}
-		var payload struct {
-			Reply   string `json:"reply"`
-			Message string `json:"message,omitempty"`
-		}
+		var payload permissionReplyPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		if payload.Reply != "once" && payload.Reply != "always" && payload.Reply != "reject" {
-			return nil, http.StatusBadRequest, fmt.Errorf("invalid permission reply %q", payload.Reply)
-		}
-		request, ok := manager.ReplyPermission(integration.PermissionID(id))
-		if !ok {
-			return nil, http.StatusNotFound, fmt.Errorf("permission request not found")
-		}
-		events.publish("permission.replied", map[string]any{
-			"sessionID": request.SessionID,
-			"requestID": request.ID,
-			"reply":     payload.Reply,
-			"message":   payload.Message,
-		})
-		return true, http.StatusOK, nil
+		return replyPermissionRequest(manager, events, integration.PermissionID(id), payload)
 	})
+}
+
+type permissionReplyPayload struct {
+	Reply    string `json:"reply,omitempty"`
+	Response string `json:"response,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+func (payload permissionReplyPayload) value() string {
+	if payload.Response != "" {
+		return payload.Response
+	}
+	return payload.Reply
+}
+
+func replyPermissionRequest(manager *integration.InteractionManager, events *eventBus, id integration.PermissionID, payload permissionReplyPayload) (any, int, error) {
+	reply := payload.value()
+	if reply != "once" && reply != "always" && reply != "reject" {
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid permission reply %q", reply)
+	}
+	request, ok := manager.ReplyPermission(id)
+	if !ok {
+		return nil, http.StatusNotFound, fmt.Errorf("permission request not found")
+	}
+	events.publish("permission.replied", map[string]any{
+		"sessionID": request.SessionID,
+		"requestID": request.ID,
+		"reply":     reply,
+		"message":   payload.Message,
+	})
+	return true, http.StatusOK, nil
 }
 
 func parseInteractionPath(path string, prefix string) (string, string, error) {

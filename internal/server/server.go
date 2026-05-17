@@ -150,7 +150,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/config", configGet())
 	mux.HandleFunc("/instance/dispose", instanceDispose())
 	mux.HandleFunc("/session/status", sessionStatus(opts.Sessions))
-	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
+	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events, opts.Interact))
 	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
 	mux.HandleFunc("/command", commandList())
 	mux.HandleFunc("/config/providers", configProviders())
@@ -463,6 +463,9 @@ func OpenAPI(version string) map[string]any {
 			"/session/{sessionID}/unrevert": map[string]any{
 				"post": map[string]any{"operationId": "session.unrevert"},
 			},
+			"/session/{sessionID}/permissions/{permissionID}": map[string]any{
+				"post": map[string]any{"operationId": "permission.respond"},
+			},
 			"/session/{sessionID}/message": map[string]any{
 				"get":  map[string]any{"operationId": "session.messages"},
 				"post": map[string]any{"operationId": "session.prompt"},
@@ -644,14 +647,14 @@ func sessions(repo session.Repository, events *eventBus) http.HandlerFunc {
 	})
 }
 
-func sessionByID(repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus) http.HandlerFunc {
+func sessionByID(repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus, interact *integration.InteractionManager) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		id, remainder, err := parseSessionPath(r.URL.Path)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
 		if remainder != "" {
-			return sessionSubresource(r, id, remainder, messages, promptRuntime, events)
+			return sessionSubresource(r, id, remainder, repo, messages, promptRuntime, events, interact)
 		}
 
 		switch r.Method {
@@ -687,7 +690,7 @@ func sessionByID(repo session.Repository, messages session.MessageRepository, pr
 	})
 }
 
-func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus) (any, int, error) {
+func sessionSubresource(r *http.Request, sessionID session.ID, path string, repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus, interact *integration.InteractionManager) (any, int, error) {
 	parts := strings.Split(path, "/")
 	if len(parts) == 1 && parts[0] == "command" {
 		switch r.Method {
@@ -876,6 +879,19 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		}
 		info, err := repo.Update(r.Context(), sessionID, session.UpdateInput{ClearRevert: true})
 		return info, statusFromError(err), err
+	}
+	if len(parts) == 2 && parts[0] == "permissions" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		if _, err := repo.Get(r.Context(), sessionID); err != nil {
+			return nil, statusFromError(err), err
+		}
+		var payload permissionReplyPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		return replyPermissionRequest(interact, events, integration.PermissionID(parts[1]), payload)
 	}
 	if len(parts) == 1 && parts[0] == "message" {
 		switch r.Method {

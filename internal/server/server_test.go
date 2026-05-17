@@ -1260,9 +1260,15 @@ func TestEventStreamPublishesSessionAndMessageEvents(t *testing.T) {
 }
 
 func TestQuestionPermissionHTTPAPI(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	created, err := store.Create(context.Background(), session.CreateInput{Title: "permissions"})
+	if err != nil {
+		t.Fatalf("Create session error = %v", err)
+	}
 	interactions := integration.NewInteractionManager()
 	question := interactions.AddQuestion(integration.QuestionRequest{
-		SessionID: "ses_test",
+		ID:        "que_test",
+		SessionID: string(created.ID),
 		Questions: []integration.QuestionInfo{{
 			Question: "Deploy?",
 			Header:   "Deploy",
@@ -1273,15 +1279,24 @@ func TestQuestionPermissionHTTPAPI(t *testing.T) {
 		}},
 	})
 	permission := interactions.AddPermission(integration.PermissionRequest{
-		SessionID:  "ses_test",
+		ID:         "per_global",
+		SessionID:  string(created.ID),
 		Permission: "shell",
 		Patterns:   []string{"npm test"},
 		Always:     []string{"npm *"},
 		Metadata:   map[string]any{"command": "npm test"},
 	})
+	sessionPermission := interactions.AddPermission(integration.PermissionRequest{
+		ID:         "per_session",
+		SessionID:  string(created.ID),
+		Permission: "edit",
+		Patterns:   []string{"*.go"},
+		Always:     []string{"*.go"},
+	})
 
 	server := httptest.NewServer(NewHandler(Options{
 		Version:  "test",
+		Sessions: store,
 		Interact: interactions,
 	}))
 	defer server.Close()
@@ -1346,8 +1361,13 @@ func TestQuestionPermissionHTTPAPI(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&permissions); err != nil {
 		t.Fatalf("decode permissions: %v", err)
 	}
-	if len(permissions) != 1 || permissions[0]["id"] != string(permission.ID) || permissions[0]["permission"] != "shell" {
-		t.Fatalf("permissions = %#v, want queued permission", permissions)
+	globalPermission, ok := findMapByString(permissions, "id", string(permission.ID))
+	if !ok || globalPermission["permission"] != "shell" {
+		t.Fatalf("permissions = %#v, want queued global permission", permissions)
+	}
+	scopedPermission, ok := findMapByString(permissions, "id", string(sessionPermission.ID))
+	if !ok || scopedPermission["permission"] != "edit" {
+		t.Fatalf("permissions = %#v, want queued session-scoped permission", permissions)
 	}
 
 	resp, err = http.Post(server.URL+"/permission/"+string(permission.ID)+"/reply", "application/json", strings.NewReader(`{"reply":"always"}`))
@@ -1362,6 +1382,25 @@ func TestQuestionPermissionHTTPAPI(t *testing.T) {
 		t.Fatalf("permission.replied = %#v, want request id and reply", got)
 	}
 
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/permissions/"+string(sessionPermission.ID), "application/json", strings.NewReader(`{"response":"once"}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/permissions/id error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("session permission reply status = %d, want 200", resp.StatusCode)
+	}
+	var sessionPermissionResult bool
+	if err := json.NewDecoder(resp.Body).Decode(&sessionPermissionResult); err != nil {
+		t.Fatalf("decode session permission reply: %v", err)
+	}
+	if !sessionPermissionResult {
+		t.Fatalf("session permission reply = false, want true")
+	}
+	if got := waitEventType(t, events, errs, "permission.replied"); got.Properties["sessionID"] != string(created.ID) || got.Properties["requestID"] != string(sessionPermission.ID) || got.Properties["reply"] != "once" {
+		t.Fatalf("session permission.replied = %#v, want session-scoped request id and response", got)
+	}
+
 	resp, err = http.Get(server.URL + "/question")
 	if err != nil {
 		t.Fatalf("GET /question after reply error = %v", err)
@@ -1372,6 +1411,18 @@ func TestQuestionPermissionHTTPAPI(t *testing.T) {
 	}
 	if len(questions) != 0 {
 		t.Fatalf("questions = %#v, want empty after reply", questions)
+	}
+
+	resp, err = http.Get(server.URL + "/permission")
+	if err != nil {
+		t.Fatalf("GET /permission after replies error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&permissions); err != nil {
+		t.Fatalf("decode empty permissions: %v", err)
+	}
+	if len(permissions) != 0 {
+		t.Fatalf("permissions = %#v, want empty after replies", permissions)
 	}
 }
 
@@ -2005,6 +2056,15 @@ func hasNamedItem(items []map[string]any, name string) bool {
 		}
 	}
 	return false
+}
+
+func findMapByString(items []map[string]any, key string, value string) (map[string]any, bool) {
+	for _, item := range items {
+		if item[key] == value {
+			return item, true
+		}
+	}
+	return nil, false
 }
 
 func hasToolWithParameters(items []map[string]any, id string) bool {
