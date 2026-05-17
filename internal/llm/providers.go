@@ -223,8 +223,7 @@ func providerFromConfig(id string, input map[string]any) PublicProvider {
 	if rawModels, ok := input["models"].(map[string]any); ok {
 		for key, raw := range rawModels {
 			modelRecord, _ := raw.(map[string]any)
-			modelID := stringFromAny(modelRecord["id"], key)
-			models[modelID] = modelFromConfig(id, modelID, modelRecord)
+			models[key] = modelFromConfig(id, key, input, modelRecord)
 		}
 	}
 	return PublicProvider{
@@ -285,9 +284,9 @@ func defaultPublicModel(providerID string, modelID string) PublicModel {
 		ID:         modelID,
 		ProviderID: providerID,
 		API: map[string]any{
-			"id":  providerID,
+			"id":  modelID,
 			"url": "",
-			"npm": "",
+			"npm": "@ai-sdk/openai-compatible",
 		},
 		Name: modelID,
 		Capabilities: Capabilities{
@@ -306,9 +305,25 @@ func defaultPublicModel(providerID string, modelID string) PublicModel {
 	}
 }
 
-func modelFromConfig(providerID string, modelID string, input map[string]any) PublicModel {
+func modelFromConfig(providerID string, modelID string, providerInput map[string]any, input map[string]any) PublicModel {
 	model := defaultPublicModel(providerID, modelID)
-	model.Name = stringFromAny(input["name"], model.Name)
+	apiID := stringFromAny(input["id"], modelID)
+	apiNPM := stringFromAny(providerInput["npm"], stringFromAny(model.API["npm"], "@ai-sdk/openai-compatible"))
+	apiURL := stringFromAny(providerInput["api"], stringFromAny(model.API["url"], ""))
+	if modelProvider, ok := input["provider"].(map[string]any); ok {
+		apiNPM = stringFromAny(modelProvider["npm"], apiNPM)
+		apiURL = stringFromAny(modelProvider["api"], apiURL)
+	}
+	model.API = map[string]any{
+		"id":  apiID,
+		"npm": apiNPM,
+		"url": apiURL,
+	}
+	if name, ok := input["name"].(string); ok && name != "" {
+		model.Name = name
+	} else if apiID != modelID {
+		model.Name = modelID
+	}
 	model.Family = stringFromAny(input["family"], "")
 	model.ReleaseDate = stringFromAny(input["release_date"], "")
 	model.Status = stringFromAny(input["status"], model.Status)

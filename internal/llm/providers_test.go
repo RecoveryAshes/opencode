@@ -55,12 +55,15 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 			"custom-ai": map[string]any{
 				"name": "Custom AI",
 				"env":  []any{"CUSTOM_AI_KEY"},
+				"api":  "https://custom.local/api",
+				"npm":  "@ai-sdk/custom",
 				"options": map[string]any{
 					"baseURL": "https://custom.local/v1",
 				},
 				"models": map[string]any{
 					"custom-large": map[string]any{
 						"name":        "Custom Large",
+						"id":          "custom-large-api",
 						"attachment":  true,
 						"tool_call":   true,
 						"temperature": false,
@@ -96,6 +99,10 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 							"input":  []any{"text", "image"},
 							"output": []any{"text"},
 						},
+						"provider": map[string]any{
+							"api": "https://custom.local/model-api",
+							"npm": "@ai-sdk/model-custom",
+						},
 					},
 				},
 			},
@@ -113,7 +120,11 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 		t.Fatalf("custom provider = %#v, want config provider fields", custom)
 	}
 	model := custom.Models["custom-large"]
-	if model.Name != "Custom Large" ||
+	if model.ID != "custom-large" ||
+		model.API["id"] != "custom-large-api" ||
+		model.API["url"] != "https://custom.local/model-api" ||
+		model.API["npm"] != "@ai-sdk/model-custom" ||
+		model.Name != "Custom Large" ||
 		!model.Capabilities.Attachment ||
 		!model.Capabilities.Toolcall ||
 		model.Capabilities.Temperature ||
@@ -137,6 +148,31 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 	}
 	if _, ok := result.Default["openai"]; ok {
 		t.Fatalf("default includes disabled openai: %#v", result.Default)
+	}
+}
+
+func TestConfiguredModelIDUsesKeyForPublicIDAndIDForAPI(t *testing.T) {
+	result := ListProviders(config.Info{
+		"enabled_providers": []any{"custom-ai"},
+		"provider": map[string]any{
+			"custom-ai": map[string]any{
+				"api": "https://provider.example/v1",
+				"npm": "@ai-sdk/provider",
+				"models": map[string]any{
+					"friendly": map[string]any{
+						"id": "actual-model",
+					},
+				},
+			},
+		},
+	})
+
+	model := result.All[0].Models["friendly"]
+	if model.ID != "friendly" || model.API["id"] != "actual-model" || model.Name != "friendly" {
+		t.Fatalf("model = %#v, want public friendly id with actual API id", model)
+	}
+	if model.API["url"] != "https://provider.example/v1" || model.API["npm"] != "@ai-sdk/provider" {
+		t.Fatalf("api = %#v, want provider-level api/npm", model.API)
 	}
 }
 
