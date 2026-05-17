@@ -255,6 +255,38 @@ func (store *MemorySessionStore) Remove(_ context.Context, id session.ID) error 
 	return nil
 }
 
+// ImportSession stores exported session data while preserving IDs.
+func (store *MemorySessionStore) ImportSession(_ context.Context, info session.Info, messages []session.WithParts) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if info.ID == "" {
+		return errors.New("session id is required")
+	}
+	if info.Slug == "" {
+		info.Slug = slug(info.Title)
+	}
+	if info.ProjectID == "" {
+		info.ProjectID = defaultProjectID
+	}
+	if info.Version == "" {
+		info.Version = "go-migration"
+	}
+	if info.Time.Created == 0 {
+		info.Time.Created = session.NowMillis()
+	}
+	if info.Time.Updated == 0 {
+		info.Time.Updated = info.Time.Created
+	}
+	store.sessions[info.ID] = info
+	store.order = slices.DeleteFunc(store.order, func(candidate session.ID) bool {
+		return candidate == info.ID
+	})
+	store.order = append([]session.ID{info.ID}, store.order...)
+	store.messages[info.ID] = normalizeImportedMessages(info.ID, messages)
+	return nil
+}
+
 // SetTodos replaces the per-session todo list.
 func (store *MemorySessionStore) SetTodos(_ context.Context, id session.ID, todos []session.TodoInfo) error {
 	store.mu.Lock()
@@ -739,6 +771,28 @@ func copyMessagesForFork(nextSessionID session.ID, messages []session.WithParts,
 		if until != nil && message.Info.ID == *until {
 			break
 		}
+	}
+	return result
+}
+
+func normalizeImportedMessages(sessionID session.ID, messages []session.WithParts) []session.WithParts {
+	result := make([]session.WithParts, len(messages))
+	for i, message := range messages {
+		message.Info.SessionID = sessionID
+		if message.Info.Time.Created == 0 {
+			message.Info.Time.Created = session.NowMillis()
+		}
+		parts := make([]session.Part, len(message.Parts))
+		for partIndex, part := range message.Parts {
+			part.SessionID = sessionID
+			part.MessageID = message.Info.ID
+			if part.Data == nil {
+				part.Data = map[string]any{}
+			}
+			parts[partIndex] = part
+		}
+		message.Parts = parts
+		result[i] = message
 	}
 	return result
 }

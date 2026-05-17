@@ -306,6 +306,11 @@ type MessageRepository interface {
 	UpdatePart(context.Context, Part) (Part, error)
 }
 
+// ImportRepository stores exported session data while preserving public IDs.
+type ImportRepository interface {
+	ImportSession(context.Context, Info, []WithParts) error
+}
+
 // MessageListFilter carries legacy HTTP message pagination fields.
 type MessageListFilter struct {
 	Limit  int

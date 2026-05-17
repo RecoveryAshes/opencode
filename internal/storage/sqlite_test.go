@@ -573,6 +573,63 @@ func TestSQLiteSessionStoreAssistantToolParts(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionStoreImportSessionPreservesIDs(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	info := session.Info{
+		ID:        "ses_imported",
+		Slug:      "imported",
+		ProjectID: "proj_import",
+		Directory: "/tmp/import",
+		Title:     "Imported",
+		Version:   "v1",
+		Cost:      2.5,
+		Tokens:    &session.TokenUsage{Input: 1, Output: 2, Cache: session.CacheUsage{}},
+		Time:      session.TimeInfo{Created: 1000, Updated: 2000},
+	}
+	messages := []session.WithParts{{
+		Info: session.MessageInfo{
+			ID:        "msg_imported",
+			SessionID: info.ID,
+			Role:      "user",
+			Time:      session.MessageTime{Created: 1100},
+		},
+		Parts: []session.Part{{
+			ID:        "prt_imported",
+			SessionID: info.ID,
+			MessageID: "msg_imported",
+			Type:      "text",
+			Data:      map[string]any{"text": "imported text"},
+		}},
+	}}
+
+	if err := store.ImportSession(ctx, info, messages); err != nil {
+		t.Fatalf("ImportSession() error = %v", err)
+	}
+	got, err := store.Get(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("Get(imported) error = %v", err)
+	}
+	if got.ID != info.ID || got.Title != "Imported" || got.ProjectID != "proj_import" || got.Tokens.Input != 1 {
+		t.Fatalf("imported session = %#v, want preserved info", got)
+	}
+	gotMessages, err := store.Messages(ctx, info.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages(imported) error = %v", err)
+	}
+	if len(gotMessages) != 1 ||
+		gotMessages[0].Info.ID != "msg_imported" ||
+		gotMessages[0].Parts[0].ID != "prt_imported" ||
+		gotMessages[0].Parts[0].Data["text"] != "imported text" {
+		t.Fatalf("imported messages = %#v, want preserved message and part", gotMessages)
+	}
+}
+
 func closeStore(t *testing.T, store *SQLiteSessionStore) {
 	t.Helper()
 	if err := store.Close(); err != nil {

@@ -464,6 +464,58 @@ func TestRunExportMissingSession(t *testing.T) {
 	}
 }
 
+func TestRunImportSessionJSON(t *testing.T) {
+	ctx := context.Background()
+	sourceDB := filepath.Join(t.TempDir(), "source.db")
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", sourceDB, "create", "--title", "Import Me",
+	})
+	sessionID := created["id"].(string)
+	prompt := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", sourceDB, "prompt", "--no-reply", "--text", "hello import", sessionID,
+	})
+	promptInfo := prompt["info"].(map[string]any)
+
+	var exportStdout bytes.Buffer
+	var exportStderr bytes.Buffer
+	code := Run(ctx, []string{"export", "--db", sourceDB, sessionID}, &exportStdout, &exportStderr, "test")
+	if code != 0 {
+		t.Fatalf("export exit code = %d, want 0; stderr=%q", code, exportStderr.String())
+	}
+	exportPath := filepath.Join(t.TempDir(), "session.json")
+	if err := os.WriteFile(exportPath, exportStdout.Bytes(), 0o644); err != nil {
+		t.Fatalf("write export file: %v", err)
+	}
+
+	targetDB := filepath.Join(t.TempDir(), "target.db")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code = Run(ctx, []string{"import", "--db", targetDB, exportPath}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("import exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "Imported session: "+sessionID {
+		t.Fatalf("import stdout = %q, want imported session", stdout.String())
+	}
+	got := runAppJSON[map[string]any](t, ctx, []string{"session", "--db", targetDB, "get", sessionID})
+	if got["title"] != "Import Me" {
+		t.Fatalf("imported get = %#v, want imported title", got)
+	}
+	messages := runAppJSON[[]map[string]any](t, ctx, []string{"session", "--db", targetDB, "messages", sessionID})
+	if len(messages) != 1 {
+		t.Fatalf("imported messages = %#v, want one message", messages)
+	}
+	info := messages[0]["info"].(map[string]any)
+	if info["id"] != promptInfo["id"] {
+		t.Fatalf("imported message info = %#v, want original prompt id", info)
+	}
+	parts := messages[0]["parts"].([]any)
+	part := parts[0].(map[string]any)
+	if part["text"] != "hello import" {
+		t.Fatalf("imported part = %#v, want hello import", part)
+	}
+}
+
 func TestRunStatsJSONAggregatesSessionsMessagesModelsAndTools(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()

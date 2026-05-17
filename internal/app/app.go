@@ -66,6 +66,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return debugCommand(ctx, args[1:], stdout, stderr)
 	case "export":
 		return exportCommand(ctx, args[1:], stdout, stderr)
+	case "import":
+		return importCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1158,6 +1160,62 @@ func exportCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	return 0
 }
 
+func importCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "SQLite database path; empty uses OPENCODE_DB or in-memory storage")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode import [--db PATH] FILE")
+		return 2
+	}
+	source := fs.Arg(0)
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		_, _ = fmt.Fprintln(stderr, "import from share URL is not migrated to Go yet")
+		return 2
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(stdout, "File not found: %s\n", source)
+			return 1
+		}
+		_, _ = fmt.Fprintf(stderr, "read import file failed: %v\n", err)
+		return 1
+	}
+	var imported exportData
+	if err := json.Unmarshal(data, &imported); err != nil {
+		_, _ = fmt.Fprintf(stderr, "decode import JSON failed: %v\n", err)
+		return 1
+	}
+	sessionRepo, messageRepo, _, closeRepo, err := openRepositories(*dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
+		return 1
+	}
+	defer closeRepo()
+	importer, ok := sessionRepo.(session.ImportRepository)
+	if !ok {
+		if candidate, ok := messageRepo.(session.ImportRepository); ok {
+			importer = candidate
+		}
+	}
+	if importer == nil {
+		_, _ = fmt.Fprintln(stderr, "session store does not support import")
+		return 1
+	}
+	if err := importer.ImportSession(ctx, imported.Info, imported.Messages); err != nil {
+		_, _ = fmt.Fprintf(stderr, "import session failed: %v\n", err)
+		return 1
+	}
+	if _, err := fmt.Fprintf(stdout, "Imported session: %s\n", imported.Info.ID); err != nil {
+		return 1
+	}
+	return 0
+}
+
 type exportData struct {
 	Info     session.Info        `json:"info"`
 	Messages []session.WithParts `json:"messages"`
@@ -1383,6 +1441,7 @@ commands:
   db [--db PATH] [--format tsv|json] COMMAND [QUERY]
   debug file COMMAND
   export [--db PATH] [--sanitize] [SESSION_ID]
+  import [--db PATH] FILE
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

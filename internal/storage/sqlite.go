@@ -417,6 +417,61 @@ func (store *SQLiteSessionStore) Remove(ctx context.Context, id session.ID) erro
 	return nil
 }
 
+// ImportSession stores exported session data while preserving IDs.
+func (store *SQLiteSessionStore) ImportSession(ctx context.Context, info session.Info, messages []session.WithParts) error {
+	if info.ID == "" {
+		return errors.New("session id is required")
+	}
+	if info.Slug == "" {
+		info.Slug = slug(info.Title)
+	}
+	if info.ProjectID == "" {
+		info.ProjectID = defaultProjectID
+	}
+	if info.Directory == "" {
+		info.Directory = "."
+	}
+	if info.Version == "" {
+		info.Version = "go-migration"
+	}
+	if info.Time.Created == 0 {
+		info.Time.Created = session.NowMillis()
+	}
+	if info.Time.Updated == 0 {
+		info.Time.Updated = info.Time.Created
+	}
+	if err := store.ensureProject(ctx, info.ProjectID, info.Directory, info.Time.Created); err != nil {
+		return err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := upsertImportedSession(ctx, tx, info); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM message WHERE session_id = ?`, info.ID); err != nil {
+		return fmt.Errorf("clear imported messages: %w", err)
+	}
+	for _, message := range normalizeImportedMessages(info.ID, messages) {
+		if err := insertMessage(ctx, tx, message); err != nil {
+			return err
+		}
+		for _, part := range message.Parts {
+			if err := insertPart(ctx, tx, part); err != nil {
+				return err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import: %w", err)
+	}
+	return nil
+}
+
 func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 	for _, statement := range []string{
 		`PRAGMA journal_mode = WAL`,
@@ -1058,6 +1113,97 @@ func insertPart(ctx context.Context, tx *sql.Tx, part session.Part) error {
 	return nil
 }
 
+func upsertImportedSession(ctx context.Context, tx *sql.Tx, info session.Info) error {
+	modelJSON, err := optionalJSON(info.Model)
+	if err != nil {
+		return fmt.Errorf("encode import model: %w", err)
+	}
+	permissionJSON, err := optionalJSON(info.Permission)
+	if err != nil {
+		return fmt.Errorf("encode import permission: %w", err)
+	}
+	revertJSON, err := optionalJSON(info.Revert)
+	if err != nil {
+		return fmt.Errorf("encode import revert: %w", err)
+	}
+	summaryDiffsJSON, err := optionalJSON(summaryDiffs(info.Summary))
+	if err != nil {
+		return fmt.Errorf("encode import summary diffs: %w", err)
+	}
+	tokens := emptyTokens(info.Tokens)
+	var parentID sql.NullString
+	if info.ParentID != nil {
+		parentID = sql.NullString{String: string(*info.ParentID), Valid: true}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO session (
+id, project_id, workspace_id, parent_id, slug, directory, path, title, version, share_url,
+summary_additions, summary_deletions, summary_files, summary_diffs, cost,
+tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,
+revert, permission, agent, model, time_created, time_updated, time_compacting, time_archived
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+project_id = excluded.project_id,
+workspace_id = excluded.workspace_id,
+parent_id = excluded.parent_id,
+slug = excluded.slug,
+directory = excluded.directory,
+path = excluded.path,
+title = excluded.title,
+version = excluded.version,
+share_url = excluded.share_url,
+summary_additions = excluded.summary_additions,
+summary_deletions = excluded.summary_deletions,
+summary_files = excluded.summary_files,
+summary_diffs = excluded.summary_diffs,
+cost = excluded.cost,
+tokens_input = excluded.tokens_input,
+tokens_output = excluded.tokens_output,
+tokens_reasoning = excluded.tokens_reasoning,
+tokens_cache_read = excluded.tokens_cache_read,
+tokens_cache_write = excluded.tokens_cache_write,
+revert = excluded.revert,
+permission = excluded.permission,
+agent = excluded.agent,
+model = excluded.model,
+time_created = excluded.time_created,
+time_updated = excluded.time_updated,
+time_compacting = excluded.time_compacting,
+time_archived = excluded.time_archived`,
+		info.ID,
+		info.ProjectID,
+		nullableString(info.WorkspaceID, info.WorkspaceID != ""),
+		parentID,
+		info.Slug,
+		info.Directory,
+		nullableString(info.Path, info.Path != ""),
+		info.Title,
+		info.Version,
+		nullableString(shareURLFromInfo(info.Share), info.Share != nil && info.Share.URL != ""),
+		nullableInt(info.Summary, func(summary *session.SummaryInfo) int { return summary.Additions }),
+		nullableInt(info.Summary, func(summary *session.SummaryInfo) int { return summary.Deletions }),
+		nullableInt(info.Summary, func(summary *session.SummaryInfo) int { return summary.Files }),
+		nullableString(summaryDiffsJSON, summaryDiffsJSON != ""),
+		info.Cost,
+		tokens.Input,
+		tokens.Output,
+		tokens.Reasoning,
+		tokens.Cache.Read,
+		tokens.Cache.Write,
+		nullableString(revertJSON, info.Revert != nil),
+		nullableString(permissionJSON, len(info.Permission) > 0),
+		nullableString(info.Agent, info.Agent != ""),
+		nullableString(modelJSON, info.Model != nil),
+		info.Time.Created,
+		info.Time.Updated,
+		nullableInt(info.Time.Compacting, func(value *int64) int { return int(*value) }),
+		nullableInt(info.Time.Archived, func(value *int64) int { return int(*value) }),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert imported session: %w", err)
+	}
+	return nil
+}
+
 func messageInfoJSON(info session.MessageInfo) (string, error) {
 	data, err := json.Marshal(info)
 	if err != nil {
@@ -1306,6 +1452,13 @@ func summaryDiffs(summary *session.SummaryInfo) []map[string]any {
 		return nil
 	}
 	return summary.Diffs
+}
+
+func shareURLFromInfo(share *session.ShareInfo) string {
+	if share == nil {
+		return ""
+	}
+	return share.URL
 }
 
 func optionalJSON(value any) (string, error) {
