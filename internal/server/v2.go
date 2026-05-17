@@ -158,6 +158,9 @@ func v2Prompt(r *http.Request, sessionID session.ID, messages session.MessageRep
 	if payload.Delivery == "background" || payload.Delivery == "async" {
 		input.NoReply = true
 	}
+	if err := resolvePromptDefaults(r.Context(), sessionID, &input, messages, requestDirectory(r)); err != nil {
+		return nil, statusFromError(err), err
+	}
 	user, err := messages.CreatePrompt(r.Context(), sessionID, input)
 	if err != nil {
 		return nil, statusFromError(err), err

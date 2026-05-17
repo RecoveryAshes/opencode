@@ -898,6 +898,52 @@ func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestSessionPromptPersistsConfiguredAgentModel(t *testing.T) {
+	root := t.TempDir()
+	writeServerFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"model": "custom-only/model",
+		"agent": {
+			"review": {
+				"model": "openai-compatible/mock-model",
+				"variant": "high"
+			}
+		}
+	}`)
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{Sessions: store}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"title":"chat","directory":`+quoteJSON(root)+`}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+
+	body := `{"agent":"review","noReply":true,"parts":[{"type":"text","text":"hello"}]}`
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/message?directory="+urlQueryEscape(root), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("prompt status = %d, want 200", resp.StatusCode)
+	}
+	var prompt session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&prompt); err != nil {
+		t.Fatalf("decode prompt: %v", err)
+	}
+	if prompt.Info.Model == nil ||
+		prompt.Info.Model.ProviderID != "openai-compatible" ||
+		prompt.Info.Model.ModelID != "mock-model" ||
+		prompt.Info.Model.Variant != "high" {
+		t.Fatalf("prompt model = %#v, want configured agent model", prompt.Info.Model)
+	}
+}
+
 func TestCommandHTTPAPIAndSessionCommand(t *testing.T) {
 	root := t.TempDir()
 	commandPath := filepath.Join(root, ".opencode", "command", "ship.md")

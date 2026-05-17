@@ -288,6 +288,58 @@ func TestPromptRuntimeFallsBackFromUnresolvedConfiguredDefaultModel(t *testing.T
 	}
 }
 
+func TestPromptRuntimeUsesConfiguredCustomProvider(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"model": "custom-ai/friendly",
+		"provider": {
+			"custom-ai": {
+				"api": "https://custom.example/v1",
+				"options": {
+					"apiKey": "custom-key"
+				},
+				"models": {
+					"friendly": {
+						"id": "actual-model"
+					}
+				}
+			}
+		}
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "custom-ai", ModelID: "friendly"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "custom-ai" ||
+		client.request.Protocol != "openai-compatible" ||
+		client.request.BaseURL != "https://custom.example/v1" ||
+		client.request.APIKey != "custom-key" ||
+		client.request.Model != "actual-model" {
+		t.Fatalf("provider request = %#v, want configured custom provider", client.request)
+	}
+	if assistant.Info.ProviderID != "custom-ai" || assistant.Info.ModelID != "friendly" {
+		t.Fatalf("assistant info = %#v, want public custom provider model", assistant.Info)
+	}
+}
+
 func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

@@ -105,13 +105,16 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 	for iteration := 0; ; iteration++ {
 		request, err := llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
 		if err != nil {
-			if !configuredDefault {
+			if configuredRequest, ok := configuredProviderChatRequest(messages, providerConfig, model); ok {
+				request = configuredRequest
+			} else if !configuredDefault {
 				return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
-			}
-			model = session.ModelRef{ProviderID: "openai-compatible", ModelID: "gpt-4o-mini"}
-			request, err = llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
-			if err != nil {
-				return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+			} else {
+				model = session.ModelRef{ProviderID: "openai-compatible", ModelID: "gpt-4o-mini"}
+				request, err = llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
+				if err != nil {
+					return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+				}
 			}
 		}
 		applyConfiguredProviderOptions(&request, providerConfig, model, agentName, sessionID)
@@ -147,6 +150,49 @@ func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
 		return nil, err
 	}
 	return loaded.Info, nil
+}
+
+func configuredProviderChatRequest(messages []llm.Message, info config.Info, model session.ModelRef) (llm.ChatRequest, bool) {
+	providers, ok := info["provider"].(map[string]any)
+	if !ok {
+		return llm.ChatRequest{}, false
+	}
+	rawProvider, ok := providers[model.ProviderID].(map[string]any)
+	if !ok {
+		return llm.ChatRequest{}, false
+	}
+	protocol := "openai-compatible"
+	if rawModels, ok := rawProvider["models"].(map[string]any); ok {
+		if rawModel, ok := rawModels[model.ModelID].(map[string]any); ok {
+			if modelProvider, ok := rawModel["provider"].(map[string]any); ok {
+				protocol = protocolFromNPM(stringFromConfig(modelProvider["npm"]))
+			}
+		}
+	}
+	if protocol == "openai-compatible" {
+		protocol = protocolFromNPM(stringFromConfig(rawProvider["npm"]))
+	}
+	if protocol != "openai-compatible" {
+		return llm.ChatRequest{}, false
+	}
+	return llm.ChatRequest{
+		ProviderID: model.ProviderID,
+		Protocol:   "openai-compatible",
+		BaseURL:    stringFromConfig(rawProvider["api"]),
+		AuthHeader: "Authorization",
+		AuthScheme: "Bearer",
+		Model:      model.ModelID,
+		Messages:   messages,
+	}, true
+}
+
+func protocolFromNPM(npm string) string {
+	switch npm {
+	case "", "@ai-sdk/openai-compatible":
+		return "openai-compatible"
+	default:
+		return npm
+	}
 }
 
 func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef, agentName string, sessionID session.ID) {
