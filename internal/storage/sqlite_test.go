@@ -190,6 +190,75 @@ func TestSQLiteSessionStoreMessages(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionStoreForkChildrenAndRevertMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	parent, err := store.Create(ctx, session.CreateInput{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	message, err := store.CreatePrompt(ctx, parent.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+
+	child, err := store.Fork(ctx, parent.ID, &message.Info.ID)
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	if child.ParentID == nil || *child.ParentID != parent.ID {
+		t.Fatalf("child parent = %#v, want parent id", child.ParentID)
+	}
+	children, err := store.Children(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("Children() error = %v", err)
+	}
+	if len(children) != 1 || children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want forked child", children)
+	}
+	childMessages, err := store.Messages(ctx, child.ID, 0)
+	if err != nil {
+		t.Fatalf("Messages(child) error = %v", err)
+	}
+	if len(childMessages) != 1 || childMessages[0].Info.SessionID != child.ID {
+		t.Fatalf("child messages = %#v, want copied message with child session id", childMessages)
+	}
+
+	partID := message.Parts[0].ID
+	updated, err := store.Update(ctx, parent.ID, session.UpdateInput{
+		Revert:  &session.RevertInfo{MessageID: message.Info.ID, PartID: &partID},
+		Summary: &session.SummaryInfo{Files: 1, Diffs: []map[string]any{{"path": "file.txt"}}},
+		Share:   &session.ShareInfo{URL: "opencode://session/" + string(parent.ID)},
+	})
+	if err != nil {
+		t.Fatalf("Update(revert/share) error = %v", err)
+	}
+	if updated.Revert == nil || updated.Revert.MessageID != message.Info.ID || updated.Summary == nil || updated.Share == nil {
+		t.Fatalf("updated = %#v, want revert summary and share", updated)
+	}
+	reloaded, err := store.Get(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if reloaded.Revert == nil || reloaded.Summary == nil || len(reloaded.Summary.Diffs) != 1 || reloaded.Share == nil {
+		t.Fatalf("reloaded = %#v, want persisted revert summary and share", reloaded)
+	}
+	cleared, err := store.Update(ctx, parent.ID, session.UpdateInput{ClearRevert: true, ClearShare: true})
+	if err != nil {
+		t.Fatalf("Update(clear) error = %v", err)
+	}
+	if cleared.Revert != nil || cleared.Summary != nil || cleared.Share != nil {
+		t.Fatalf("cleared = %#v, want revert summary and share cleared", cleared)
+	}
+}
+
 func TestSQLiteSessionStoreAssistantToolParts(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))

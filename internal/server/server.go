@@ -233,6 +233,31 @@ func OpenAPI(version string) map[string]any {
 				"patch":  map[string]any{"operationId": "session.update"},
 				"delete": map[string]any{"operationId": "session.delete"},
 			},
+			"/session/{sessionID}/children": map[string]any{
+				"get": map[string]any{"operationId": "session.children"},
+			},
+			"/session/{sessionID}/todo": map[string]any{
+				"get": map[string]any{"operationId": "session.todo"},
+			},
+			"/session/{sessionID}/diff": map[string]any{
+				"get": map[string]any{"operationId": "session.diff"},
+			},
+			"/session/{sessionID}/fork": map[string]any{
+				"post": map[string]any{"operationId": "session.fork"},
+			},
+			"/session/{sessionID}/abort": map[string]any{
+				"post": map[string]any{"operationId": "session.abort"},
+			},
+			"/session/{sessionID}/share": map[string]any{
+				"post":   map[string]any{"operationId": "session.share"},
+				"delete": map[string]any{"operationId": "session.unshare"},
+			},
+			"/session/{sessionID}/revert": map[string]any{
+				"post": map[string]any{"operationId": "session.revert"},
+			},
+			"/session/{sessionID}/unrevert": map[string]any{
+				"post": map[string]any{"operationId": "session.unrevert"},
+			},
 			"/session/{sessionID}/message": map[string]any{
 				"get":  map[string]any{"operationId": "session.messages"},
 				"post": map[string]any{"operationId": "session.prompt"},
@@ -447,6 +472,117 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 		}
+	}
+	if len(parts) == 1 && parts[0] == "children" {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		repo, ok := messages.(session.Repository)
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("session repository does not support children")
+		}
+		result, err := repo.Children(r.Context(), sessionID)
+		return result, statusFromError(err), err
+	}
+	if len(parts) == 1 && parts[0] == "fork" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		repo, ok := messages.(session.Repository)
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("session repository does not support fork")
+		}
+		var payload struct {
+			MessageID *session.MessageID `json:"messageID,omitempty"`
+		}
+		if r.ContentLength != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+		}
+		result, err := repo.Fork(r.Context(), sessionID, payload.MessageID)
+		if err == nil {
+			events.publish("session.created", map[string]any{
+				"sessionID": result.ID,
+				"info":      result,
+			})
+		}
+		return result, statusFromError(err), err
+	}
+	if len(parts) == 1 && parts[0] == "abort" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		return true, http.StatusOK, nil
+	}
+	if len(parts) == 1 && parts[0] == "todo" {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		return []any{}, http.StatusOK, nil
+	}
+	if len(parts) == 1 && parts[0] == "diff" {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		return []any{}, http.StatusOK, nil
+	}
+	if len(parts) == 1 && parts[0] == "share" {
+		repo, ok := messages.(session.Repository)
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("session repository does not support share")
+		}
+		switch r.Method {
+		case http.MethodPost:
+			info, err := repo.Update(r.Context(), sessionID, session.UpdateInput{
+				Share: &session.ShareInfo{URL: fmt.Sprintf("opencode://session/%s", sessionID)},
+			})
+			return info, statusFromError(err), err
+		case http.MethodDelete:
+			info, err := repo.Update(r.Context(), sessionID, session.UpdateInput{ClearShare: true})
+			return info, statusFromError(err), err
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+	}
+	if len(parts) == 1 && parts[0] == "revert" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		repo, ok := messages.(session.Repository)
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("session repository does not support revert")
+		}
+		var payload struct {
+			MessageID session.MessageID `json:"messageID"`
+			PartID    *session.PartID   `json:"partID,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		if payload.MessageID == "" {
+			return nil, http.StatusBadRequest, fmt.Errorf("messageID is required")
+		}
+		info, err := repo.Update(r.Context(), sessionID, session.UpdateInput{
+			Revert: &session.RevertInfo{MessageID: payload.MessageID, PartID: payload.PartID},
+			Summary: &session.SummaryInfo{
+				Additions: 0,
+				Deletions: 0,
+				Files:     0,
+			},
+		})
+		return info, statusFromError(err), err
+	}
+	if len(parts) == 1 && parts[0] == "unrevert" {
+		if r.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		repo, ok := messages.(session.Repository)
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("session repository does not support unrevert")
+		}
+		info, err := repo.Update(r.Context(), sessionID, session.UpdateInput{ClearRevert: true})
+		return info, statusFromError(err), err
 	}
 	if len(parts) == 1 && parts[0] == "message" {
 		switch r.Method {

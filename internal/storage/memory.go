@@ -97,9 +97,82 @@ func (store *MemorySessionStore) Update(_ context.Context, id session.ID, input 
 	if input.Title != nil {
 		info.Title = *input.Title
 	}
+	if input.Archived != nil {
+		info.Time.Archived = input.Archived
+	}
+	if input.Permission != nil {
+		info.Permission = append([]string(nil), (*input.Permission)...)
+	}
+	if input.Revert != nil {
+		revert := *input.Revert
+		info.Revert = &revert
+	}
+	if input.ClearRevert {
+		info.Revert = nil
+		info.Summary = nil
+	}
+	if input.Summary != nil {
+		summary := *input.Summary
+		info.Summary = &summary
+	}
+	if input.Share != nil {
+		share := *input.Share
+		info.Share = &share
+	}
+	if input.ClearShare {
+		info.Share = nil
+	}
 	info.Time.Updated = session.NowMillis()
 	store.sessions[id] = info
 	store.moveToFront(id)
+	return info, nil
+}
+
+// Children lists child sessions by parent id.
+func (store *MemorySessionStore) Children(_ context.Context, parentID session.ID) ([]session.Info, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if _, ok := store.sessions[parentID]; !ok {
+		return nil, session.ErrNotFound
+	}
+	result := []session.Info{}
+	for _, id := range store.order {
+		info := store.sessions[id]
+		if info.ParentID != nil && *info.ParentID == parentID {
+			result = append(result, info)
+		}
+	}
+	return result, nil
+}
+
+// Fork creates a child session and copies messages up to the optional message id.
+func (store *MemorySessionStore) Fork(_ context.Context, parentID session.ID, messageID *session.MessageID) (session.Info, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	parent, ok := store.sessions[parentID]
+	if !ok {
+		return session.Info{}, session.ErrNotFound
+	}
+	id, err := session.NewID()
+	if err != nil {
+		return session.Info{}, err
+	}
+	now := session.NowMillis()
+	info := session.Info{
+		ID:       id,
+		ParentID: &parentID,
+		Title:    parent.Title,
+		Time: session.TimeInfo{
+			Created: now,
+			Updated: now,
+		},
+		Permission: append([]string(nil), parent.Permission...),
+	}
+	store.sessions[id] = info
+	store.order = append([]session.ID{id}, store.order...)
+	store.messages[id] = copyMessagesForFork(id, store.messages[parentID], messageID)
 	return info, nil
 }
 
@@ -423,6 +496,41 @@ func createAssistantMessage(sessionID session.ID, input session.AssistantInput) 
 		},
 	})
 	return message, nil
+}
+
+func copyMessagesForFork(nextSessionID session.ID, messages []session.WithParts, until *session.MessageID) []session.WithParts {
+	result := []session.WithParts{}
+	messageIDs := map[session.MessageID]session.MessageID{}
+	for _, message := range messages {
+		copied := message
+		originalID := message.Info.ID
+		nextMessageID, err := session.NewMessageID()
+		if err == nil {
+			copied.Info.ID = nextMessageID
+			messageIDs[originalID] = nextMessageID
+		}
+		copied.Info.SessionID = nextSessionID
+		if copied.Info.ParentID != nil {
+			if mapped, ok := messageIDs[*copied.Info.ParentID]; ok {
+				copied.Info.ParentID = &mapped
+			}
+		}
+		parts := make([]session.Part, len(message.Parts))
+		for i, part := range message.Parts {
+			if nextPartID, err := session.NewPartID(); err == nil {
+				part.ID = nextPartID
+			}
+			part.SessionID = nextSessionID
+			part.MessageID = copied.Info.ID
+			parts[i] = part
+		}
+		copied.Parts = parts
+		result = append(result, copied)
+		if until != nil && message.Info.ID == *until {
+			break
+		}
+	}
+	return result
 }
 
 func defaultString(value string, fallback string) string {

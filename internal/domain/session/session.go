@@ -25,18 +25,43 @@ type PartID string
 
 // TimeInfo stores millisecond timestamps, matching the TypeScript API shape.
 type TimeInfo struct {
-	Created  int64  `json:"created"`
-	Updated  int64  `json:"updated"`
-	Archived *int64 `json:"archived,omitempty"`
+	Created    int64  `json:"created"`
+	Updated    int64  `json:"updated"`
+	Compacting *int64 `json:"compacting,omitempty"`
+	Archived   *int64 `json:"archived,omitempty"`
+}
+
+// SummaryInfo stores lightweight session diff summary metadata.
+type SummaryInfo struct {
+	Additions int              `json:"additions"`
+	Deletions int              `json:"deletions"`
+	Files     int              `json:"files"`
+	Diffs     []map[string]any `json:"diffs,omitempty"`
+}
+
+// ShareInfo stores a public session share URL.
+type ShareInfo struct {
+	URL string `json:"url"`
+}
+
+// RevertInfo stores the current reverted message/part marker.
+type RevertInfo struct {
+	MessageID MessageID `json:"messageID"`
+	PartID    *PartID   `json:"partID,omitempty"`
+	Snapshot  string    `json:"snapshot,omitempty"`
+	Diff      string    `json:"diff,omitempty"`
 }
 
 // Info is the public session DTO used by the HTTP API.
 type Info struct {
-	ID         ID       `json:"id"`
-	ParentID   *ID      `json:"parentID,omitempty"`
-	Title      string   `json:"title,omitempty"`
-	Time       TimeInfo `json:"time"`
-	Permission []string `json:"permission,omitempty"`
+	ID         ID           `json:"id"`
+	ParentID   *ID          `json:"parentID,omitempty"`
+	Summary    *SummaryInfo `json:"summary,omitempty"`
+	Share      *ShareInfo   `json:"share,omitempty"`
+	Title      string       `json:"title,omitempty"`
+	Time       TimeInfo     `json:"time"`
+	Permission []string     `json:"permission,omitempty"`
+	Revert     *RevertInfo  `json:"revert,omitempty"`
 }
 
 // ModelRef identifies a provider/model pair used by a message.
@@ -203,7 +228,14 @@ type CreateInput struct {
 
 // UpdateInput is the mutable subset of a session.
 type UpdateInput struct {
-	Title *string `json:"title,omitempty"`
+	Title       *string      `json:"title,omitempty"`
+	Archived    *int64       `json:"-"`
+	Permission  *[]string    `json:"permission,omitempty"`
+	Revert      *RevertInfo  `json:"revert,omitempty"`
+	ClearRevert bool         `json:"-"`
+	Summary     *SummaryInfo `json:"summary,omitempty"`
+	Share       *ShareInfo   `json:"share,omitempty"`
+	ClearShare  bool         `json:"-"`
 }
 
 // ListFilter represents the currently migrated list query fields.
@@ -218,6 +250,8 @@ type Repository interface {
 	Create(context.Context, CreateInput) (Info, error)
 	Get(context.Context, ID) (Info, error)
 	Update(context.Context, ID, UpdateInput) (Info, error)
+	Children(context.Context, ID) ([]Info, error)
+	Fork(context.Context, ID, *MessageID) (Info, error)
 	Remove(context.Context, ID) error
 }
 

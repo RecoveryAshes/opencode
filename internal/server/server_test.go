@@ -161,6 +161,113 @@ func TestSessionMessageHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSessionForkRevertShareHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(NewHandler(Options{Sessions: storage.NewMemorySessionStore()}))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"parent"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var parent session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&parent); err != nil {
+		t.Fatalf("decode parent: %v", err)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(parent.ID)+"/message", "application/json", strings.NewReader(`{"parts":[{"type":"text","text":"hello"}],"noReply":true}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var message session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&message); err != nil {
+		t.Fatalf("decode message: %v", err)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(parent.ID)+"/fork", "application/json", strings.NewReader(`{"messageID":`+quoteJSON(string(message.Info.ID))+`}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/fork error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var child session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&child); err != nil {
+		t.Fatalf("decode child: %v", err)
+	}
+	if child.ParentID == nil || *child.ParentID != parent.ID {
+		t.Fatalf("child = %#v, want parent id", child)
+	}
+
+	resp, err = http.Get(server.URL + "/session/" + string(parent.ID) + "/children")
+	if err != nil {
+		t.Fatalf("GET /session/id/children error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var children []session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&children); err != nil {
+		t.Fatalf("decode children: %v", err)
+	}
+	if len(children) != 1 || children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want forked child", children)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(parent.ID)+"/revert", "application/json", strings.NewReader(`{"messageID":`+quoteJSON(string(message.Info.ID))+`}`))
+	if err != nil {
+		t.Fatalf("POST /session/id/revert error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var reverted session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&reverted); err != nil {
+		t.Fatalf("decode reverted: %v", err)
+	}
+	if reverted.Revert == nil || reverted.Revert.MessageID != message.Info.ID || reverted.Summary == nil {
+		t.Fatalf("reverted = %#v, want revert metadata", reverted)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(parent.ID)+"/unrevert", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /session/id/unrevert error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var unreverted session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&unreverted); err != nil {
+		t.Fatalf("decode unreverted: %v", err)
+	}
+	if unreverted.Revert != nil || unreverted.Summary != nil {
+		t.Fatalf("unreverted = %#v, want clear revert", unreverted)
+	}
+
+	resp, err = http.Post(server.URL+"/session/"+string(parent.ID)+"/share", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /session/id/share error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var shared session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&shared); err != nil {
+		t.Fatalf("decode shared: %v", err)
+	}
+	if shared.Share == nil || !strings.Contains(shared.Share.URL, string(parent.ID)) {
+		t.Fatalf("shared = %#v, want local share marker", shared)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/session/"+string(parent.ID)+"/share", nil)
+	if err != nil {
+		t.Fatalf("new unshare request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /session/id/share error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var unshared session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&unshared); err != nil {
+		t.Fatalf("decode unshared: %v", err)
+	}
+	if unshared.Share != nil {
+		t.Fatalf("unshared = %#v, want share cleared", unshared)
+	}
+}
+
 func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	store := storage.NewMemorySessionStore()
 	client := &serverFakeChatClient{}

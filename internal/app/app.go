@@ -260,6 +260,10 @@ func sessionCommand(ctx context.Context, args []string, stdout io.Writer, stderr
 		return sessionGet(ctx, sessionRepo, fs.Args()[1:], stdout, stderr)
 	case "update":
 		return sessionUpdate(ctx, sessionRepo, fs.Args()[1:], stdout, stderr)
+	case "children":
+		return sessionChildren(ctx, sessionRepo, fs.Args()[1:], stdout, stderr)
+	case "fork":
+		return sessionFork(ctx, sessionRepo, fs.Args()[1:], stdout, stderr)
 	case "delete", "remove":
 		return sessionDelete(ctx, sessionRepo, fs.Args()[1:], stdout, stderr)
 	case "messages":
@@ -365,6 +369,58 @@ func sessionUpdate(ctx context.Context, repo server.SessionRepository, args []st
 	result, err := repo.Update(ctx, id, session.UpdateInput{Title: title})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "update session failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result)
+}
+
+func sessionChildren(ctx context.Context, repo server.SessionRepository, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("session children", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode session [--db PATH] children SESSION_ID")
+		return 2
+	}
+	id, err := session.ParseID(fs.Arg(0))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid session id: %v\n", err)
+		return 2
+	}
+	result, err := repo.Children(ctx, id)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "list children failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result)
+}
+
+func sessionFork(ctx context.Context, repo server.SessionRepository, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("session fork", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	messageID := fs.String("message", "", "optional message id to fork through")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode session [--db PATH] fork [--message MESSAGE_ID] SESSION_ID")
+		return 2
+	}
+	id, err := session.ParseID(fs.Arg(0))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid session id: %v\n", err)
+		return 2
+	}
+	var forkMessageID *session.MessageID
+	if *messageID != "" {
+		parsed := session.MessageID(*messageID)
+		forkMessageID = &parsed
+	}
+	result, err := repo.Fork(ctx, id, forkMessageID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "fork session failed: %v\n", err)
 		return 1
 	}
 	return writeJSON(stdout, result)

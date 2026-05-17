@@ -212,6 +212,19 @@ func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 		t.Fatalf("get title = %#v, want Renamed", get["title"])
 	}
 
+	forked := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "fork", sessionID,
+	})
+	if forked["parentID"] != sessionID {
+		t.Fatalf("forked parentID = %#v, want %s", forked["parentID"], sessionID)
+	}
+	children := runAppJSON[[]map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "children", sessionID,
+	})
+	if len(children) != 1 || children[0]["id"] != forked["id"] {
+		t.Fatalf("children = %#v, want forked session", children)
+	}
+
 	deleted := runAppJSON[bool](t, ctx, []string{
 		"session", "--db", dbPath, "delete", sessionID,
 	})

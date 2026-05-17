@@ -42,7 +42,7 @@ func (store *SQLiteSessionStore) Close() error {
 
 // List returns sessions sorted by update time descending.
 func (store *SQLiteSessionStore) List(ctx context.Context, filter session.ListFilter) ([]session.Info, error) {
-	query := `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived
+	query := `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
 FROM session`
 	args := []any{}
 	if filter.Search != "" {
@@ -123,32 +123,143 @@ id, project_id, parent_id, slug, directory, title, version, permission, time_cre
 
 // Get returns one session.
 func (store *SQLiteSessionStore) Get(ctx context.Context, id session.ID) (session.Info, error) {
-	row := store.db.QueryRowContext(ctx, `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived
+	row := store.db.QueryRowContext(ctx, `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
 FROM session WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 // Update changes mutable session fields.
 func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, input session.UpdateInput) (session.Info, error) {
+	current, err := store.Get(ctx, id)
+	if err != nil {
+		return session.Info{}, err
+	}
 	if input.Title != nil {
-		result, err := store.db.ExecContext(ctx, `UPDATE session SET title = ?, slug = ?, time_updated = ? WHERE id = ?`,
-			*input.Title,
-			slug(*input.Title),
-			session.NowMillis(),
-			id,
-		)
-		if err != nil {
-			return session.Info{}, fmt.Errorf("update session: %w", err)
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return session.Info{}, fmt.Errorf("update session rows affected: %w", err)
-		}
-		if count == 0 {
-			return session.Info{}, session.ErrNotFound
-		}
+		current.Title = *input.Title
+	}
+	if input.Archived != nil {
+		current.Time.Archived = input.Archived
+	}
+	if input.Permission != nil {
+		current.Permission = append([]string(nil), (*input.Permission)...)
+	}
+	if input.Revert != nil {
+		revert := *input.Revert
+		current.Revert = &revert
+	}
+	if input.ClearRevert {
+		current.Revert = nil
+		current.Summary = nil
+	}
+	if input.Summary != nil {
+		summary := *input.Summary
+		current.Summary = &summary
+	}
+	if input.Share != nil {
+		share := *input.Share
+		current.Share = &share
+	}
+	if input.ClearShare {
+		current.Share = nil
+	}
+	permissionJSON, err := json.Marshal(current.Permission)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("encode permission: %w", err)
+	}
+	summaryDiffs, err := json.Marshal(summaryDiffs(current.Summary))
+	if err != nil {
+		return session.Info{}, fmt.Errorf("encode summary diffs: %w", err)
+	}
+	revertJSON, err := optionalJSON(current.Revert)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("encode revert: %w", err)
+	}
+	shareURL := sql.NullString{}
+	if current.Share != nil && current.Share.URL != "" {
+		shareURL = sql.NullString{String: current.Share.URL, Valid: true}
+	}
+	archived := sql.NullInt64{}
+	if current.Time.Archived != nil {
+		archived = sql.NullInt64{Int64: *current.Time.Archived, Valid: true}
+	}
+	summary := current.Summary
+	result, err := store.db.ExecContext(ctx, `UPDATE session SET
+title = ?, slug = ?, permission = ?, time_updated = ?, time_archived = ?,
+share_url = ?, summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, revert = ?
+WHERE id = ?`,
+		current.Title,
+		slug(current.Title),
+		string(permissionJSON),
+		session.NowMillis(),
+		archived,
+		shareURL,
+		nullableInt(summary, func(value *session.SummaryInfo) int { return value.Additions }),
+		nullableInt(summary, func(value *session.SummaryInfo) int { return value.Deletions }),
+		nullableInt(summary, func(value *session.SummaryInfo) int { return value.Files }),
+		nullableString(string(summaryDiffs), summary != nil && len(summary.Diffs) > 0),
+		nullableString(revertJSON, current.Revert != nil),
+		id,
+	)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("update session: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return session.Info{}, fmt.Errorf("update session rows affected: %w", err)
+	}
+	if count == 0 {
+		return session.Info{}, session.ErrNotFound
 	}
 	return store.Get(ctx, id)
+}
+
+// Children lists child sessions by parent id.
+func (store *SQLiteSessionStore) Children(ctx context.Context, parentID session.ID) ([]session.Info, error) {
+	if _, err := store.Get(ctx, parentID); err != nil {
+		return nil, err
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT id, parent_id, title, permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert
+FROM session WHERE parent_id = ? ORDER BY time_updated DESC, id DESC`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("list children: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	result := []session.Info{}
+	for rows.Next() {
+		info, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate children: %w", err)
+	}
+	return result, nil
+}
+
+// Fork creates a child session and copies messages up to the optional message id.
+func (store *SQLiteSessionStore) Fork(ctx context.Context, parentID session.ID, messageID *session.MessageID) (session.Info, error) {
+	parent, err := store.Get(ctx, parentID)
+	if err != nil {
+		return session.Info{}, err
+	}
+	child, err := store.Create(ctx, session.CreateInput{Title: parent.Title, ParentID: &parentID})
+	if err != nil {
+		return session.Info{}, err
+	}
+	messages, err := store.Messages(ctx, parentID, 0)
+	if err != nil {
+		return session.Info{}, err
+	}
+	for _, message := range copyMessagesForFork(child.ID, messages, messageID) {
+		if err := store.insertMessageWithParts(ctx, message); err != nil {
+			return session.Info{}, err
+		}
+	}
+	return child, nil
 }
 
 // Remove deletes one session.
@@ -308,6 +419,28 @@ func (store *SQLiteSessionStore) CreateAssistant(ctx context.Context, sessionID 
 		return session.WithParts{}, fmt.Errorf("commit assistant: %w", err)
 	}
 	return message, nil
+}
+
+func (store *SQLiteSessionStore) insertMessageWithParts(ctx context.Context, message session.WithParts) error {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin fork message transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := insertMessage(ctx, tx, message); err != nil {
+		return err
+	}
+	for _, part := range message.Parts {
+		if err := insertPart(ctx, tx, part); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit fork message: %w", err)
+	}
+	return nil
 }
 
 // RemoveMessage deletes one message and its parts.
@@ -537,7 +670,27 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 	var created int64
 	var updated int64
 	var archived sql.NullInt64
-	if err := scanner.Scan(&id, &parentID, &title, &permissionJSON, &created, &updated, &archived); err != nil {
+	var shareURL sql.NullString
+	var summaryAdditions sql.NullInt64
+	var summaryDeletions sql.NullInt64
+	var summaryFiles sql.NullInt64
+	var summaryDiffs sql.NullString
+	var revertJSON sql.NullString
+	if err := scanner.Scan(
+		&id,
+		&parentID,
+		&title,
+		&permissionJSON,
+		&created,
+		&updated,
+		&archived,
+		&shareURL,
+		&summaryAdditions,
+		&summaryDeletions,
+		&summaryFiles,
+		&summaryDiffs,
+		&revertJSON,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return session.Info{}, session.ErrNotFound
 		}
@@ -564,7 +717,61 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 			return session.Info{}, fmt.Errorf("decode permission: %w", err)
 		}
 	}
+	if shareURL.Valid && shareURL.String != "" {
+		info.Share = &session.ShareInfo{URL: shareURL.String}
+	}
+	if summaryAdditions.Valid || summaryDeletions.Valid || summaryFiles.Valid {
+		info.Summary = &session.SummaryInfo{
+			Additions: int(summaryAdditions.Int64),
+			Deletions: int(summaryDeletions.Int64),
+			Files:     int(summaryFiles.Int64),
+		}
+		if summaryDiffs.Valid && summaryDiffs.String != "" {
+			if err := json.Unmarshal([]byte(summaryDiffs.String), &info.Summary.Diffs); err != nil {
+				return session.Info{}, fmt.Errorf("decode summary diffs: %w", err)
+			}
+		}
+	}
+	if revertJSON.Valid && revertJSON.String != "" {
+		var revert session.RevertInfo
+		if err := json.Unmarshal([]byte(revertJSON.String), &revert); err != nil {
+			return session.Info{}, fmt.Errorf("decode revert: %w", err)
+		}
+		info.Revert = &revert
+	}
 	return info, nil
+}
+
+func summaryDiffs(summary *session.SummaryInfo) []map[string]any {
+	if summary == nil {
+		return nil
+	}
+	return summary.Diffs
+}
+
+func optionalJSON(value any) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func nullableInt[T any](value *T, pick func(*T) int) sql.NullInt64 {
+	if value == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(pick(value)), Valid: true}
+}
+
+func nullableString(value string, valid bool) sql.NullString {
+	if !valid {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value, Valid: true}
 }
 
 func slug(title string) string {
