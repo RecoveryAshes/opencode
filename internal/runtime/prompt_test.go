@@ -204,6 +204,131 @@ func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeAppliesProviderTransformDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai", ModelID: "gpt-5.2"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENAI_BASE_URL", "https://local.openai.test/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Options["store"] != false ||
+		client.request.Options["promptCacheKey"] != string(info.ID) ||
+		client.request.Options["reasoningEffort"] != "medium" ||
+		client.request.Options["reasoningSummary"] != "auto" ||
+		client.request.Options["textVerbosity"] != "low" {
+		t.Fatalf("options = %#v, want migrated OpenAI gpt-5 defaults", client.request.Options)
+	}
+}
+
+func TestPromptRuntimeConfiguredOptionsOverrideProviderDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"provider": {
+			"openai": {
+				"models": {
+					"gpt-5.2": {
+						"options": {
+							"reasoningEffort": "high",
+							"textVerbosity": "medium"
+						}
+					}
+				}
+			}
+		}
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai", ModelID: "gpt-5.2"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENAI_BASE_URL", "https://local.openai.test/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Options["reasoningEffort"] != "high" || client.request.Options["textVerbosity"] != "medium" {
+		t.Fatalf("options = %#v, want model options to override defaults", client.request.Options)
+	}
+}
+
+func TestPromptRuntimeAppliesProviderCacheKeyDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openrouter", ModelID: "openai/gpt-4o-mini"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENROUTER_BASE_URL", "https://local.openrouter.test/api/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Options["prompt_cache_key"] != string(info.ID) {
+		t.Fatalf("options = %#v, want OpenRouter prompt_cache_key", client.request.Options)
+	}
+}
+
+func TestPromptRuntimeAppliesAzureProviderDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "azure", ModelID: "deployment"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("AZURE_OPENAI_RESOURCE_NAME", "opencode-test")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Options["store"] != false || client.request.Options["promptCacheKey"] != string(info.ID) {
+		t.Fatalf("options = %#v, want Azure store false and prompt cache key", client.request.Options)
+	}
+}
+
 func TestPromptRuntimeHonorsDisabledTools(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

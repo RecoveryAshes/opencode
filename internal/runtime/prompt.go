@@ -107,7 +107,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, err
 		}
-		applyConfiguredProviderOptions(&request, providerConfig, model)
+		applyConfiguredProviderOptions(&request, providerConfig, model, sessionID)
 		request.Tools = definitions
 		next, err := client.Chat(ctx, request)
 		if err != nil {
@@ -142,14 +142,11 @@ func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
 	return loaded.Info, nil
 }
 
-func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef) {
+func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef, sessionID session.ID) {
 	providers, ok := info["provider"].(map[string]any)
-	if !ok {
-		return
-	}
-	rawProvider, ok := providers[model.ProviderID].(map[string]any)
-	if !ok {
-		return
+	var rawProvider map[string]any
+	if ok {
+		rawProvider, _ = providers[model.ProviderID].(map[string]any)
 	}
 	if rawOptions, ok := rawProvider["options"].(map[string]any); ok {
 		applyChatOptions(request, rawOptions)
@@ -166,6 +163,7 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	if apiURL != "" && request.BaseURL == "" {
 		request.BaseURL = apiURL
 	}
+	request.Options = mergeAnyOptions(request.Options, defaultProviderBodyOptions(*request, rawProvider, rawModel, sessionID))
 	if rawModelOptions, ok := rawModel["options"].(map[string]any); ok {
 		applyChatOptions(request, rawModelOptions)
 		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawModelOptions))
@@ -181,6 +179,70 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	if rawHeaders, ok := rawModel["headers"].(map[string]any); ok {
 		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
 	}
+}
+
+func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, sessionID session.ID) map[string]any {
+	result := map[string]any{}
+	apiNPM := stringFromConfig(rawProvider["npm"])
+	if modelProvider, ok := rawModel["provider"].(map[string]any); ok {
+		apiNPM = defaultString(stringFromConfig(modelProvider["npm"]), apiNPM)
+	}
+	modelID := strings.ToLower(request.Model)
+	switch {
+	case request.ProviderID == "openai" ||
+		request.ProviderID == "github-copilot" ||
+		apiNPM == "@ai-sdk/openai" ||
+		apiNPM == "@ai-sdk/github-copilot":
+		result["store"] = false
+	case request.ProviderID == "azure" || apiNPM == "@ai-sdk/azure":
+		result["store"] = false
+		result["promptCacheKey"] = string(sessionID)
+	}
+	if request.ProviderID == "openai" || boolFromConfig(rawProviderOption(rawProvider, "setCacheKey"), false) {
+		result["promptCacheKey"] = string(sessionID)
+	}
+	if strings.Contains(modelID, "gpt-5") && !strings.Contains(modelID, "gpt-5-chat") {
+		if !strings.Contains(modelID, "gpt-5-pro") {
+			result["reasoningEffort"] = "medium"
+			result["reasoningSummary"] = "auto"
+		}
+		if strings.Contains(modelID, "gpt-5.") &&
+			!strings.Contains(modelID, "codex") &&
+			!strings.Contains(modelID, "-chat") &&
+			request.ProviderID != "azure" {
+			result["textVerbosity"] = "low"
+		}
+	}
+	if request.ProviderID == "venice" {
+		result["promptCacheKey"] = string(sessionID)
+	}
+	if request.ProviderID == "openrouter" {
+		result["prompt_cache_key"] = string(sessionID)
+	}
+	if request.ProviderID == "baseten" {
+		result["chat_template_args"] = map[string]any{"enable_thinking": true}
+	}
+	if (strings.Contains(request.ProviderID, "zai") || strings.Contains(request.ProviderID, "zhipuai")) &&
+		request.Protocol == "openai-compatible" {
+		result["thinking"] = map[string]any{
+			"type":           "enabled",
+			"clear_thinking": false,
+		}
+	}
+	if (request.ProviderID == "alibaba" || request.ProviderID == "alibaba-cn") &&
+		boolFromConfig(rawModel["reasoning"], false) &&
+		request.Protocol == "openai-compatible" &&
+		!strings.Contains(modelID, "kimi-k2-thinking") {
+		result["enable_thinking"] = true
+	}
+	return result
+}
+
+func rawProviderOption(rawProvider map[string]any, key string) any {
+	if rawOptions, ok := rawProvider["options"].(map[string]any); ok {
+		return rawOptions[key]
+	}
+	return nil
 }
 
 func applyChatOptions(request *llm.ChatRequest, options map[string]any) {
@@ -257,6 +319,13 @@ func stringFromConfig(input any) string {
 		return text
 	}
 	return ""
+}
+
+func boolFromConfig(input any, fallback bool) bool {
+	if value, ok := input.(bool); ok {
+		return value
+	}
+	return fallback
 }
 
 func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
