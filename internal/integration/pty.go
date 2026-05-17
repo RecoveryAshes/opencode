@@ -1,0 +1,257 @@
+package integration
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+)
+
+// PTYInfo is the public pseudo-terminal session DTO.
+type PTYInfo struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	CWD     string   `json:"cwd"`
+	Status  string   `json:"status"`
+	PID     int      `json:"pid"`
+}
+
+// PTYCreateInput creates a shell-backed process. It is not a real OS PTY yet,
+// but preserves the HTTP lifecycle contract and stream buffer for local use.
+type PTYCreateInput struct {
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	CWD     string            `json:"cwd,omitempty"`
+	Title   string            `json:"title,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
+// PTYUpdateInput changes mutable PTY session fields.
+type PTYUpdateInput struct {
+	Title string `json:"title,omitempty"`
+}
+
+// PTYManager manages local shell sessions.
+type PTYManager struct {
+	mu       sync.Mutex
+	sessions map[string]*ptySession
+}
+
+type ptySession struct {
+	info   PTYInfo
+	cmd    *exec.Cmd
+	stdin  ioWriteCloser
+	buffer safeBuffer
+}
+
+type ioWriteCloser interface {
+	Write([]byte) (int, error)
+	Close() error
+}
+
+// NewPTYManager creates an empty PTY manager.
+func NewPTYManager() *PTYManager {
+	return &PTYManager{sessions: map[string]*ptySession{}}
+}
+
+// Shells lists common local shells.
+func Shells() []map[string]any {
+	candidates := []string{os.Getenv("SHELL"), "/bin/zsh", "/bin/bash", "/bin/sh"}
+	if runtime.GOOS == "windows" {
+		candidates = []string{os.Getenv("COMSPEC"), "powershell.exe", "cmd.exe"}
+	}
+	seen := map[string]bool{}
+	result := []map[string]any{}
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		acceptable := true
+		if strings.Contains(candidate, "/") {
+			if _, err := os.Stat(candidate); err != nil {
+				acceptable = false
+			}
+		}
+		result = append(result, map[string]any{
+			"path":       candidate,
+			"name":       candidateName(candidate),
+			"acceptable": acceptable,
+		})
+	}
+	return result
+}
+
+// List returns all known PTY sessions.
+func (manager *PTYManager) List() []PTYInfo {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	result := []PTYInfo{}
+	for _, session := range manager.sessions {
+		result = append(result, session.info)
+	}
+	return result
+}
+
+// Get returns one PTY session.
+func (manager *PTYManager) Get(id string) (PTYInfo, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	session := manager.sessions[id]
+	if session == nil {
+		return PTYInfo{}, false
+	}
+	return session.info, true
+}
+
+// Create starts a shell process and captures combined output.
+func (manager *PTYManager) Create(ctx context.Context, input PTYCreateInput) (PTYInfo, error) {
+	command := input.Command
+	if command == "" {
+		command = os.Getenv("SHELL")
+	}
+	if command == "" {
+		command = "/bin/sh"
+	}
+	cwd := input.CWD
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+	}
+	id := fmt.Sprintf("pty_%x", time.Now().UnixNano())
+	title := input.Title
+	if title == "" {
+		title = "Terminal " + id[len(id)-4:]
+	}
+	_ = ctx
+	cmd := exec.Command(command, input.Args...)
+	cmd.Dir = cwd
+	cmd.Env = os.Environ()
+	for key, value := range input.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return PTYInfo{}, fmt.Errorf("pty stdin: %w", err)
+	}
+	session := &ptySession{}
+	cmd.Stdout = &session.buffer
+	cmd.Stderr = &session.buffer
+	if err := cmd.Start(); err != nil {
+		return PTYInfo{}, fmt.Errorf("start pty command: %w", err)
+	}
+	session.stdin = stdin
+	session.cmd = cmd
+	session.info = PTYInfo{
+		ID:      id,
+		Title:   title,
+		Command: command,
+		Args:    append([]string(nil), input.Args...),
+		CWD:     cwd,
+		Status:  "running",
+		PID:     cmd.Process.Pid,
+	}
+	manager.mu.Lock()
+	manager.sessions[id] = session
+	manager.mu.Unlock()
+	go func() {
+		_ = cmd.Wait()
+		manager.mu.Lock()
+		if current := manager.sessions[id]; current != nil {
+			current.info.Status = "exited"
+		}
+		manager.mu.Unlock()
+	}()
+	return session.info, nil
+}
+
+// Update changes PTY metadata.
+func (manager *PTYManager) Update(id string, input PTYUpdateInput) (PTYInfo, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	session := manager.sessions[id]
+	if session == nil {
+		return PTYInfo{}, false
+	}
+	if input.Title != "" {
+		session.info.Title = input.Title
+	}
+	return session.info, true
+}
+
+// Remove terminates and deletes one PTY session.
+func (manager *PTYManager) Remove(id string) bool {
+	manager.mu.Lock()
+	session := manager.sessions[id]
+	if session != nil {
+		delete(manager.sessions, id)
+	}
+	manager.mu.Unlock()
+	if session == nil {
+		return false
+	}
+	if session.cmd.Process != nil {
+		_ = session.cmd.Process.Kill()
+	}
+	_ = session.stdin.Close()
+	return true
+}
+
+// Write sends input to the process.
+func (manager *PTYManager) Write(id string, data string) error {
+	manager.mu.Lock()
+	session := manager.sessions[id]
+	manager.mu.Unlock()
+	if session == nil {
+		return fmt.Errorf("pty session %q not found", id)
+	}
+	if _, err := session.stdin.Write([]byte(data)); err != nil {
+		return fmt.Errorf("write pty input: %w", err)
+	}
+	return nil
+}
+
+// Buffer returns captured process output.
+func (manager *PTYManager) Buffer(id string) (string, bool) {
+	manager.mu.Lock()
+	session := manager.sessions[id]
+	manager.mu.Unlock()
+	if session == nil {
+		return "", false
+	}
+	return session.buffer.String(), true
+}
+
+func candidateName(path string) string {
+	if index := strings.LastIndex(path, "/"); index >= 0 {
+		return path[index+1:]
+	}
+	return path
+}
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (buffer *safeBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.Write(data)
+}
+
+func (buffer *safeBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.String()
+}

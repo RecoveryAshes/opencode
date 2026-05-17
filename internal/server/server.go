@@ -28,6 +28,8 @@ type Options struct {
 	Sessions session.Repository
 	Messages session.MessageRepository
 	Runtime  *runtime.PromptRuntime
+	MCP      *integration.MCPManager
+	PTY      *integration.PTYManager
 }
 
 // SessionRepository is the storage contract required by the HTTP server.
@@ -101,6 +103,12 @@ func NewHandler(opts Options) http.Handler {
 	if opts.Runtime == nil {
 		opts.Runtime = runtime.NewPromptRuntime(opts.Messages)
 	}
+	if opts.MCP == nil {
+		opts.MCP = integration.NewMCPManager()
+	}
+	if opts.PTY == nil {
+		opts.PTY = integration.NewPTYManager()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{
@@ -121,6 +129,16 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
 	}))
+	mux.HandleFunc("/mcp/", mcpByName(opts.MCP))
+	mux.HandleFunc("/mcp", mcpRoot(opts.MCP))
+	mux.HandleFunc("/pty/shells", handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		return integration.Shells(), http.StatusOK, nil
+	}))
+	mux.HandleFunc("/pty/", ptyByID(opts.PTY))
+	mux.HandleFunc("/pty", ptyRoot(opts.PTY))
 	mux.HandleFunc("/tool/", toolByName())
 	mux.HandleFunc("/tool", tools())
 	return withCommonHeaders(mux)
@@ -150,6 +168,40 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/tool/{name}": map[string]any{
 				"post": map[string]any{"operationId": "tool.execute"},
+			},
+			"/mcp": map[string]any{
+				"get":  map[string]any{"operationId": "mcp.status"},
+				"post": map[string]any{"operationId": "mcp.add"},
+			},
+			"/mcp/{name}/connect": map[string]any{
+				"post": map[string]any{"operationId": "mcp.connect"},
+			},
+			"/mcp/{name}/disconnect": map[string]any{
+				"post": map[string]any{"operationId": "mcp.disconnect"},
+			},
+			"/mcp/{name}/tool": map[string]any{
+				"get": map[string]any{"operationId": "mcp.tools"},
+			},
+			"/mcp/{name}/tool/{tool}": map[string]any{
+				"post": map[string]any{"operationId": "mcp.callTool"},
+			},
+			"/pty/shells": map[string]any{
+				"get": map[string]any{"operationId": "pty.shells"},
+			},
+			"/pty": map[string]any{
+				"get":  map[string]any{"operationId": "pty.list"},
+				"post": map[string]any{"operationId": "pty.create"},
+			},
+			"/pty/{ptyID}": map[string]any{
+				"get":    map[string]any{"operationId": "pty.get"},
+				"put":    map[string]any{"operationId": "pty.update"},
+				"delete": map[string]any{"operationId": "pty.remove"},
+			},
+			"/pty/{ptyID}/input": map[string]any{
+				"post": map[string]any{"operationId": "pty.input"},
+			},
+			"/pty/{ptyID}/buffer": map[string]any{
+				"get": map[string]any{"operationId": "pty.buffer"},
 			},
 			"/session": map[string]any{
 				"get":  map[string]any{"operationId": "session.list"},

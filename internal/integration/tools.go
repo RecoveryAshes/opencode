@@ -81,6 +81,8 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return grepTool(request)
 	case "shell":
 		return shellTool(ctx, request)
+	case "lsp":
+		return lspTool(request)
 	case "webfetch":
 		return webFetchTool(ctx, request)
 	case "websearch":
