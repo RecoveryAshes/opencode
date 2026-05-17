@@ -46,6 +46,7 @@ type ChatRequest struct {
 	Messages       []Message
 	Temperature    *float64
 	MaxTokens      *int
+	Options        map[string]any
 	AWSRegion      string
 	AWSProfile     string
 	AWSCredentials *AWSCredentials
@@ -106,24 +107,28 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 	}
 	baseURL := strings.TrimRight(defaultString(request.BaseURL, defaultOpenAICompatibleBaseURL), "/")
 	model := defaultString(request.Model, "gpt-4o-mini")
-	body := openAIChatRequest{
-		Model:       model,
-		Messages:    make([]openAIChatMessage, 0, len(request.Messages)),
-		Stream:      false,
-		Temperature: request.Temperature,
-		MaxTokens:   request.MaxTokens,
+	body := map[string]any{}
+	applyOpenAIChatOptions(body, request.Options)
+	body["model"] = model
+	body["messages"] = make([]openAIChatMessage, 0, len(request.Messages))
+	body["stream"] = false
+	if request.Temperature != nil {
+		body["temperature"] = *request.Temperature
+	}
+	if request.MaxTokens != nil {
+		body["max_tokens"] = *request.MaxTokens
 	}
 	if len(request.Tools) > 0 {
-		body.Tools = openAIToolDefinitions(request.Tools)
-		body.ToolChoice = "auto"
+		body["tools"] = openAIToolDefinitions(request.Tools)
+		body["tool_choice"] = "auto"
 	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
 			continue
 		}
-		body.Messages = append(body.Messages, openAIChatMessage(message))
+		body["messages"] = append(body["messages"].([]openAIChatMessage), openAIChatMessage(message))
 	}
-	if len(body.Messages) == 0 {
+	if len(body["messages"].([]openAIChatMessage)) == 0 {
 		return ChatResponse{}, fmt.Errorf("at least one non-empty message is required")
 	}
 	payload, err := json.Marshal(body)
@@ -170,25 +175,32 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 		return ChatResponse{}, fmt.Errorf("at least one message is required")
 	}
 	baseURL := strings.TrimRight(defaultString(streamRequest.BaseURL, defaultOpenAICompatibleBaseURL), "/")
-	body := openAIChatRequest{
-		Model:    defaultString(streamRequest.Model, "gpt-4o-mini"),
-		Messages: make([]openAIChatMessage, 0, len(streamRequest.Messages)),
-		Stream:   true,
-		StreamOptions: map[string]bool{
-			"include_usage": true,
-		},
-		Temperature: streamRequest.Temperature,
-		MaxTokens:   streamRequest.MaxTokens,
+	body := map[string]any{}
+	applyOpenAIChatOptions(body, streamRequest.Options)
+	body["model"] = defaultString(streamRequest.Model, "gpt-4o-mini")
+	body["messages"] = make([]openAIChatMessage, 0, len(streamRequest.Messages))
+	body["stream"] = true
+	body["stream_options"] = map[string]bool{
+		"include_usage": true,
+	}
+	if streamRequest.Temperature != nil {
+		body["temperature"] = *streamRequest.Temperature
+	}
+	if streamRequest.MaxTokens != nil {
+		body["max_tokens"] = *streamRequest.MaxTokens
 	}
 	if len(streamRequest.Tools) > 0 {
-		body.Tools = openAIToolDefinitions(streamRequest.Tools)
-		body.ToolChoice = "auto"
+		body["tools"] = openAIToolDefinitions(streamRequest.Tools)
+		body["tool_choice"] = "auto"
 	}
 	for _, message := range streamRequest.Messages {
 		if message.Role == "" || message.Content == "" {
 			continue
 		}
-		body.Messages = append(body.Messages, openAIChatMessage(message))
+		body["messages"] = append(body["messages"].([]openAIChatMessage), openAIChatMessage(message))
+	}
+	if len(body["messages"].([]openAIChatMessage)) == 0 {
+		return ChatResponse{}, fmt.Errorf("at least one non-empty message is required")
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -233,15 +245,27 @@ func ChatRequestFromEnv(messages []Message, model string) ChatRequest {
 	return request
 }
 
-type openAIChatRequest struct {
-	Model         string              `json:"model"`
-	Messages      []openAIChatMessage `json:"messages"`
-	Stream        bool                `json:"stream"`
-	StreamOptions map[string]bool     `json:"stream_options,omitempty"`
-	Temperature   *float64            `json:"temperature,omitempty"`
-	MaxTokens     *int                `json:"max_tokens,omitempty"`
-	Tools         []openAIToolDef     `json:"tools,omitempty"`
-	ToolChoice    string              `json:"tool_choice,omitempty"`
+func applyOpenAIChatOptions(body map[string]any, options map[string]any) {
+	for key, value := range options {
+		if !openAIChatBodyOption(key, value) {
+			continue
+		}
+		body[key] = value
+	}
+}
+
+func openAIChatBodyOption(key string, value any) bool {
+	if key == "" || value == nil {
+		return false
+	}
+	switch key {
+	case "apiKey", "baseURL", "headers", "fetch", "timeout", "chunkTimeout", "includeUsage", "setCacheKey":
+		return false
+	case "model", "messages", "stream", "stream_options", "tools", "tool_choice", "temperature", "max_tokens":
+		return false
+	default:
+		return true
+	}
 }
 
 type openAIChatMessage struct {

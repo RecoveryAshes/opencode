@@ -168,6 +168,15 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	}
 	if rawModelOptions, ok := rawModel["options"].(map[string]any); ok {
 		applyChatOptions(request, rawModelOptions)
+		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawModelOptions))
+	}
+	if model.Variant != "" {
+		if rawVariants, ok := rawModel["variants"].(map[string]any); ok {
+			if rawVariant, ok := rawVariants[model.Variant].(map[string]any); ok {
+				applyChatOptions(request, rawVariant)
+				request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawVariant))
+			}
+		}
 	}
 	if rawHeaders, ok := rawModel["headers"].(map[string]any); ok {
 		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
@@ -184,6 +193,39 @@ func applyChatOptions(request *llm.ChatRequest, options map[string]any) {
 	if rawHeaders, ok := options["headers"].(map[string]any); ok {
 		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
 	}
+}
+
+func bodyOptionsFromConfig(options map[string]any) map[string]any {
+	result := map[string]any{}
+	for key, value := range options {
+		switch key {
+		case "apiKey", "baseURL", "headers", "fetch", "timeout", "chunkTimeout":
+			continue
+		default:
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func mergeAnyOptions(left map[string]any, right map[string]any) map[string]any {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	result := map[string]any{}
+	for key, value := range left {
+		result[key] = value
+	}
+	for key, value := range right {
+		if leftMap, ok := result[key].(map[string]any); ok {
+			if rightMap, ok := value.(map[string]any); ok {
+				result[key] = mergeAnyOptions(leftMap, rightMap)
+				continue
+			}
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func mergeHeaders(left map[string]string, right map[string]string) map[string]string {

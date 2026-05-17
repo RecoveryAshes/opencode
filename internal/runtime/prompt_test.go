@@ -150,7 +150,15 @@ func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
 					"friendly-model": {
 						"id": "actual-model",
 						"options": {
-							"headers": {"X-Model": "model"}
+							"headers": {"X-Model": "model"},
+							"reasoningEffort": "low",
+							"metadata": {"model": "base", "shared": "model"}
+						},
+						"variants": {
+							"fast": {
+								"reasoningEffort": "high",
+								"metadata": {"variant": "fast", "shared": "variant"}
+							}
 						}
 					}
 				}
@@ -164,7 +172,7 @@ func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
-		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "friendly-model"},
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "friendly-model", Variant: "fast"},
 		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
 	})
 	if err != nil {
@@ -183,6 +191,16 @@ func TestPromptRuntimeAppliesConfiguredProviderOptions(t *testing.T) {
 	}
 	if client.request.Headers["X-Provider"] != "provider" || client.request.Headers["X-Model"] != "model" {
 		t.Fatalf("headers = %#v, want provider and model headers", client.request.Headers)
+	}
+	if client.request.Options["reasoningEffort"] != "high" {
+		t.Fatalf("options = %#v, want variant to override model body options", client.request.Options)
+	}
+	metadata := client.request.Options["metadata"].(map[string]any)
+	if metadata["model"] != "base" || metadata["variant"] != "fast" || metadata["shared"] != "variant" {
+		t.Fatalf("metadata = %#v, want deep-merged model and variant options", metadata)
+	}
+	if _, ok := client.request.Options["headers"]; ok {
+		t.Fatalf("options = %#v, did not want transport headers in body options", client.request.Options)
 	}
 }
 

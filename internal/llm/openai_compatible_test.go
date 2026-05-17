@@ -62,6 +62,52 @@ func TestOpenAICompatibleChatRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleChatSendsConfiguredBodyOptions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body["reasoningEffort"] != "high" || body["promptCacheKey"] != "ses_123" {
+			t.Fatalf("body = %#v, want configured model options", body)
+		}
+		metadata := body["metadata"].(map[string]any)
+		if metadata["source"] != "config" {
+			t.Fatalf("metadata = %#v, want nested configured option", metadata)
+		}
+		for _, forbidden := range []string{"apiKey", "baseURL", "headers", "timeout", "includeUsage"} {
+			if _, ok := body[forbidden]; ok {
+				t.Fatalf("body = %#v, did not want transport option %q", body, forbidden)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewOpenAICompatibleClient().Chat(t.Context(), ChatRequest{
+		BaseURL: mock.URL,
+		Model:   "mock-model",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Options: map[string]any{
+			"apiKey":          "transport-key",
+			"baseURL":         "https://transport.example/v1",
+			"headers":         map[string]any{"X-Test": "transport"},
+			"timeout":         300000,
+			"includeUsage":    true,
+			"reasoningEffort": "high",
+			"promptCacheKey":  "ses_123",
+			"metadata":        map[string]any{"source": "config"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestOpenAICompatibleChatStream(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
