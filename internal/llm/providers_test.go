@@ -1,9 +1,36 @@
 package llm
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func clearBedrockAuthEnv(t *testing.T) {
+	t.Helper()
+
+	for _, key := range []string{
+		"OPENCODE_AWS_BEARER_TOKEN_BEDROCK",
+		"AWS_BEARER_TOKEN_BEDROCK",
+		"OPENCODE_AWS_ACCESS_KEY_ID",
+		"AWS_ACCESS_KEY_ID",
+		"OPENCODE_AWS_SECRET_ACCESS_KEY",
+		"AWS_SECRET_ACCESS_KEY",
+		"OPENCODE_AWS_SESSION_TOKEN",
+		"AWS_SESSION_TOKEN",
+		"OPENCODE_AWS_PROFILE",
+		"OPENCODE_BEDROCK_PROFILE",
+		"AWS_PROFILE",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+		"AWS_WEB_IDENTITY_TOKEN_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "credentials"))
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
+}
 
 func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 	got := map[string]bool{}
@@ -190,6 +217,7 @@ func TestResolveChatRequestGemini(t *testing.T) {
 }
 
 func TestResolveChatRequestBedrockBearer(t *testing.T) {
+	clearBedrockAuthEnv(t)
 	t.Setenv("AWS_REGION", "eu-west-1")
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token")
 
@@ -207,10 +235,70 @@ func TestResolveChatRequestBedrockBearer(t *testing.T) {
 	}
 }
 
-func TestResolveChatRequestBedrockRequiresBearerForNow(t *testing.T) {
+func TestResolveChatRequestBedrockUsesAWSCredentials(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	t.Setenv("AWS_REGION", "ap-southeast-2")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("AWS_SESSION_TOKEN", "aws-session")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "bedrock-converse" ||
+		got.BaseURL != "https://bedrock-runtime.ap-southeast-2.amazonaws.com" ||
+		got.APIKey != "" ||
+		got.AWSRegion != "ap-southeast-2" ||
+		got.AWSCredentials == nil ||
+		got.AWSCredentials.AccessKeyID != "aws-key" ||
+		got.AWSCredentials.SecretAccessKey != "aws-secret" ||
+		got.AWSCredentials.SessionToken != "aws-session" {
+		t.Fatalf("request = %#v, want Bedrock SigV4 credentials", got)
+	}
+}
+
+func TestResolveChatRequestBedrockUsesAWSProfile(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	t.Setenv("AWS_REGION", "eu-central-1")
+	t.Setenv("AWS_PROFILE", "bedrock-dev")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.APIKey != "" ||
+		got.AWSCredentials != nil ||
+		got.AWSProfile != "bedrock-dev" ||
+		got.AWSRegion != "eu-central-1" ||
+		got.BaseURL != "https://bedrock-runtime.eu-central-1.amazonaws.com" {
+		t.Fatalf("request = %#v, want Bedrock profile routing", got)
+	}
+}
+
+func TestResolveChatRequestBedrockAllowsDefaultCredentialChain(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	t.Setenv("AWS_REGION", "us-west-2")
+	t.Setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.APIKey != "" ||
+		got.AWSCredentials != nil ||
+		got.AWSProfile != "" ||
+		got.AWSRegion != "us-west-2" ||
+		got.BaseURL != "https://bedrock-runtime.us-west-2.amazonaws.com" {
+		t.Fatalf("request = %#v, want Bedrock default credential chain routing", got)
+	}
+}
+
+func TestResolveChatRequestBedrockRequiresAuth(t *testing.T) {
+	clearBedrockAuthEnv(t)
 	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
-	if err == nil || !strings.Contains(err.Error(), "AWS_BEARER_TOKEN_BEDROCK") {
-		t.Fatalf("ResolveChatRequest() error = %v, want bearer token requirement", err)
+	if err == nil || !strings.Contains(err.Error(), "AWS_BEARER_TOKEN_BEDROCK or AWS credentials") {
+		t.Fatalf("ResolveChatRequest() error = %v, want auth requirement", err)
 	}
 }
 

@@ -95,15 +95,18 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 	case "amazon-bedrock":
 		profile := bedrockProfile{
 			ProviderID:     "amazon-bedrock",
+			Region:         bedrockRegion(),
+			Profile:        firstEnv("OPENCODE_AWS_PROFILE", "OPENCODE_BEDROCK_PROFILE", "AWS_PROFILE"),
 			DefaultBaseURL: bedrockBaseURL(),
 			BaseURLEnvVars: []string{"OPENCODE_BEDROCK_BASE_URL", "BEDROCK_BASE_URL"},
 			APIKeyEnvVars:  []string{"OPENCODE_AWS_BEARER_TOKEN_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"},
 			ModelEnvVars:   []string{"OPENCODE_BEDROCK_MODEL", "BEDROCK_MODEL_ID"},
 			DefaultModel:   "us.amazon.nova-micro-v1:0",
+			Credentials:    bedrockCredentialsFromEnv(),
 		}
 		request := profile.chatRequest(messages, modelID)
-		if request.APIKey == "" {
-			return ChatRequest{}, fmt.Errorf("amazon-bedrock provider requires AWS_BEARER_TOKEN_BEDROCK until SigV4 signing is migrated")
+		if request.APIKey == "" && request.AWSCredentials == nil && request.AWSProfile == "" && !bedrockDefaultCredentialChainConfigured() {
+			return ChatRequest{}, fmt.Errorf("amazon-bedrock provider requires AWS_BEARER_TOKEN_BEDROCK or AWS credentials")
 		}
 		return request, nil
 	case "cloudflare-ai-gateway":
@@ -227,23 +230,29 @@ func (profile responsesProfile) chatRequest(messages []Message, modelID string) 
 
 type bedrockProfile struct {
 	ProviderID     string
+	Region         string
+	Profile        string
 	DefaultBaseURL string
 	BaseURLEnvVars []string
 	APIKeyEnvVars  []string
 	ModelEnvVars   []string
 	DefaultModel   string
+	Credentials    *AWSCredentials
 }
 
 func (profile bedrockProfile) chatRequest(messages []Message, modelID string) ChatRequest {
 	return ChatRequest{
-		ProviderID: profile.ProviderID,
-		Protocol:   "bedrock-converse",
-		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
-		APIKey:     firstEnv(profile.APIKeyEnvVars...),
-		AuthHeader: "Authorization",
-		AuthScheme: "Bearer",
-		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
-		Messages:   messages,
+		ProviderID:     profile.ProviderID,
+		Protocol:       "bedrock-converse",
+		BaseURL:        defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:         firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+		Model:          defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:       messages,
+		AWSRegion:      profile.Region,
+		AWSProfile:     profile.Profile,
+		AWSCredentials: profile.Credentials,
 	}
 }
 
@@ -540,8 +549,34 @@ func azureBaseURL() string {
 }
 
 func bedrockBaseURL() string {
-	region := defaultString(firstEnv("OPENCODE_BEDROCK_REGION", "BEDROCK_REGION", "AWS_REGION"), "us-east-1")
-	return "https://bedrock-runtime." + region + ".amazonaws.com"
+	return "https://bedrock-runtime." + bedrockRegion() + ".amazonaws.com"
+}
+
+func bedrockRegion() string {
+	return defaultString(firstEnv("OPENCODE_BEDROCK_REGION", "BEDROCK_REGION", "AWS_REGION"), "us-east-1")
+}
+
+func bedrockCredentialsFromEnv() *AWSCredentials {
+	accessKeyID := firstEnv("OPENCODE_AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
+	secretAccessKey := firstEnv("OPENCODE_AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
+	if accessKeyID == "" || secretAccessKey == "" {
+		return nil
+	}
+	return &AWSCredentials{
+		Region:          bedrockRegion(),
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		SessionToken:    firstEnv("OPENCODE_AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+	}
+}
+
+func bedrockDefaultCredentialChainConfigured() bool {
+	return firstEnv(
+		"OPENCODE_AWS_WEB_IDENTITY_TOKEN_FILE",
+		"AWS_WEB_IDENTITY_TOKEN_FILE",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+	) != ""
 }
 
 func cloudflareAIGatewayBaseURL() string {

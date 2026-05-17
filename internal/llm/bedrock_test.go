@@ -1,7 +1,10 @@
 package llm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +12,7 @@ import (
 )
 
 func TestBedrockChatRequestAndResponse(t *testing.T) {
+	clearBedrockAuthEnv(t)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/model/us.amazon.nova-micro-v1:0/converse" {
 			t.Fatalf("path = %q, want Bedrock converse path", r.URL.Path)
@@ -68,7 +72,54 @@ func TestBedrockChatRequestAndResponse(t *testing.T) {
 	}
 }
 
-func TestBedrockRequiresBearerTokenUntilSigV4Migrates(t *testing.T) {
+func TestBedrockSignsWithStaticAWSCredentials(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/") {
+			t.Fatalf("authorization = %q, want SigV4 credential scope", got)
+		}
+		if got := r.Header.Get("Authorization"); !strings.Contains(got, "/eu-west-1/bedrock/aws4_request") {
+			t.Fatalf("authorization = %q, want Bedrock region/service scope", got)
+		}
+		if got := r.Header.Get("X-Amz-Security-Token"); got != "session-token" {
+			t.Fatalf("x-amz-security-token = %q, want session token", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		hash := sha256.Sum256(body)
+		if got, want := r.Header.Get("X-Amz-Content-Sha256"), hex.EncodeToString(hash[:]); got != want {
+			t.Fatalf("x-amz-content-sha256 = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"content":[{"text":"signed"}]}},"stopReason":"end_turn"}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "amazon-bedrock",
+		Protocol:   "bedrock-converse",
+		BaseURL:    mock.URL,
+		Model:      "us.amazon.nova-micro-v1:0",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		AWSCredentials: &AWSCredentials{
+			Region:          "eu-west-1",
+			AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
+			SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+			SessionToken:    "session-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Text != "signed" || got.FinishReason != "stop" {
+		t.Fatalf("Chat() = %#v, want signed response", got)
+	}
+}
+
+func TestBedrockRequiresBearerTokenOrAWSCredentials(t *testing.T) {
+	clearBedrockAuthEnv(t)
 	_, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
 		ProviderID: "amazon-bedrock",
 		Protocol:   "bedrock-converse",
@@ -76,8 +127,8 @@ func TestBedrockRequiresBearerTokenUntilSigV4Migrates(t *testing.T) {
 		Model:      "us.amazon.nova-micro-v1:0",
 		Messages:   []Message{{Role: "user", Content: "hello"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "SigV4 signing is migrated") {
-		t.Fatalf("Chat() error = %v, want SigV4 migration error", err)
+	if err == nil || !strings.Contains(err.Error(), "AWS credentials") {
+		t.Fatalf("Chat() error = %v, want auth requirement", err)
 	}
 }
 

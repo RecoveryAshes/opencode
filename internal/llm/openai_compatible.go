@@ -23,20 +23,32 @@ type Message struct {
 	Content string
 }
 
-// ChatRequest describes one text-only OpenAI-compatible chat completion.
+// AWSCredentials are static AWS credentials used by providers that require
+// SigV4 signing.
+type AWSCredentials struct {
+	Region          string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+}
+
+// ChatRequest describes one provider-neutral text-only chat request.
 type ChatRequest struct {
-	ProviderID  string
-	Protocol    string
-	BaseURL     string
-	APIKey      string
-	AuthHeader  string
-	AuthScheme  string
-	Headers     map[string]string
-	QueryParams map[string]string
-	Model       string
-	Messages    []Message
-	Temperature *float64
-	MaxTokens   *int
+	ProviderID     string
+	Protocol       string
+	BaseURL        string
+	APIKey         string
+	AuthHeader     string
+	AuthScheme     string
+	Headers        map[string]string
+	QueryParams    map[string]string
+	Model          string
+	Messages       []Message
+	Temperature    *float64
+	MaxTokens      *int
+	AWSRegion      string
+	AWSProfile     string
+	AWSCredentials *AWSCredentials
 }
 
 // Usage is token accounting returned by OpenAI-compatible providers.

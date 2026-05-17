@@ -3,6 +3,8 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +12,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/aws-sdk-go-v2/config"
 )
 
 // BedrockClient calls Amazon Bedrock Converse.
@@ -24,13 +30,9 @@ func NewBedrockClient() *BedrockClient {
 	}
 }
 
-// Chat sends a text-only Bedrock Converse request. SigV4 and binary event
-// stream support are separate migration slices; this path supports Bedrock
-// bearer token auth.
+// Chat sends a text-only Bedrock Converse request. Bearer token auth takes
+// precedence over SigV4, matching the legacy TypeScript route.
 func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
-	if request.APIKey == "" {
-		return ChatResponse{}, fmt.Errorf("bedrock converse requires bearer token auth until SigV4 signing is migrated")
-	}
 	if len(request.Messages) == 0 {
 		return ChatResponse{}, fmt.Errorf("at least one message is required")
 	}
@@ -71,7 +73,10 @@ func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (Cha
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Bedrock request: %w", err)
 	}
-	applyBedrockHeaders(httpRequest, request)
+	httpRequest.URL.Opaque = "//" + httpRequest.URL.Host + httpRequest.URL.EscapedPath()
+	if err := applyBedrockHeaders(ctx, httpRequest, request, payload); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -178,7 +183,7 @@ func mapBedrockFinishReason(reason string) string {
 	}
 }
 
-func applyBedrockHeaders(httpRequest *http.Request, request ChatRequest) {
+func applyBedrockHeaders(ctx context.Context, httpRequest *http.Request, request ChatRequest, payload []byte) error {
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "application/json")
 	for key, value := range request.Headers {
@@ -194,6 +199,20 @@ func applyBedrockHeaders(httpRequest *http.Request, request ChatRequest) {
 		}
 		httpRequest.Header.Set(defaultString(request.AuthHeader, "Authorization"), value)
 	}
+	if request.APIKey != "" {
+		return nil
+	}
+	credentials, region, err := bedrockSigningCredentials(ctx, request)
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(hash[:])
+	httpRequest.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	if err := v4.NewSigner().SignHTTP(ctx, credentials, httpRequest, payloadHash, "bedrock", region, time.Now().UTC()); err != nil {
+		return fmt.Errorf("sign Bedrock request: %w", err)
+	}
+	return nil
 }
 
 func bedrockRole(role string) string {
@@ -201,4 +220,37 @@ func bedrockRole(role string) string {
 		return "assistant"
 	}
 	return "user"
+}
+
+func bedrockSigningCredentials(ctx context.Context, request ChatRequest) (aws.Credentials, string, error) {
+	if request.AWSCredentials != nil {
+		region := defaultString(request.AWSCredentials.Region, defaultString(request.AWSRegion, "us-east-1"))
+		if request.AWSCredentials.AccessKeyID == "" || request.AWSCredentials.SecretAccessKey == "" {
+			return aws.Credentials{}, "", fmt.Errorf("bedrock converse requires both AWS access key id and secret access key")
+		}
+		return aws.Credentials{
+			AccessKeyID:     request.AWSCredentials.AccessKeyID,
+			SecretAccessKey: request.AWSCredentials.SecretAccessKey,
+			SessionToken:    request.AWSCredentials.SessionToken,
+			Source:          "opencode-bedrock",
+		}, region, nil
+	}
+	region := defaultString(request.AWSRegion, "us-east-1")
+	loadOptions := []func(*config.LoadOptions) error{config.WithRegion(region)}
+	if request.AWSProfile != "" {
+		loadOptions = append(loadOptions, config.WithSharedConfigProfile(request.AWSProfile))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
+	if err != nil {
+		return aws.Credentials{}, "", fmt.Errorf("load AWS config for Bedrock SigV4: %w", err)
+	}
+	resolvedRegion := defaultString(cfg.Region, region)
+	credentials, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return aws.Credentials{}, "", fmt.Errorf("retrieve AWS credentials for Bedrock SigV4: %w", err)
+	}
+	if !credentials.HasKeys() {
+		return aws.Credentials{}, "", fmt.Errorf("bedrock converse requires either bearer token auth or AWS credentials")
+	}
+	return credentials, resolvedRegion, nil
 }
