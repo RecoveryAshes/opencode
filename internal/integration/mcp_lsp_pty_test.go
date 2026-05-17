@@ -112,6 +112,32 @@ func TestPTYManagerLifecycle(t *testing.T) {
 	}
 }
 
+func TestPTYManagerSetsTerminalEnvironment(t *testing.T) {
+	manager := NewPTYManager()
+	info, err := manager.Create(context.Background(), PTYCreateInput{
+		Command: "/bin/sh",
+		Args:    []string{"-c", `printf "%s:%s" "$TERM" "$OPENCODE_TERMINAL"`},
+		Env:     map[string]string{"TERM": "dumb", "OPENCODE_TERMINAL": "0"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer manager.Remove(info.ID)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output, _ = manager.Buffer(info.ID)
+		if strings.Contains(output, "xterm-256color:1") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(output, "xterm-256color:1") {
+		t.Fatalf("buffer = %q, want TS terminal env defaults", output)
+	}
+}
+
 func writeMCPFixture(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mcp.go")

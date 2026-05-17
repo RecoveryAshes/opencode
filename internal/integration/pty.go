@@ -140,6 +140,13 @@ func (manager *PTYManager) Create(ctx context.Context, input PTYCreateInput) (PT
 	for key, value := range input.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+	cmd.Env = upsertEnv(cmd.Env, "TERM", "xterm-256color")
+	cmd.Env = upsertEnv(cmd.Env, "OPENCODE_TERMINAL", "1")
+	if runtime.GOOS == "windows" {
+		cmd.Env = upsertEnv(cmd.Env, "LC_ALL", "C.UTF-8")
+		cmd.Env = upsertEnv(cmd.Env, "LC_CTYPE", "C.UTF-8")
+		cmd.Env = upsertEnv(cmd.Env, "LANG", "C.UTF-8")
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return PTYInfo{}, fmt.Errorf("pty stdin: %w", err)
@@ -237,6 +244,17 @@ func candidateName(path string) string {
 		return path[index+1:]
 	}
 	return path
+}
+
+func upsertEnv(env []string, key string, value string) []string {
+	prefix := key + "="
+	for index, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[index] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 type safeBuffer struct {
