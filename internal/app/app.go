@@ -52,6 +52,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return runPrompt(ctx, args[1:], stdout, stderr)
 	case "session":
 		return sessionCommand(ctx, args[1:], stdout, stderr)
+	case "stats":
+		return statsCommand(ctx, args[1:], stdout, stderr)
 	case "retry-delay":
 		return retryDelay(args[1:], stdout, stderr)
 	case "commands":
@@ -1373,6 +1375,7 @@ commands:
   serve [--hostname HOST] [--port PORT] [--db PATH]
   run [--db PATH] [--text TEXT | --text-file PATH] [--json] [PROMPT]
   session [--db PATH] COMMAND
+  stats [--db PATH] [--json] [--days N] [--tools N] [--models[=N]]
   config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
   db [--db PATH] [--format tsv|json] COMMAND [QUERY]

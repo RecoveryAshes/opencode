@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
+	"github.com/RecoveryAshes/opencode/internal/storage"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -458,6 +460,154 @@ func TestRunExportMissingSession(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Session not found: ses_missing") {
 		t.Fatalf("stderr = %q, want missing session", stderr.String())
+	}
+}
+
+func TestRunStatsJSONAggregatesSessionsMessagesModelsAndTools(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+	store, err := storage.OpenSQLiteSessionStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	info, err := store.Create(ctx, session.CreateInput{
+		Title:  "Stats",
+		Cost:   1.25,
+		Tokens: &session.TokenUsage{Input: 10, Output: 20, Reasoning: 3, Cache: session.CacheUsage{Read: 4, Write: 5}},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	prompt, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "use read"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	_, err = store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Cost:     0.75,
+		Tokens:   session.TokenUsage{Input: 7, Output: 11, Reasoning: 2, Cache: session.CacheUsage{Read: 3, Write: 5}},
+		Tools: []session.ToolExecution{{
+			CallID: "call_1",
+			Tool:   "read",
+			Input:  map[string]any{"filePath": "README.md"},
+			Output: "content",
+			Title:  "README.md",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistant() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, []string{"stats", "--db", dbPath, "--json"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var stats map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &stats); err != nil {
+		t.Fatalf("decode stats JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if stats["totalSessions"] != float64(1) || stats["totalMessages"] != float64(2) || stats["totalCost"] != 1.25 {
+		t.Fatalf("stats overview = %#v, want one session two messages cost 1.25", stats)
+	}
+	totalTokens := stats["totalTokens"].(map[string]any)
+	cache := totalTokens["cache"].(map[string]any)
+	if totalTokens["input"] != float64(10) || totalTokens["output"] != float64(20) || totalTokens["reasoning"] != float64(3) ||
+		cache["read"] != float64(4) || cache["write"] != float64(5) {
+		t.Fatalf("totalTokens = %#v, want session token totals", totalTokens)
+	}
+	toolUsage := stats["toolUsage"].(map[string]any)
+	if toolUsage["read"] != float64(1) {
+		t.Fatalf("toolUsage = %#v, want read count", toolUsage)
+	}
+	modelUsage := stats["modelUsage"].(map[string]any)
+	mock := modelUsage["openai-compatible/mock-model"].(map[string]any)
+	mockTokens := mock["tokens"].(map[string]any)
+	mockCache := mockTokens["cache"].(map[string]any)
+	if mock["messages"] != float64(1) || mock["cost"] != 0.75 ||
+		mockTokens["input"] != float64(7) || mockTokens["output"] != float64(13) ||
+		mockCache["read"] != float64(3) || mockCache["write"] != float64(5) {
+		t.Fatalf("modelUsage = %#v, want assistant model usage", mock)
+	}
+}
+
+func TestRunStatsTextSupportsModelAndToolLimits(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+	store, err := storage.OpenSQLiteSessionStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	info, err := store.Create(ctx, session.CreateInput{Title: "Stats Text", Tokens: &session.TokenUsage{Input: 1000}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	prompt, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "tools"}}}})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	if _, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "model-a"},
+		Tools: []session.ToolExecution{
+			{Tool: "read", Input: map[string]any{}, Output: "ok"},
+			{Tool: "write", Input: map[string]any{}, Output: "ok"},
+		},
+	}); err != nil {
+		t.Fatalf("CreateAssistant(model-a) error = %v", err)
+	}
+	if _, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "model-a"},
+		Tools:    []session.ToolExecution{{Tool: "read", Input: map[string]any{}, Output: "ok"}},
+	}); err != nil {
+		t.Fatalf("CreateAssistant(model-a second) error = %v", err)
+	}
+	if _, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "model-b"},
+	}); err != nil {
+		t.Fatalf("CreateAssistant(model-b) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, []string{"stats", "--db", dbPath, "--models", "1", "--tools", "1"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	text := stdout.String()
+	for _, want := range []string{"OVERVIEW", "Sessions: 1", "Messages: 4", "MODEL USAGE", "openai-compatible/model-a: 2 messages", "TOOL USAGE", "read: 2 (66.7%)"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stats text = %q, missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "model-b") || strings.Contains(text, "write:") {
+		t.Fatalf("stats text = %q, want model/tool limits applied", text)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(ctx, []string{"stats", "--db", dbPath, "--models"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("bare --models exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "openai-compatible/model-b: 1 messages") {
+		t.Fatalf("bare --models stdout = %q, want all models", stdout.String())
 	}
 }
 
