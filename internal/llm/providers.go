@@ -75,10 +75,45 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			Headers:        map[string]string{"anthropic-version": "2023-06-01"},
 		}
 		return profile.chatRequest(messages, modelID), nil
-	case "google", "google-vertex", "amazon-bedrock", "cohere", "vercel":
+	case "google":
+		profile := geminiProfile{
+			ProviderID:     "google",
+			DefaultBaseURL: "https://generativelanguage.googleapis.com/v1beta",
+			BaseURLEnvVars: []string{"OPENCODE_GOOGLE_BASE_URL", "GOOGLE_GENERATIVE_AI_BASE_URL", "GEMINI_BASE_URL"},
+			APIKeyEnvVars: []string{
+				"OPENCODE_GOOGLE_GENERATIVE_AI_API_KEY",
+				"GOOGLE_GENERATIVE_AI_API_KEY",
+				"GEMINI_API_KEY",
+			},
+			ModelEnvVars: []string{"OPENCODE_GOOGLE_MODEL", "GOOGLE_GENERATIVE_AI_MODEL", "GEMINI_MODEL"},
+			DefaultModel: "gemini-2.5-flash",
+		}
+		return profile.chatRequest(messages, modelID), nil
+	case "google-vertex", "amazon-bedrock", "cohere", "vercel":
 		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
+	}
+}
+
+type geminiProfile struct {
+	ProviderID     string
+	DefaultBaseURL string
+	BaseURLEnvVars []string
+	APIKeyEnvVars  []string
+	ModelEnvVars   []string
+	DefaultModel   string
+}
+
+func (profile geminiProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	return ChatRequest{
+		ProviderID: profile.ProviderID,
+		Protocol:   "gemini",
+		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:     firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader: "x-goog-api-key",
+		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:   messages,
 	}
 }
 

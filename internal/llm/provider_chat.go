@@ -12,6 +12,7 @@ import (
 type ProviderChatClient struct {
 	OpenAICompatible *OpenAICompatibleClient
 	Anthropic        *AnthropicClient
+	Gemini           *GeminiClient
 }
 
 // NewProviderChatClient creates the default runtime provider client.
@@ -20,6 +21,7 @@ func NewProviderChatClient() *ProviderChatClient {
 	return &ProviderChatClient{
 		OpenAICompatible: &OpenAICompatibleClient{HTTPClient: httpClient},
 		Anthropic:        &AnthropicClient{HTTPClient: httpClient},
+		Gemini:           &GeminiClient{HTTPClient: httpClient},
 	}
 }
 
@@ -38,6 +40,12 @@ func (client *ProviderChatClient) Chat(ctx context.Context, request ChatRequest)
 			anthropic = NewAnthropicClient()
 		}
 		return anthropic.Chat(ctx, request)
+	case "gemini":
+		gemini := client.Gemini
+		if gemini == nil {
+			gemini = NewGeminiClient()
+		}
+		return gemini.Chat(ctx, request)
 	default:
 		return ChatResponse{}, fmt.Errorf("unsupported chat protocol %q", request.Protocol)
 	}

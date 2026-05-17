@@ -120,6 +120,23 @@ func TestResolveChatRequestAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestGemini(t *testing.T) {
+	t.Setenv("GOOGLE_GENERATIVE_AI_BASE_URL", "https://local.google.test/v1beta")
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "google-key")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google", "gemini-2.5-flash")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "gemini" ||
+		got.BaseURL != "https://local.google.test/v1beta" ||
+		got.APIKey != "google-key" ||
+		got.AuthHeader != "x-goog-api-key" ||
+		got.Model != "gemini-2.5-flash" {
+		t.Fatalf("request = %#v, want Gemini request", got)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)

@@ -160,3 +160,36 @@ func TestPromptRuntimePersistsAnthropicCacheUsage(t *testing.T) {
 		t.Fatalf("assistant tokens = %#v, want cache read/write", assistant.Info.Tokens)
 	}
 }
+
+func TestPromptRuntimeUsesGeminiProtocol(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "google", ModelID: "gemini-2.5-flash"},
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("GOOGLE_GENERATIVE_AI_BASE_URL", "https://local.google.test/v1beta")
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "google-key")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "google" ||
+		client.request.Protocol != "gemini" ||
+		client.request.BaseURL != "https://local.google.test/v1beta" ||
+		client.request.APIKey != "google-key" {
+		t.Fatalf("provider request = %#v, want Gemini protocol", client.request)
+	}
+}
