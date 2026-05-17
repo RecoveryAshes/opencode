@@ -197,6 +197,121 @@ func TestConfiguredReasoningModelGetsDefaultVariants(t *testing.T) {
 	}
 }
 
+func TestConfiguredReasoningVariantsMatchProviderTransform(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		modelID    string
+		model      map[string]any
+		check      func(t *testing.T, variants map[string]map[string]any)
+	}{
+		{
+			name:       "openai gpt 5.2 includes none and xhigh encrypted reasoning",
+			providerID: "openai",
+			modelID:    "gpt-5.2",
+			model: map[string]any{
+				"reasoning":    true,
+				"release_date": "2025-12-10",
+				"provider":     map[string]any{"npm": "@ai-sdk/openai"},
+			},
+			check: func(t *testing.T, variants map[string]map[string]any) {
+				t.Helper()
+				if variants["none"]["reasoningEffort"] != "none" ||
+					variants["xhigh"]["reasoningEffort"] != "xhigh" ||
+					variants["xhigh"]["reasoningSummary"] != "auto" {
+					t.Fatalf("variants = %#v, want OpenAI gpt-5.2 none/xhigh reasoning variants", variants)
+				}
+				include, ok := variants["xhigh"]["include"].([]any)
+				if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+					t.Fatalf("include = %#v, want encrypted reasoning include", variants["xhigh"]["include"])
+				}
+			},
+		},
+		{
+			name:       "openrouter uses nested reasoning effort",
+			providerID: "openrouter",
+			modelID:    "openai/gpt-5.2",
+			model: map[string]any{
+				"reasoning": true,
+				"provider":  map[string]any{"npm": "@openrouter/ai-sdk-provider"},
+			},
+			check: func(t *testing.T, variants map[string]map[string]any) {
+				t.Helper()
+				reasoning, ok := variants["xhigh"]["reasoning"].(map[string]any)
+				if !ok || reasoning["effort"] != "xhigh" {
+					t.Fatalf("variants = %#v, want OpenRouter nested reasoning effort", variants)
+				}
+			},
+		},
+		{
+			name:       "anthropic adaptive opus includes display",
+			providerID: "anthropic",
+			modelID:    "claude-opus-4-7",
+			model: map[string]any{
+				"id":        "claude-opus-4-7",
+				"reasoning": true,
+				"provider":  map[string]any{"npm": "@ai-sdk/anthropic"},
+			},
+			check: func(t *testing.T, variants map[string]map[string]any) {
+				t.Helper()
+				thinking, ok := variants["xhigh"]["thinking"].(map[string]any)
+				if !ok || thinking["type"] != "adaptive" || thinking["display"] != "summarized" || variants["max"]["effort"] != "max" {
+					t.Fatalf("variants = %#v, want Anthropic adaptive variants", variants)
+				}
+			},
+		},
+		{
+			name:       "gemini 2.5 pro uses max thinking budget",
+			providerID: "google",
+			modelID:    "gemini-2.5-pro",
+			model: map[string]any{
+				"reasoning": true,
+				"provider":  map[string]any{"npm": "@ai-sdk/google"},
+			},
+			check: func(t *testing.T, variants map[string]map[string]any) {
+				t.Helper()
+				thinking, ok := variants["max"]["thinkingConfig"].(map[string]any)
+				if !ok || thinking["includeThoughts"] != true || thinking["thinkingBudget"] != 32768 {
+					t.Fatalf("variants = %#v, want Gemini 2.5 Pro max budget", variants)
+				}
+			},
+		},
+		{
+			name:       "bedrock nova uses reasoning config",
+			providerID: "amazon-bedrock",
+			modelID:    "us.amazon.nova-micro-v1:0",
+			model: map[string]any{
+				"reasoning": true,
+				"provider":  map[string]any{"npm": "@ai-sdk/amazon-bedrock"},
+			},
+			check: func(t *testing.T, variants map[string]map[string]any) {
+				t.Helper()
+				config, ok := variants["high"]["reasoningConfig"].(map[string]any)
+				if !ok || config["type"] != "enabled" || config["maxReasoningEffort"] != "high" {
+					t.Fatalf("variants = %#v, want Bedrock Nova reasoningConfig variants", variants)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := ListProviders(config.Info{
+				"enabled_providers": []any{test.providerID},
+				"provider": map[string]any{
+					test.providerID: map[string]any{
+						"models": map[string]any{
+							test.modelID: test.model,
+						},
+					},
+				},
+			})
+			model := result.All[0].Models[test.modelID]
+			test.check(t, model.Variants)
+		})
+	}
+}
+
 func TestConfiguredModelIDUsesKeyForPublicIDAndIDForAPI(t *testing.T) {
 	result := ListProviders(config.Info{
 		"enabled_providers": []any{"custom-ai"},

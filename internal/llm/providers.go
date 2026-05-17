@@ -4,7 +4,9 @@ package llm
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/config"
@@ -363,6 +365,7 @@ func defaultReasoningVariants(model PublicModel) map[string]map[string]any {
 		return nil
 	}
 	id := strings.ToLower(model.ID)
+	apiID := strings.ToLower(stringFromAny(model.API["id"], model.ID))
 	for _, blocked := range []string{"deepseek-chat", "deepseek-reasoner", "deepseek-r1", "deepseek-v3", "minimax", "glm", "kimi", "k2p", "qwen", "big-pickle", "grok"} {
 		if strings.Contains(id, blocked) {
 			return nil
@@ -370,15 +373,317 @@ func defaultReasoningVariants(model PublicModel) map[string]map[string]any {
 	}
 	apiNPM, _ := model.API["npm"].(string)
 	switch apiNPM {
-	case "@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/openai-compatible", "@ai-sdk/github-copilot", "@ai-sdk/xai", "@ai-sdk/deepinfra", "@ai-sdk/togetherai", "@ai-sdk/cerebras", "venice-ai-sdk-provider":
-		return map[string]map[string]any{
-			"low":    {"reasoningEffort": "low"},
-			"medium": {"reasoningEffort": "medium"},
-			"high":   {"reasoningEffort": "high"},
+	case "@openrouter/ai-sdk-provider":
+		if !strings.Contains(id, "gpt") && !strings.Contains(id, "gemini-3") && !strings.Contains(id, "claude") {
+			return nil
 		}
+		efforts := openAIReasoningEfforts(id, model.ReleaseDate)
+		if !strings.Contains(id, "gpt") {
+			efforts = openAIEfforts
+		}
+		return reasoningVariants(efforts, func(effort string) map[string]any {
+			return map[string]any{"reasoning": map[string]any{"effort": effort}}
+		})
+	case "ai-gateway-provider":
+		efforts := widelySupportedEfforts
+		if strings.HasPrefix(apiID, "openai/") {
+			efforts = openAIReasoningEfforts(apiID, model.ReleaseDate)
+		}
+		return reasoningEffortVariants(efforts, false)
+	case "@ai-sdk/gateway":
+		switch {
+		case strings.Contains(id, "anthropic"):
+			if efforts := anthropicAdaptiveEfforts(apiID); len(efforts) > 0 {
+				return reasoningVariants(efforts, func(effort string) map[string]any {
+					return map[string]any{"thinking": map[string]any{"type": "adaptive"}, "effort": effort}
+				})
+			}
+			return map[string]map[string]any{
+				"high": {"thinking": map[string]any{"type": "enabled", "budgetTokens": 16000}},
+				"max":  {"thinking": map[string]any{"type": "enabled", "budgetTokens": 31999}},
+			}
+		case strings.Contains(id, "google"):
+			if strings.Contains(id, "2.5") {
+				return googleBudgetVariants(24576)
+			}
+			return googleThinkingLevelVariants([]string{"low", "high"})
+		default:
+			return reasoningEffortVariants(openAICompatibleReasoningEfforts(apiID), false)
+		}
+	case "@ai-sdk/github-copilot":
+		if strings.Contains(id, "gemini") {
+			return nil
+		}
+		if strings.Contains(id, "claude") {
+			return reasoningEffortVariants(widelySupportedEfforts, false)
+		}
+		efforts := append([]string{}, widelySupportedEfforts...)
+		if strings.Contains(id, "5.1-codex-max") || strings.Contains(id, "5.2") || strings.Contains(id, "5.3") ||
+			(strings.Contains(id, "gpt-5") && model.ReleaseDate >= openAIXHighEffortReleaseDate) {
+			efforts = append(efforts, "xhigh")
+		}
+		return reasoningEffortVariants(efforts, true)
+	case "@ai-sdk/openai":
+		return reasoningEffortVariants(openAIReasoningEfforts(apiID, model.ReleaseDate), true)
+	case "@ai-sdk/azure":
+		if id == "o1-mini" {
+			return nil
+		}
+		efforts := widelySupportedEfforts
+		if gpt5FamilyRE.MatchString(id) && gpt5Version(id) == 0 {
+			efforts = append([]string{"minimal"}, widelySupportedEfforts...)
+		}
+		return reasoningEffortVariants(efforts, true)
+	case "@ai-sdk/openai-compatible", "@ai-sdk/xai", "@ai-sdk/deepinfra", "@ai-sdk/togetherai", "@ai-sdk/cerebras", "venice-ai-sdk-provider":
+		efforts := append([]string{}, widelySupportedEfforts...)
+		if strings.Contains(apiID, "deepseek-v4") {
+			efforts = append(efforts, "max")
+		}
+		return reasoningEffortVariants(efforts, false)
+	case "@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic":
+		if efforts := anthropicAdaptiveEfforts(apiID); len(efforts) > 0 {
+			return reasoningVariants(efforts, func(effort string) map[string]any {
+				thinking := map[string]any{"type": "adaptive"}
+				if strings.Contains(apiID, "opus-4-7") || strings.Contains(apiID, "opus-4.7") {
+					thinking["display"] = "summarized"
+				}
+				return map[string]any{"thinking": thinking, "effort": effort}
+			})
+		}
+		if strings.Contains(apiID, "opus-4-5") || strings.Contains(apiID, "opus-4.5") {
+			return reasoningVariants(widelySupportedEfforts, func(effort string) map[string]any {
+				return map[string]any{"effort": effort}
+			})
+		}
+		return map[string]map[string]any{
+			"high": {"thinking": map[string]any{"type": "enabled", "budgetTokens": minInt(16000, model.Limit.Output/2-1)}},
+			"max":  {"thinking": map[string]any{"type": "enabled", "budgetTokens": minInt(31999, model.Limit.Output-1)}},
+		}
+	case "@ai-sdk/amazon-bedrock":
+		if efforts := anthropicAdaptiveEfforts(apiID); len(efforts) > 0 {
+			return reasoningVariants(efforts, func(effort string) map[string]any {
+				config := map[string]any{"type": "adaptive", "maxReasoningEffort": effort}
+				if strings.Contains(apiID, "opus-4-7") || strings.Contains(apiID, "opus-4.7") {
+					config["display"] = "summarized"
+				}
+				return map[string]any{"reasoningConfig": config}
+			})
+		}
+		if strings.Contains(apiID, "anthropic") {
+			return map[string]map[string]any{
+				"high": {"reasoningConfig": map[string]any{"type": "enabled", "budgetTokens": 16000}},
+				"max":  {"reasoningConfig": map[string]any{"type": "enabled", "budgetTokens": 31999}},
+			}
+		}
+		return reasoningVariants(widelySupportedEfforts, func(effort string) map[string]any {
+			return map[string]any{"reasoningConfig": map[string]any{"type": "enabled", "maxReasoningEffort": effort}}
+		})
+	case "@ai-sdk/google", "@ai-sdk/google-vertex":
+		if strings.Contains(id, "2.5") {
+			return googleBudgetVariants(googleThinkingBudgetMax(id))
+		}
+		return googleThinkingLevelVariants(googleThinkingLevelEfforts(id))
+	case "@ai-sdk/mistral":
+		for _, candidate := range []string{"mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5", "mistral-medium-2604"} {
+			if strings.Contains(apiID, candidate) {
+				return map[string]map[string]any{"high": {"reasoningEffort": "high"}}
+			}
+		}
+		return nil
+	case "@ai-sdk/groq":
+		return reasoningEffortVariants(append([]string{"none"}, widelySupportedEfforts...), false)
 	default:
 		return nil
 	}
+}
+
+var (
+	widelySupportedEfforts       = []string{"low", "medium", "high"}
+	openAIEfforts                = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	openAINoneEffortReleaseDate  = "2025-11-13"
+	openAIXHighEffortReleaseDate = "2025-12-04"
+	gpt5FamilyRE                 = regexp.MustCompile(`(?:^|/)gpt-5(?:[.-]|$)`)
+	gpt5VersionRE                = regexp.MustCompile(`(?:^|/)gpt-5[.-](\d+)(?:[.-]|$)`)
+	gpt5ProRE                    = regexp.MustCompile(`(?:^|/)gpt-5[.-]?pro(?:[.-]|$)`)
+	gpt5VersionedProRE           = regexp.MustCompile(`(?:^|/)gpt-5[.-]\d+[.-]pro(?:[.-]|$)`)
+)
+
+func reasoningEffortVariants(efforts []string, includeReasoning bool) map[string]map[string]any {
+	return reasoningVariants(efforts, func(effort string) map[string]any {
+		variant := map[string]any{"reasoningEffort": effort}
+		if includeReasoning {
+			variant["reasoningSummary"] = "auto"
+			variant["include"] = []any{"reasoning.encrypted_content"}
+		}
+		return variant
+	})
+}
+
+func reasoningVariants(efforts []string, build func(string) map[string]any) map[string]map[string]any {
+	if len(efforts) == 0 {
+		return nil
+	}
+	result := map[string]map[string]any{}
+	for _, effort := range efforts {
+		result[effort] = build(effort)
+	}
+	return result
+}
+
+func openAIReasoningEfforts(apiID string, releaseDate string) []string {
+	id := strings.ToLower(apiID)
+	if strings.Contains(id, "deep-research") {
+		return []string{"medium"}
+	}
+	if efforts := gpt5ChatReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	if gpt5ProRE.MatchString(id) {
+		return []string{"high"}
+	}
+	if efforts := gpt5CodexReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	if efforts := versionedGpt5ReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	efforts := append([]string{}, widelySupportedEfforts...)
+	if gpt5FamilyRE.MatchString(id) {
+		efforts = append([]string{"minimal"}, efforts...)
+	}
+	if releaseDate >= openAINoneEffortReleaseDate {
+		efforts = append([]string{"none"}, efforts...)
+	}
+	if releaseDate >= openAIXHighEffortReleaseDate {
+		efforts = append(efforts, "xhigh")
+	}
+	return efforts
+}
+
+func openAICompatibleReasoningEfforts(apiID string) []string {
+	id := strings.ToLower(apiID)
+	if efforts := gpt5ChatReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	if gpt5ProRE.MatchString(id) {
+		return []string{"high"}
+	}
+	if efforts := gpt5CodexReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	if efforts := versionedGpt5ReasoningEfforts(id); efforts != nil {
+		return efforts
+	}
+	return openAIEfforts
+}
+
+func versionedGpt5ReasoningEfforts(apiID string) []string {
+	if gpt5VersionedProRE.MatchString(apiID) {
+		return []string{"medium", "high", "xhigh"}
+	}
+	version := gpt5Version(apiID)
+	switch {
+	case version == 1:
+		return []string{"none", "low", "medium", "high"}
+	case version >= 2:
+		return []string{"none", "low", "medium", "high", "xhigh"}
+	default:
+		return nil
+	}
+}
+
+func gpt5CodexReasoningEfforts(apiID string) []string {
+	if !gpt5FamilyRE.MatchString(apiID) || !strings.Contains(apiID, "codex") {
+		return nil
+	}
+	version := gpt5Version(apiID)
+	switch {
+	case version >= 3:
+		return []string{"none", "low", "medium", "high", "xhigh"}
+	case strings.Contains(apiID, "codex-max") || version >= 2:
+		return []string{"low", "medium", "high", "xhigh"}
+	default:
+		return widelySupportedEfforts
+	}
+}
+
+func gpt5ChatReasoningEfforts(apiID string) []string {
+	if !gpt5FamilyRE.MatchString(apiID) || !strings.Contains(apiID, "-chat") {
+		return nil
+	}
+	if gpt5Version(apiID) == 0 {
+		return []string{}
+	}
+	return []string{"medium"}
+}
+
+func gpt5Version(apiID string) int {
+	match := gpt5VersionRE.FindStringSubmatch(apiID)
+	if len(match) < 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+func anthropicAdaptiveEfforts(apiID string) []string {
+	switch {
+	case strings.Contains(apiID, "opus-4-7") || strings.Contains(apiID, "opus-4.7"):
+		return []string{"low", "medium", "high", "xhigh", "max"}
+	case strings.Contains(apiID, "opus-4-6") || strings.Contains(apiID, "opus-4.6") ||
+		strings.Contains(apiID, "sonnet-4-6") || strings.Contains(apiID, "sonnet-4.6"):
+		return []string{"low", "medium", "high", "max"}
+	default:
+		return nil
+	}
+}
+
+func googleThinkingLevelEfforts(apiID string) []string {
+	id := strings.ToLower(apiID)
+	if !strings.Contains(id, "gemini-3") {
+		return []string{"low", "high"}
+	}
+	if strings.Contains(id, "flash-image") {
+		return []string{"minimal", "high"}
+	}
+	if strings.Contains(id, "pro-image") {
+		return []string{"high"}
+	}
+	if strings.Contains(id, "flash") {
+		return []string{"minimal", "low", "medium", "high"}
+	}
+	return []string{"low", "medium", "high"}
+}
+
+func googleThinkingBudgetMax(apiID string) int {
+	id := strings.ToLower(apiID)
+	if strings.Contains(id, "2.5") && strings.Contains(id, "pro") && !strings.Contains(id, "flash") {
+		return 32768
+	}
+	return 24576
+}
+
+func googleThinkingLevelVariants(efforts []string) map[string]map[string]any {
+	return reasoningVariants(efforts, func(effort string) map[string]any {
+		return map[string]any{"thinkingConfig": map[string]any{"includeThoughts": true, "thinkingLevel": effort}}
+	})
+}
+
+func googleBudgetVariants(maxBudget int) map[string]map[string]any {
+	return map[string]map[string]any{
+		"high": {"thinkingConfig": map[string]any{"includeThoughts": true, "thinkingBudget": 16000}},
+		"max":  {"thinkingConfig": map[string]any{"includeThoughts": true, "thinkingBudget": maxBudget}},
+	}
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func mergeModelVariants(base map[string]map[string]any, override map[string]map[string]any, disabled map[string]bool) map[string]map[string]any {
