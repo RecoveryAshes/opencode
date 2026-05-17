@@ -162,10 +162,26 @@ type AssistantInput struct {
 	Model    ModelRef
 	Path     PathInfo
 	Text     string
+	Tools    []ToolExecution
 	Finish   string
 	Tokens   TokenUsage
 	Cost     float64
 	Variant  string
+}
+
+// ToolExecution stores one provider-requested tool call and the Go execution
+// result that should be persisted on the assistant message.
+type ToolExecution struct {
+	CallID    string
+	Tool      string
+	Input     map[string]any
+	Raw       string
+	Title     string
+	Output    string
+	Metadata  map[string]any
+	Error     string
+	StartTime int64
+	EndTime   int64
 }
 
 // MessageRepository is the storage boundary for migrated message routes.

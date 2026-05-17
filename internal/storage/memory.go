@@ -362,6 +362,50 @@ func createAssistantMessage(sessionID session.ID, input session.AssistantInput) 
 			},
 		})
 	}
+	for _, tool := range input.Tools {
+		partID, partErr := session.NewPartID()
+		if partErr != nil {
+			return session.WithParts{}, partErr
+		}
+		start := tool.StartTime
+		if start == 0 {
+			start = now
+		}
+		end := tool.EndTime
+		if end == 0 {
+			end = now
+		}
+		state := map[string]any{
+			"input": tool.Input,
+			"time": map[string]any{
+				"start": start,
+				"end":   end,
+			},
+		}
+		if tool.Error != "" {
+			state["status"] = "error"
+			state["error"] = tool.Error
+		} else {
+			state["status"] = "completed"
+			state["title"] = tool.Title
+			state["output"] = tool.Output
+			state["metadata"] = tool.Metadata
+		}
+		if tool.Metadata != nil && tool.Error != "" {
+			state["metadata"] = tool.Metadata
+		}
+		message.Parts = append(message.Parts, session.Part{
+			ID:        partID,
+			SessionID: sessionID,
+			MessageID: messageID,
+			Type:      "tool",
+			Data: map[string]any{
+				"callID": tool.CallID,
+				"tool":   tool.Tool,
+				"state":  state,
+			},
+		})
+	}
 
 	partID, err := session.NewPartID()
 	if err != nil {

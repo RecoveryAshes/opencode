@@ -190,6 +190,57 @@ func TestSQLiteSessionStoreMessages(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionStoreAssistantToolParts(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	info, err := store.Create(ctx, session.CreateInput{Title: "tools"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	prompt, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "read file"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+
+	assistant, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Finish:   "tool-calls",
+		Tools: []session.ToolExecution{{
+			CallID:   "call_1",
+			Tool:     "read",
+			Input:    map[string]any{"filePath": "README.md"},
+			Title:    "README.md",
+			Output:   "content",
+			Metadata: map[string]any{"preview": "content"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistant() error = %v", err)
+	}
+	got, err := store.GetMessage(ctx, info.ID, assistant.Info.ID)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	if len(got.Parts) != 2 || got.Parts[0].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want tool and step-finish", got.Parts)
+	}
+	state, ok := got.Parts[0].Data["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool state = %#v, want object", got.Parts[0].Data["state"])
+	}
+	if state["status"] != "completed" || state["output"] != "content" || state["title"] != "README.md" {
+		t.Fatalf("tool state = %#v, want completed content", state)
+	}
+}
+
 func closeStore(t *testing.T, store *SQLiteSessionStore) {
 	t.Helper()
 	if err := store.Close(); err != nil {

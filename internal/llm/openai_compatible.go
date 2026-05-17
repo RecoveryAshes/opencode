@@ -66,6 +66,15 @@ type ChatResponse struct {
 	Text         string
 	FinishReason string
 	Usage        Usage
+	ToolCalls    []ToolCall
+}
+
+// ToolCall describes a provider-requested local tool invocation.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments map[string]any
+	Raw       string
 }
 
 // OpenAICompatibleClient calls a provider exposing /chat/completions.
@@ -225,7 +234,8 @@ type openAIChatMessage struct {
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string           `json:"content"`
+			ToolCalls []openAIToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -235,11 +245,21 @@ type openAIChatResponse struct {
 type openAIStreamEvent struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string           `json:"content"`
+			ToolCalls []openAIToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *openAIUsage `json:"usage"`
+}
+
+type openAIToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type openAIUsage struct {
@@ -262,10 +282,15 @@ func decodeOpenAIChatResponse(data []byte) (ChatResponse, error) {
 	if len(response.Choices) == 0 {
 		return ChatResponse{}, fmt.Errorf("chat response did not include choices")
 	}
+	calls, err := decodeOpenAIToolCalls(response.Choices[0].Message.ToolCalls)
+	if err != nil {
+		return ChatResponse{}, err
+	}
 	return ChatResponse{
 		Text:         response.Choices[0].Message.Content,
 		FinishReason: mapOpenAIFinishReason(response.Choices[0].FinishReason),
 		Usage:        mapOpenAIUsage(response.Usage),
+		ToolCalls:    calls,
 	}, nil
 }
 
@@ -275,6 +300,7 @@ func decodeOpenAIChatStream(reader io.Reader) (ChatResponse, error) {
 	var text strings.Builder
 	finish := ""
 	usage := Usage{}
+	toolCalls := []ToolCall{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -295,6 +321,11 @@ func decodeOpenAIChatStream(reader io.Reader) (ChatResponse, error) {
 			continue
 		}
 		text.WriteString(event.Choices[0].Delta.Content)
+		calls, err := decodeOpenAIToolCalls(event.Choices[0].Delta.ToolCalls)
+		if err != nil {
+			return ChatResponse{}, err
+		}
+		toolCalls = append(toolCalls, calls...)
 		if event.Choices[0].FinishReason != "" {
 			finish = event.Choices[0].FinishReason
 		}
@@ -306,7 +337,34 @@ func decodeOpenAIChatStream(reader io.Reader) (ChatResponse, error) {
 		Text:         text.String(),
 		FinishReason: mapOpenAIFinishReason(finish),
 		Usage:        usage,
+		ToolCalls:    toolCalls,
 	}, nil
+}
+
+func decodeOpenAIToolCalls(input []openAIToolCall) ([]ToolCall, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	result := make([]ToolCall, 0, len(input))
+	for _, call := range input {
+		if call.Function.Name == "" {
+			continue
+		}
+		args := map[string]any{}
+		raw := strings.TrimSpace(call.Function.Arguments)
+		if raw != "" {
+			if err := json.Unmarshal([]byte(raw), &args); err != nil {
+				return nil, fmt.Errorf("decode tool call %s arguments: %w", call.Function.Name, err)
+			}
+		}
+		result = append(result, ToolCall{
+			ID:        call.ID,
+			Name:      call.Function.Name,
+			Arguments: args,
+			Raw:       raw,
+		})
+	}
+	return result, nil
 }
 
 func mapOpenAIUsage(usage openAIUsage) Usage {

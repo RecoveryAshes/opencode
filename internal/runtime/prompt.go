@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
 )
 
@@ -62,6 +63,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	if err != nil {
 		return session.WithParts{}, err
 	}
+	tools := runtime.executeToolCalls(ctx, response.ToolCalls)
 
 	return runtime.Messages.CreateAssistant(ctx, sessionID, session.AssistantInput{
 		ParentID: userMessage.Info.ID,
@@ -72,7 +74,8 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 			Root: defaultString(runtime.Root, defaultString(runtime.CWD, mustGetwd())),
 		},
 		Text:   response.Text,
-		Finish: response.FinishReason,
+		Tools:  tools,
+		Finish: defaultString(response.FinishReason, finishReasonForTools(tools)),
 		Tokens: session.TokenUsage{
 			Total:     optionalPositive(response.Usage.TotalTokens),
 			Input:     response.Usage.InputTokens,
@@ -85,6 +88,46 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 		},
 		Cost: 0,
 	})
+}
+
+func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []session.ToolExecution {
+	if len(calls) == 0 {
+		return nil
+	}
+	directory := defaultString(runtime.CWD, mustGetwd())
+	result := make([]session.ToolExecution, 0, len(calls))
+	for _, call := range calls {
+		start := session.NowMillis()
+		execution := session.ToolExecution{
+			CallID:    defaultString(call.ID, call.Name),
+			Tool:      call.Name,
+			Input:     call.Arguments,
+			Raw:       call.Raw,
+			StartTime: start,
+		}
+		output, err := integration.Execute(ctx, integration.Request{
+			Name:      call.Name,
+			Directory: directory,
+			Params:    call.Arguments,
+		})
+		execution.EndTime = session.NowMillis()
+		if err != nil {
+			execution.Error = err.Error()
+		} else {
+			execution.Title = output.Title
+			execution.Output = output.Output
+			execution.Metadata = output.Metadata
+		}
+		result = append(result, execution)
+	}
+	return result
+}
+
+func finishReasonForTools(tools []session.ToolExecution) string {
+	if len(tools) > 0 {
+		return "tool-calls"
+	}
+	return "stop"
 }
 
 func lowerTranscript(messages []session.WithParts) []llm.Message {

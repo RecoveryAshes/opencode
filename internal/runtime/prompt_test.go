@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
@@ -16,7 +19,7 @@ type fakeChatClient struct {
 
 func (client *fakeChatClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	client.request = request
-	if client.response.Text != "" {
+	if client.response.Text != "" || client.response.FinishReason != "" || len(client.response.ToolCalls) > 0 || client.response.Usage.TotalTokens > 0 {
 		return client.response, nil
 	}
 	return llm.ChatResponse{
@@ -326,4 +329,104 @@ func TestPromptRuntimeUsesCohereProtocol(t *testing.T) {
 		client.request.APIKey != "cohere-key" {
 		t.Fatalf("provider request = %#v, want Cohere protocol", client.request)
 	}
+}
+
+func TestPromptRuntimeExecutesToolCalls(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello tool\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "tools"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "read hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{
+		response: llm.ChatResponse{
+			FinishReason: "tool-calls",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call_1",
+				Name:      "read",
+				Arguments: map[string]any{"filePath": "hello.txt"},
+				Raw:       `{"filePath":"hello.txt"}`,
+			}},
+			Usage: llm.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		},
+	}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if assistant.Info.Finish != "tool-calls" {
+		t.Fatalf("assistant finish = %q, want tool-calls", assistant.Info.Finish)
+	}
+	if len(assistant.Parts) != 2 || assistant.Parts[0].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want tool and step-finish", assistant.Parts)
+	}
+	tool := assistant.Parts[0]
+	if tool.Data["callID"] != "call_1" || tool.Data["tool"] != "read" {
+		t.Fatalf("tool part = %#v, want call_1/read", tool.Data)
+	}
+	state, ok := tool.Data["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("state = %#v, want object", tool.Data["state"])
+	}
+	if state["status"] != "completed" || !strings.Contains(stringValue(state["output"]), "hello tool") {
+		t.Fatalf("state = %#v, want completed read output", state)
+	}
+}
+
+func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "tools"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "missing tool"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{
+		response: llm.ChatResponse{
+			FinishReason: "tool-calls",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call_missing",
+				Name:      "missing",
+				Arguments: map[string]any{},
+			}},
+		},
+	}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if len(assistant.Parts) != 2 || assistant.Parts[0].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want tool and step-finish", assistant.Parts)
+	}
+	state, ok := assistant.Parts[0].Data["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("state = %#v, want object", assistant.Parts[0].Data["state"])
+	}
+	if state["status"] != "error" || !strings.Contains(stringValue(state["error"]), "not implemented") {
+		t.Fatalf("state = %#v, want missing tool error", state)
+	}
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
 }

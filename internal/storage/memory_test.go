@@ -107,3 +107,49 @@ func TestMemorySessionStoreMessages(t *testing.T) {
 		t.Fatalf("RemoveMessage() error = %v", err)
 	}
 }
+
+func TestMemorySessionStoreAssistantToolParts(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "tools"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	prompt, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "read file"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+
+	assistant, err := store.CreateAssistant(ctx, info.ID, session.AssistantInput{
+		ParentID: prompt.Info.ID,
+		Model:    session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Finish:   "tool-calls",
+		Tools: []session.ToolExecution{{
+			CallID:   "call_1",
+			Tool:     "read",
+			Input:    map[string]any{"filePath": "README.md"},
+			Title:    "README.md",
+			Output:   "content",
+			Metadata: map[string]any{"preview": "content"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistant() error = %v", err)
+	}
+	if len(assistant.Parts) != 2 || assistant.Parts[0].Type != "tool" || assistant.Parts[1].Type != "step-finish" {
+		t.Fatalf("assistant parts = %#v, want tool and step-finish", assistant.Parts)
+	}
+	tool := assistant.Parts[0]
+	if tool.Data["callID"] != "call_1" || tool.Data["tool"] != "read" {
+		t.Fatalf("tool part = %#v, want call/read", tool)
+	}
+	state, ok := tool.Data["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool state = %#v, want object", tool.Data["state"])
+	}
+	if state["status"] != "completed" || state["output"] != "content" || state["title"] != "README.md" {
+		t.Fatalf("tool state = %#v, want completed content", state)
+	}
+}

@@ -132,3 +132,73 @@ func TestOpenAICompatibleChatSupportsProviderSpecificAuthAndQuery(t *testing.T) 
 		t.Fatalf("Chat() = %#v, want ok", got)
 	}
 }
+
+func TestOpenAICompatibleChatParsesToolCalls(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{
+				"message":{
+					"content":"",
+					"tool_calls":[{
+						"id":"call_1",
+						"type":"function",
+						"function":{"name":"read","arguments":"{\"filePath\":\"README.md\"}"}
+					}]
+				},
+				"finish_reason":"tool_calls"
+			}],
+			"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+		}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewOpenAICompatibleClient().Chat(t.Context(), ChatRequest{
+		BaseURL: mock.URL,
+		Model:   "mock-model",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "read readme",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one tool call", got)
+	}
+	if got.ToolCalls[0].ID != "call_1" || got.ToolCalls[0].Name != "read" || got.ToolCalls[0].Arguments["filePath"] != "README.md" {
+		t.Fatalf("tool call = %#v, want read README.md", got.ToolCalls[0])
+	}
+}
+
+func TestOpenAICompatibleChatStreamParsesToolCalls(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"*.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewOpenAICompatibleClient().ChatStream(t.Context(), ChatRequest{
+		BaseURL: mock.URL,
+		Model:   "mock-model",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "find go files",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("ChatStream() = %#v, want one tool call", got)
+	}
+	if got.ToolCalls[0].Name != "glob" || got.ToolCalls[0].Arguments["pattern"] != "*.go" {
+		t.Fatalf("tool call = %#v, want glob *.go", got.ToolCalls[0])
+	}
+}
