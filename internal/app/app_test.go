@@ -1590,6 +1590,42 @@ func TestRunConfigLoadsLocalConfig(t *testing.T) {
 	if !ok || len(files) != 2 {
 		t.Fatalf("files = %#v, want global and project files", got["files"])
 	}
+
+	updated := runAppJSON[map[string]any](t, context.Background(), []string{
+		"config", "--directory", root, "update", "--patch", `{"username":"cli-user","provider":{"local":{"name":"Local"}}}`,
+	})
+	if updated["username"] != "cli-user" {
+		t.Fatalf("updated username = %#v, want cli-user", updated["username"])
+	}
+	provider := updated["provider"].(map[string]any)["local"].(map[string]any)
+	if provider["name"] != "Local" {
+		t.Fatalf("updated provider = %#v, want local provider", updated["provider"])
+	}
+	written := readAppJSON(t, filepath.Join(root, "config.json"))
+	if written["username"] != "cli-user" {
+		t.Fatalf("written local config = %#v, want cli-user", written)
+	}
+
+	global := runAppJSON[map[string]any](t, context.Background(), []string{"config", "global"})
+	if global["model"] != "global/model" {
+		t.Fatalf("global config = %#v, want global/model", global)
+	}
+	globalUpdated := runAppJSON[map[string]any](t, context.Background(), []string{
+		"config", "global-update", "--patch", `{"username":"global-cli","shell":""}`,
+	})
+	if globalUpdated["username"] != "global-cli" || globalUpdated["model"] != "global/model" {
+		t.Fatalf("global updated = %#v, want username and preserved model", globalUpdated)
+	}
+	if _, ok := globalUpdated["shell"]; ok {
+		t.Fatalf("global updated = %#v, want empty shell omitted", globalUpdated)
+	}
+	globalWritten := readAppJSON(t, filepath.Join(xdg, "opencode", "opencode.jsonc"))
+	if globalWritten["username"] != "global-cli" {
+		t.Fatalf("written global config = %#v, want global-cli", globalWritten)
+	}
+	if _, ok := globalWritten["shell"]; ok {
+		t.Fatalf("written global config = %#v, want empty shell omitted", globalWritten)
+	}
 }
 
 func TestRunProvidersJSONUsesConfig(t *testing.T) {
@@ -1671,6 +1707,19 @@ func writeAppFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func readAppJSON(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decode %s: %v\n%s", path, err, data)
+	}
+	return result
 }
 
 func writeAppMCPFixture(t *testing.T) string {

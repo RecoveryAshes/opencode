@@ -1454,19 +1454,116 @@ func configCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: opencode config [--directory DIR] [--worktree DIR]")
+	if fs.NArg() == 0 {
+		return configGetCommand(*directory, *worktree, stdout, stderr)
+	}
+	switch fs.Arg(0) {
+	case "get", "show":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode config [--directory DIR] [--worktree DIR] get")
+			return 2
+		}
+		return configGetCommand(*directory, *worktree, stdout, stderr)
+	case "update":
+		return configUpdateCommand(fs.Args()[1:], *directory, stdout, stderr)
+	case "global", "global-get":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode config global")
+			return 2
+		}
+		result, err := config.Load(config.LoadOptions{Directory: "."})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "load global config failed: %v\n", err)
+			return 1
+		}
+		return writeJSON(stdout, result.Info)
+	case "global-update":
+		return configGlobalUpdateCommand(fs.Args()[1:], stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown config command: %s\n", fs.Arg(0))
 		return 2
 	}
+}
+
+func configGetCommand(directory string, worktree string, stdout io.Writer, stderr io.Writer) int {
 	result, err := config.Load(config.LoadOptions{
-		Directory: *directory,
-		Worktree:  *worktree,
+		Directory: directory,
+		Worktree:  worktree,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "load config failed: %v\n", err)
 		return 1
 	}
 	return writeJSON(stdout, result)
+}
+
+func configUpdateCommand(args []string, directory string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("config update", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	patchJSON := fs.String("patch", "", "config patch as JSON object")
+	patchFile := fs.String("patch-file", "", "path to JSON patch file, or - for stdin")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode config [--directory DIR] update --patch JSON | --patch-file PATH")
+		return 2
+	}
+	patch, code := configPatch(*patchJSON, *patchFile, stderr)
+	if code != 0 {
+		return code
+	}
+	result, err := config.UpdateLocal(directory, patch)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update config failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result.Info)
+}
+
+func configGlobalUpdateCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("config global-update", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	patchJSON := fs.String("patch", "", "global config patch as JSON object")
+	patchFile := fs.String("patch-file", "", "path to JSON patch file, or - for stdin")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode config global-update --patch JSON | --patch-file PATH")
+		return 2
+	}
+	patch, code := configPatch(*patchJSON, *patchFile, stderr)
+	if code != 0 {
+		return code
+	}
+	result, err := config.UpdateGlobal(patch)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update global config failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result.Info)
+}
+
+func configPatch(patchJSON string, patchFile string, stderr io.Writer) (config.Info, int) {
+	if patchJSON == "" && patchFile == "" {
+		_, _ = fmt.Fprintln(stderr, "--patch or --patch-file is required")
+		return nil, 2
+	}
+	if patchJSON != "" && patchFile != "" {
+		_, _ = fmt.Fprintln(stderr, "--patch and --patch-file are mutually exclusive")
+		return nil, 2
+	}
+	paramsJSON := patchJSON
+	if paramsJSON == "" {
+		paramsJSON = "{}"
+	}
+	params, err := decodeToolParams(paramsJSON, patchFile, os.Stdin)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "decode config patch failed: %v\n", err)
+		return nil, 2
+	}
+	return config.Info(params), 0
 }
 
 func dbCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -2001,7 +2098,7 @@ commands:
   run [--db PATH] [--text TEXT | --text-file PATH] [--json] [PROMPT]
   session [--db PATH] COMMAND
   stats [--db PATH] [--json] [--days N] [--tools N] [--models[=N]]
-  config [--directory DIR] [--worktree DIR]
+  config [--directory DIR] [--worktree DIR] [get|update|global|global-update]
   commands [--directory DIR]
   db [--db PATH] [--format tsv|json] COMMAND [QUERY]
   debug file COMMAND
