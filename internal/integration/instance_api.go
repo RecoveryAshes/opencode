@@ -728,13 +728,23 @@ func agentFromMarkdown(path string) (AgentInfo, error) {
 	}
 	raw := map[string]any{"prompt": strings.TrimSpace(content)}
 	for key, value := range meta {
+		if key == "name" {
+			continue
+		}
 		raw[key] = value
 	}
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	if explicit, ok := raw["name"].(string); ok && explicit != "" {
-		name = explicit
+	return agentFromConfig(agentEntryNameFromPath(path), raw), nil
+}
+
+func agentEntryNameFromPath(path string) string {
+	normalized := filepath.ToSlash(filepath.Clean(path))
+	for _, pattern := range []string{"/.opencode/agent/", "/.opencode/agents/", "/agent/", "/agents/"} {
+		if index := strings.Index(normalized, pattern); index >= 0 {
+			rel := normalized[index+len(pattern):]
+			return strings.TrimSuffix(rel, filepath.Ext(rel))
+		}
 	}
-	return agentFromConfig(name, raw), nil
+	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }
 
 func parseSkillFile(path string) (SkillInfo, error) {

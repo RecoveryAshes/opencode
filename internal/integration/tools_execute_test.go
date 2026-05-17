@@ -405,6 +405,32 @@ func TestRepositoryBranchValidationMatchesTypeScriptUtility(t *testing.T) {
 	}
 }
 
+func TestAgentFromMarkdownUsesPathDerivedName(t *testing.T) {
+	root := t.TempDir()
+	agentPath := filepath.Join(root, ".opencode", "agents", "nested", "review.md")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(agentPath, []byte(strings.Join([]string{
+		"---",
+		"name: frontmatter-name",
+		"description: Nested reviewer",
+		"mode: subagent",
+		"---",
+		"Review deeply.",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	agent, err := agentFromMarkdown(agentPath)
+	if err != nil {
+		t.Fatalf("agentFromMarkdown() error = %v", err)
+	}
+	if agent.Name != "nested/review" || agent.Description != "Nested reviewer" || agent.Prompt != "Review deeply." {
+		t.Fatalf("agent = %#v, want path-derived nested name and metadata", agent)
+	}
+}
+
 func TestReadDirectoryAndBinaryRejection(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
