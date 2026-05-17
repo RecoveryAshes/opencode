@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RecoveryAshes/opencode/internal/config"
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
@@ -126,6 +127,7 @@ func NewHandler(opts Options) http.Handler {
 	}))
 	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime))
 	mux.HandleFunc("/session", sessions(opts.Sessions))
+	mux.HandleFunc("/command", commands())
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
 	}))
@@ -162,6 +164,9 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/provider": map[string]any{
 				"get": map[string]any{"operationId": "provider.list"},
+			},
+			"/command": map[string]any{
+				"get": map[string]any{"operationId": "command.list"},
 			},
 			"/tool": map[string]any{
 				"get": map[string]any{"operationId": "tool.list"},
@@ -219,6 +224,9 @@ func OpenAPI(version string) map[string]any {
 				"get":  map[string]any{"operationId": "session.messages"},
 				"post": map[string]any{"operationId": "session.prompt"},
 			},
+			"/session/{sessionID}/command": map[string]any{
+				"post": map[string]any{"operationId": "session.command"},
+			},
 			"/session/{sessionID}/message/{messageID}": map[string]any{
 				"get":    map[string]any{"operationId": "session.message"},
 				"delete": map[string]any{"operationId": "session.deleteMessage"},
@@ -233,6 +241,17 @@ func OpenAPI(version string) map[string]any {
 			"phase":  "go-foundation",
 		},
 	}
+}
+
+func commands() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		directory := defaultString(r.URL.Query().Get("directory"), ".")
+		result, err := config.LoadCommands(directory)
+		return result, statusFromError(err), err
+	})
 }
 
 func tools() http.HandlerFunc {
@@ -332,6 +351,19 @@ func sessionByID(repo session.Repository, messages session.MessageRepository, pr
 
 func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) (any, int, error) {
 	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] == "command" {
+		switch r.Method {
+		case http.MethodPost:
+			var input commandPayload
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+			result, err := executeSessionCommand(r.Context(), sessionID, input, messages, promptRuntime)
+			return result, statusFromError(err), err
+		default:
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+	}
 	if len(parts) == 1 && parts[0] == "message" {
 		switch r.Method {
 		case http.MethodGet:
@@ -395,6 +427,73 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		}
 	}
 	return nil, http.StatusNotFound, fmt.Errorf("unknown session route /session/%s/%s", sessionID, path)
+}
+
+type commandPayload struct {
+	MessageID *session.MessageID `json:"messageID,omitempty"`
+	Agent     string             `json:"agent,omitempty"`
+	Model     string             `json:"model,omitempty"`
+	Arguments string             `json:"arguments"`
+	Command   string             `json:"command"`
+	Variant   string             `json:"variant,omitempty"`
+	Directory string             `json:"directory,omitempty"`
+	NoReply   bool               `json:"noReply,omitempty"`
+	Parts     []session.Part     `json:"parts,omitempty"`
+}
+
+func executeSessionCommand(ctx context.Context, sessionID session.ID, input commandPayload, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) (session.WithParts, error) {
+	rendered, err := config.ExecuteCommand(ctx, config.CommandInput{
+		Name:      input.Command,
+		Argument:  input.Arguments,
+		Directory: defaultString(input.Directory, "."),
+	})
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	providerID, modelID := parseProviderModel(rendered.Provider, rendered.Model, input.Model)
+	parts := []session.Part{{
+		Type: "text",
+		Data: map[string]any{
+			"text": rendered.Prompt,
+			"metadata": map[string]any{
+				"command":   rendered.Command.Name,
+				"arguments": rendered.Argument,
+			},
+		},
+	}}
+	parts = append(parts, input.Parts...)
+	user, err := messages.CreatePrompt(ctx, sessionID, session.PromptInput{
+		MessageID: input.MessageID,
+		Agent:     defaultString(rendered.Agent, defaultString(input.Agent, "build")),
+		Model:     &session.ModelRef{ProviderID: providerID, ModelID: modelID, Variant: input.Variant},
+		NoReply:   input.NoReply,
+		Parts:     parts,
+	})
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	if input.NoReply || promptRuntime == nil {
+		return user, nil
+	}
+	return promptRuntime.Reply(ctx, sessionID, user)
+}
+
+func parseProviderModel(commandProvider string, commandModel string, fallback string) (string, string) {
+	if commandProvider != "" && commandModel != "" {
+		return commandProvider, commandModel
+	}
+	model := fallback
+	if model == "" && commandModel != "" {
+		model = commandModel
+	}
+	if model == "" {
+		return "openai-compatible", "gpt-4o-mini"
+	}
+	provider, modelID, ok := strings.Cut(model, "/")
+	if !ok {
+		return "openai-compatible", model
+	}
+	return provider, modelID
 }
 
 func parseSessionPath(path string) (session.ID, string, error) {
@@ -515,4 +614,11 @@ func hostname(host string) string {
 		return "127.0.0.1"
 	}
 	return host
+}
+
+func defaultString(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }

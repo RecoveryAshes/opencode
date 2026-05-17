@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -211,6 +214,84 @@ func TestSessionPromptCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestCommandHTTPAPIAndSessionCommand(t *testing.T) {
+	root := t.TempDir()
+	commandPath := filepath.Join(root, ".opencode", "command", "ship.md")
+	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
+		t.Fatalf("mkdir command dir: %v", err)
+	}
+	commandMarkdown := strings.Join([]string{
+		"---",
+		"description: Ship command",
+		"agent: build",
+		"model: openai-compatible/mock-model",
+		"---",
+		"Ship $1",
+		"Rest $2",
+	}, "\n")
+	if err := os.WriteFile(commandPath, []byte(commandMarkdown), 0o644); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+
+	store := storage.NewMemorySessionStore()
+	client := &serverFakeChatClient{}
+	server := httptest.NewServer(NewHandler(Options{
+		Sessions: store,
+		Runtime: &runtime.PromptRuntime{
+			Messages: store,
+			Client:   client,
+		},
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/command?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /command error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /command status = %d, want 200", resp.StatusCode)
+	}
+	var commands map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&commands); err != nil {
+		t.Fatalf("decode commands: %v", err)
+	}
+	ship, ok := commands["ship"].(map[string]any)
+	if !ok || ship["description"] != "Ship command" {
+		t.Fatalf("commands = %#v, want ship command", commands)
+	}
+
+	resp, err = http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"command"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var created session.Info
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+
+	body := `{"command":"ship","arguments":"one two three","directory":` + quoteJSON(root) + `}`
+	resp, err = http.Post(server.URL+"/session/"+string(created.ID)+"/command", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session/id/command error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("session command status = %d, want 200", resp.StatusCode)
+	}
+	var assistant session.WithParts
+	if err := json.NewDecoder(resp.Body).Decode(&assistant); err != nil {
+		t.Fatalf("decode assistant: %v", err)
+	}
+	if assistant.Info.Role != "assistant" || assistant.Parts[0].Data["text"] != "assistant reply" {
+		t.Fatalf("assistant = %#v, want assistant reply", assistant)
+	}
+	if len(client.request.Messages) != 1 || !strings.Contains(client.request.Messages[0].Content, "Ship one") || !strings.Contains(client.request.Messages[0].Content, "Rest two three") {
+		t.Fatalf("provider request = %#v, want rendered command prompt", client.request)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -301,6 +382,10 @@ func quoteJSON(value string) string {
 		panic(err)
 	}
 	return string(encoded)
+}
+
+func urlQueryEscape(value string) string {
+	return url.QueryEscape(value)
 }
 
 func closeBody(t *testing.T, resp *http.Response) {
