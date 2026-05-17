@@ -274,6 +274,46 @@ func TestResolveChatRequestGitHubCopilotWithBaseURL(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestDigitalOcean(t *testing.T) {
+	t.Setenv("DIGITALOCEAN_ACCESS_TOKEN", "do-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "digitalocean", "router:my-router")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://inference.do-ai.run/v1" ||
+		got.APIKey != "do-token" ||
+		got.Model != "router:my-router" {
+		t.Fatalf("request = %#v, want DigitalOcean request", got)
+	}
+}
+
+func TestResolveChatRequestGitLabDuoRequiresBaseURL(t *testing.T) {
+	t.Setenv("GITLAB_DUO_API_KEY", "duo-token")
+
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab-duo", "duo-chat-sonnet-4-5")
+	if err == nil || !strings.Contains(err.Error(), "base URL") {
+		t.Fatalf("ResolveChatRequest() error = %v, want base URL requirement", err)
+	}
+}
+
+func TestResolveChatRequestGitLabDuoWithBaseURL(t *testing.T) {
+	t.Setenv("GITLAB_DUO_BASE_URL", "https://gitlab.example/api/v4/ai/duo")
+	t.Setenv("GITLAB_DUO_API_KEY", "duo-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab-duo", "duo-chat-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://gitlab.example/api/v4/ai/duo" ||
+		got.APIKey != "duo-token" ||
+		got.Model != "duo-chat-sonnet-4-5" {
+		t.Fatalf("request = %#v, want GitLab Duo request", got)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)
