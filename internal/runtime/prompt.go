@@ -958,7 +958,7 @@ func toolResultMessage(response llm.ChatResponse, tools []session.ToolExecution)
 	var output strings.Builder
 	if strings.TrimSpace(response.Text) != "" {
 		output.WriteString("The assistant said before requesting tools:\n")
-		output.WriteString(response.Text)
+		output.WriteString(sanitizeProviderText(response.Text))
 		output.WriteString("\n\n")
 	}
 	output.WriteString("Local tool results are available below. Continue the answer using these results.\n")
@@ -977,16 +977,16 @@ func toolResultMessage(response llm.ChatResponse, tools []session.ToolExecution)
 		output.WriteString("</input>\n")
 		if tool.Error != "" {
 			output.WriteString("<error>")
-			output.WriteString(tool.Error)
+			output.WriteString(sanitizeProviderText(tool.Error))
 			output.WriteString("</error>\n")
 		} else {
 			output.WriteString("<output>")
-			output.WriteString(tool.Output)
+			output.WriteString(sanitizeProviderText(tool.Output))
 			output.WriteString("</output>\n")
 		}
 		output.WriteString("</tool_call>\n")
 	}
-	return llm.Message{Role: "user", Content: output.String()}
+	return llm.Message{Role: "user", Content: sanitizeProviderText(output.String())}
 }
 
 func todosFromMetadata(metadata map[string]any) ([]session.TodoInfo, error) {
@@ -1037,7 +1037,7 @@ func lowerTranscript(messages []session.WithParts) []llm.Message {
 		}
 		result = append(result, llm.Message{
 			Role:    message.Info.Role,
-			Content: text,
+			Content: sanitizeProviderText(text),
 		})
 	}
 	return result
@@ -1056,9 +1056,16 @@ func textContent(parts []session.Part) string {
 		if output.Len() > 0 {
 			output.WriteString("\n")
 		}
-		output.WriteString(text)
+		output.WriteString(sanitizeProviderText(text))
 	}
 	return output.String()
+}
+
+func sanitizeProviderText(content string) string {
+	if content == "" {
+		return ""
+	}
+	return strings.ToValidUTF8(content, "\uFFFD")
 }
 
 func modelRef(message session.WithParts, info config.Info, agentName string, transcript []session.WithParts) (session.ModelRef, bool) {

@@ -1293,6 +1293,52 @@ func TestProviderToolSchemaSanitizesMoonshotSchemas(t *testing.T) {
 	}
 }
 
+func TestLowerTranscriptSanitizesProviderText(t *testing.T) {
+	got := lowerTranscript([]session.WithParts{
+		{
+			Info: session.MessageInfo{Role: "user"},
+			Parts: []session.Part{
+				{Type: "text", Data: map[string]any{"text": "hello " + string([]byte{0xed, 0xa0, 0x80})}},
+				{Type: "text", Data: map[string]any{"text": "world"}},
+			},
+		},
+		{
+			Info:  session.MessageInfo{Role: "assistant"},
+			Parts: []session.Part{{Type: "text", Data: map[string]any{"text": string([]byte{0xed, 0xb0, 0x80})}}},
+		},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("messages = %#v, want two provider messages", got)
+	}
+	if got[0].Content != "hello \uFFFD\nworld" {
+		t.Fatalf("user content = %q, want invalid UTF-8 replaced", got[0].Content)
+	}
+	if got[1].Content != "\uFFFD" {
+		t.Fatalf("assistant content = %q, want invalid UTF-8 replaced", got[1].Content)
+	}
+}
+
+func TestToolResultMessageSanitizesProviderText(t *testing.T) {
+	message := toolResultMessage(llm.ChatResponse{
+		Text: "partial " + string([]byte{0xed, 0xa0, 0x80}),
+	}, []session.ToolExecution{
+		{
+			CallID: "call_1",
+			Tool:   "read",
+			Input:  map[string]any{"filePath": "a.txt"},
+			Output: "tool " + string([]byte{0xed, 0xb0, 0x80}),
+		},
+	})
+
+	if strings.ContainsRune(message.Content, '\uFFFD') == false {
+		t.Fatalf("content = %q, want replacement character for invalid UTF-8", message.Content)
+	}
+	if strings.Contains(message.Content, "partial \uFFFD") == false || strings.Contains(message.Content, "tool \uFFFD") == false {
+		t.Fatalf("content = %q, want sanitized assistant preface and tool output", message.Content)
+	}
+}
+
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
