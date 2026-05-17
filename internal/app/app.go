@@ -4,9 +4,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session/retry"
@@ -44,6 +46,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return providers(args[1:], stdout, stderr)
 	case "tools":
 		return tools(args[1:], stdout, stderr)
+	case "tool":
+		return tool(ctx, args[1:], stdout, stderr)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0]); err != nil {
 			return 1
@@ -165,6 +169,71 @@ func tools(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func tool(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("tool", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "working directory for relative tool paths")
+	paramsJSON := fs.String("params", "{}", "tool parameters as JSON object")
+	paramsFile := fs.String("params-file", "", "path to JSON file containing tool parameters, or - for stdin")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode tool [--directory DIR] [--params JSON | --params-file PATH] NAME")
+		return 2
+	}
+	if *paramsFile != "" && *paramsJSON != "{}" {
+		_, _ = fmt.Fprintln(stderr, "--params and --params-file are mutually exclusive")
+		return 2
+	}
+	params, err := decodeToolParams(*paramsJSON, *paramsFile, os.Stdin)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "decode params failed: %v\n", err)
+		return 2
+	}
+	result, err := integration.Execute(ctx, integration.Request{
+		Name:      fs.Arg(0),
+		Directory: *directory,
+		Params:    params,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "tool failed: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(stdout).Encode(result); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func decodeToolParams(paramsJSON string, paramsFile string, stdin io.Reader) (map[string]any, error) {
+	if paramsFile != "" {
+		var data []byte
+		var err error
+		if paramsFile == "-" {
+			data, err = io.ReadAll(stdin)
+		} else {
+			data, err = os.ReadFile(paramsFile)
+		}
+		if err != nil {
+			return nil, err
+		}
+		paramsJSON = string(data)
+	}
+	paramsJSON = strings.TrimSpace(paramsJSON)
+	if paramsJSON == "" {
+		paramsJSON = "{}"
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
+		return nil, err
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	return params, nil
+}
+
 func printUsage(w io.Writer) error {
 	_, err := fmt.Fprintln(w, `opencode
 
@@ -173,6 +242,7 @@ commands:
   serve [--hostname HOST] [--port PORT] [--db PATH]
   providers
   tools
+  tool [--directory DIR] [--params JSON | --params-file PATH] NAME
   retry-delay --attempt N [--retry-after-ms MS | --retry-after VALUE]
 
 provider env:
