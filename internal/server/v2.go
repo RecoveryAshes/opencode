@@ -79,24 +79,24 @@ func v2SessionByID(repo session.Repository, messages session.MessageRepository, 
 			if r.Method != http.MethodPost {
 				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 			}
-			now := session.NowMillis()
-			_, err := repo.Update(r.Context(), sessionID, session.UpdateInput{Archived: nil, Summary: nil, ClearRevert: false})
-			if err != nil {
+			if _, err := repo.Get(r.Context(), sessionID); err != nil {
 				return nil, statusFromError(err), err
 			}
-			_ = now
-			return map[string]any{}, http.StatusOK, nil
+			return nil, http.StatusNoContent, nil
 		case len(tail) == 1 && tail[0] == "wait":
 			if r.Method != http.MethodPost {
 				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 			}
-			return map[string]any{}, http.StatusOK, nil
+			if _, err := repo.Get(r.Context(), sessionID); err != nil {
+				return nil, statusFromError(err), err
+			}
+			return nil, http.StatusNoContent, nil
 		case len(tail) == 1 && tail[0] == "context":
 			if r.Method != http.MethodGet {
 				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 			}
 			result, err := messages.Messages(r.Context(), sessionID, 0)
-			return flattenMessages(result), statusFromError(err), err
+			return flattenMessages(v2ContextMessages(result)), statusFromError(err), err
 		default:
 			return nil, http.StatusNotFound, fmt.Errorf("unknown v2 session route")
 		}
@@ -342,6 +342,25 @@ func flattenMessages(items []session.WithParts) []map[string]any {
 		result = append(result, flattenMessage(item))
 	}
 	return result
+}
+
+func v2ContextMessages(items []session.WithParts) []session.WithParts {
+	start := 0
+	for index, item := range items {
+		if messageHasPartType(item, "compaction") {
+			start = index
+		}
+	}
+	return append([]session.WithParts{}, items[start:]...)
+}
+
+func messageHasPartType(item session.WithParts, partType string) bool {
+	for _, part := range item.Parts {
+		if part.Type == partType {
+			return true
+		}
+	}
+	return false
 }
 
 func flattenMessage(item session.WithParts) map[string]any {

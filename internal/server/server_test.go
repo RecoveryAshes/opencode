@@ -1525,13 +1525,54 @@ func TestV2HTTPAPICompatibility(t *testing.T) {
 		t.Fatalf("context = %#v, want user message", contextMessages)
 	}
 
+	compactionID := session.MessageID("msg_compaction")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &compactionID,
+		Parts: []session.Part{{
+			Type: "compaction",
+			Data: map[string]any{"auto": false},
+		}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(compaction) error = %v", err)
+	}
+	tailID := session.MessageID("msg_tail")
+	if _, err := store.CreatePrompt(context.Background(), created.ID, session.PromptInput{
+		MessageID: &tailID,
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "after compaction"},
+		}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(tail) error = %v", err)
+	}
+	resp, err = http.Get(server.URL + "/api/session/" + string(created.ID) + "/context")
+	if err != nil {
+		t.Fatalf("GET /api/session/id/context after compaction error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&contextMessages); err != nil {
+		t.Fatalf("decode context after compaction: %v", err)
+	}
+	if len(contextMessages) != 2 || contextMessages[0]["id"] != string(compactionID) || contextMessages[1]["id"] != string(tailID) {
+		t.Fatalf("context = %#v, want compaction boundary and tail message", contextMessages)
+	}
+
+	resp, err = http.Post(server.URL+"/api/session/"+string(created.ID)+"/compact", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/session/id/compact error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("compact status = %d, want 204", resp.StatusCode)
+	}
+
 	resp, err = http.Post(server.URL+"/api/session/"+string(created.ID)+"/wait", "application/json", nil)
 	if err != nil {
 		t.Fatalf("POST /api/session/id/wait error = %v", err)
 	}
 	defer closeBody(t, resp)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("wait status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("wait status = %d, want 204", resp.StatusCode)
 	}
 
 	resp, err = http.Get(server.URL + "/api/provider?directory=" + urlQueryEscape(root))
