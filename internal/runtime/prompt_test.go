@@ -193,3 +193,36 @@ func TestPromptRuntimeUsesGeminiProtocol(t *testing.T) {
 		t.Fatalf("provider request = %#v, want Gemini protocol", client.request)
 	}
 }
+
+func TestPromptRuntimeUsesBedrockProtocol(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "amazon-bedrock", ModelID: "us.amazon.nova-micro-v1:0"},
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{"text": "hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "amazon-bedrock" ||
+		client.request.Protocol != "bedrock-converse" ||
+		client.request.BaseURL != "https://bedrock-runtime.eu-west-1.amazonaws.com" ||
+		client.request.APIKey != "bedrock-token" {
+		t.Fatalf("provider request = %#v, want Bedrock protocol", client.request)
+	}
+}

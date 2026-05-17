@@ -89,10 +89,46 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			DefaultModel: "gemini-2.5-flash",
 		}
 		return profile.chatRequest(messages, modelID), nil
-	case "google-vertex", "amazon-bedrock", "cohere", "vercel":
+	case "amazon-bedrock":
+		profile := bedrockProfile{
+			ProviderID:     "amazon-bedrock",
+			DefaultBaseURL: bedrockBaseURL(),
+			BaseURLEnvVars: []string{"OPENCODE_BEDROCK_BASE_URL", "BEDROCK_BASE_URL"},
+			APIKeyEnvVars:  []string{"OPENCODE_AWS_BEARER_TOKEN_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"},
+			ModelEnvVars:   []string{"OPENCODE_BEDROCK_MODEL", "BEDROCK_MODEL_ID"},
+			DefaultModel:   "us.amazon.nova-micro-v1:0",
+		}
+		request := profile.chatRequest(messages, modelID)
+		if request.APIKey == "" {
+			return ChatRequest{}, fmt.Errorf("amazon-bedrock provider requires AWS_BEARER_TOKEN_BEDROCK until SigV4 signing is migrated")
+		}
+		return request, nil
+	case "google-vertex", "cohere", "vercel":
 		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
+	}
+}
+
+type bedrockProfile struct {
+	ProviderID     string
+	DefaultBaseURL string
+	BaseURLEnvVars []string
+	APIKeyEnvVars  []string
+	ModelEnvVars   []string
+	DefaultModel   string
+}
+
+func (profile bedrockProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	return ChatRequest{
+		ProviderID: profile.ProviderID,
+		Protocol:   "bedrock-converse",
+		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:     firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader: "Authorization",
+		AuthScheme: "Bearer",
+		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:   messages,
 	}
 }
 
@@ -344,6 +380,11 @@ func azureBaseURL() string {
 		return "https://" + resource + ".openai.azure.com/openai/v1"
 	}
 	return ""
+}
+
+func bedrockBaseURL() string {
+	region := defaultString(firstEnv("OPENCODE_BEDROCK_REGION", "BEDROCK_REGION", "AWS_REGION"), "us-east-1")
+	return "https://bedrock-runtime." + region + ".amazonaws.com"
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

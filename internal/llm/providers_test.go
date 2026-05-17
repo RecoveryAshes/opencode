@@ -137,6 +137,31 @@ func TestResolveChatRequestGemini(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestBedrockBearer(t *testing.T) {
+	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "bedrock-converse" ||
+		got.BaseURL != "https://bedrock-runtime.eu-west-1.amazonaws.com" ||
+		got.APIKey != "bedrock-token" ||
+		got.AuthHeader != "Authorization" ||
+		got.AuthScheme != "Bearer" ||
+		got.Model != "us.amazon.nova-micro-v1:0" {
+		t.Fatalf("request = %#v, want Bedrock request", got)
+	}
+}
+
+func TestResolveChatRequestBedrockRequiresBearerForNow(t *testing.T) {
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "amazon-bedrock", "us.amazon.nova-micro-v1:0")
+	if err == nil || !strings.Contains(err.Error(), "AWS_BEARER_TOKEN_BEDROCK") {
+		t.Fatalf("ResolveChatRequest() error = %v, want bearer token requirement", err)
+	}
+}
+
 func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
 	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("missing error = %v, want unknown provider", err)
