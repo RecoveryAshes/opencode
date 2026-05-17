@@ -46,6 +46,12 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 	if request.Temperature != nil {
 		body["temperature"] = *request.Temperature
 	}
+	if request.TopP != nil {
+		body["top_p"] = *request.TopP
+	}
+	if request.TopK != nil {
+		body["top_k"] = *request.TopK
+	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
 			continue
@@ -120,7 +126,7 @@ func responsesBodyOption(key string, value any) bool {
 	switch key {
 	case "apiKey", "baseURL", "headers", "fetch", "timeout", "chunkTimeout", "includeUsage", "setCacheKey":
 		return false
-	case "model", "input", "stream", "tools", "temperature", "max_output_tokens":
+	case "model", "input", "stream", "tools", "temperature", "top_p", "top_k", "max_output_tokens":
 		return false
 	default:
 		return true

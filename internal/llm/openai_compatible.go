@@ -45,6 +45,8 @@ type ChatRequest struct {
 	Model          string
 	Messages       []Message
 	Temperature    *float64
+	TopP           *float64
+	TopK           *int
 	MaxTokens      *int
 	Options        map[string]any
 	AWSRegion      string
@@ -114,6 +116,12 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 	body["stream"] = false
 	if request.Temperature != nil {
 		body["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		body["top_p"] = *request.TopP
+	}
+	if request.TopK != nil {
+		body["top_k"] = *request.TopK
 	}
 	if request.MaxTokens != nil {
 		body["max_tokens"] = *request.MaxTokens
@@ -185,6 +193,12 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 	}
 	if streamRequest.Temperature != nil {
 		body["temperature"] = *streamRequest.Temperature
+	}
+	if streamRequest.TopP != nil {
+		body["top_p"] = *streamRequest.TopP
+	}
+	if streamRequest.TopK != nil {
+		body["top_k"] = *streamRequest.TopK
 	}
 	if streamRequest.MaxTokens != nil {
 		body["max_tokens"] = *streamRequest.MaxTokens
@@ -261,7 +275,7 @@ func openAIChatBodyOption(key string, value any) bool {
 	switch key {
 	case "apiKey", "baseURL", "headers", "fetch", "timeout", "chunkTimeout", "includeUsage", "setCacheKey":
 		return false
-	case "model", "messages", "stream", "stream_options", "tools", "tool_choice", "temperature", "max_tokens":
+	case "model", "messages", "stream", "stream_options", "tools", "tool_choice", "temperature", "top_p", "top_k", "max_tokens":
 		return false
 	default:
 		return true

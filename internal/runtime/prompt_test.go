@@ -302,6 +302,10 @@ func TestPromptRuntimeMergesConfiguredAgentOptions(t *testing.T) {
 		},
 		"agent": {
 			"review": {
+				"temperature": 0.2,
+				"top_p": 0.8,
+				"top_k": 40,
+				"max_output_tokens": 1234,
 				"options": {
 					"reasoningEffort": "high",
 					"metadata": {"agent": "review", "shared": "agent"}
@@ -336,6 +340,12 @@ func TestPromptRuntimeMergesConfiguredAgentOptions(t *testing.T) {
 	metadata := client.request.Options["metadata"].(map[string]any)
 	if metadata["model"] != "gpt-5" || metadata["agent"] != "review" || metadata["variant"] != "max" || metadata["shared"] != "variant" {
 		t.Fatalf("metadata = %#v, want model < agent < variant merge order", metadata)
+	}
+	if client.request.Temperature == nil || *client.request.Temperature != 0.2 ||
+		client.request.TopP == nil || *client.request.TopP != 0.8 ||
+		client.request.TopK == nil || *client.request.TopK != 40 ||
+		client.request.MaxTokens == nil || *client.request.MaxTokens != 1234 {
+		t.Fatalf("request = %#v, want configured agent sampling params", client.request)
 	}
 }
 

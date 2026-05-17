@@ -172,6 +172,7 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 		applyChatOptions(request, rawAgentOptions)
 		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawAgentOptions))
 	}
+	applyConfiguredAgentSampling(request, info, agentName)
 	if model.Variant != "" {
 		if rawVariants, ok := rawModel["variants"].(map[string]any); ok {
 			if rawVariant, ok := rawVariants[model.Variant].(map[string]any); ok {
@@ -185,7 +186,37 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	}
 }
 
+func applyConfiguredAgentSampling(request *llm.ChatRequest, info config.Info, agentName string) {
+	rawAgent := configuredAgent(info, agentName)
+	if rawAgent == nil {
+		return
+	}
+	if value, ok := floatFromConfig(rawAgent["temperature"]); ok {
+		request.Temperature = &value
+	}
+	if value, ok := floatFromConfig(rawAgent["top_p"]); ok {
+		request.TopP = &value
+	}
+	if value, ok := intFromConfig(rawAgent["top_k"]); ok {
+		request.TopK = &value
+	}
+	if value, ok := intFromConfig(rawAgent["max_output_tokens"]); ok {
+		request.MaxTokens = &value
+	} else if value, ok := intFromConfig(rawAgent["maxOutputTokens"]); ok {
+		request.MaxTokens = &value
+	}
+}
+
 func configuredAgentOptions(info config.Info, agentName string) map[string]any {
+	rawAgent := configuredAgent(info, agentName)
+	if rawAgent == nil {
+		return nil
+	}
+	options, _ := rawAgent["options"].(map[string]any)
+	return options
+}
+
+func configuredAgent(info config.Info, agentName string) map[string]any {
 	name := defaultString(agentName, "build")
 	agents, ok := info["agent"].(map[string]any)
 	if !ok {
@@ -195,8 +226,7 @@ func configuredAgentOptions(info config.Info, agentName string) map[string]any {
 	if !ok {
 		return nil
 	}
-	options, _ := rawAgent["options"].(map[string]any)
-	return options
+	return rawAgent
 }
 
 func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, sessionID session.ID) map[string]any {
@@ -344,6 +374,32 @@ func boolFromConfig(input any, fallback bool) bool {
 		return value
 	}
 	return fallback
+}
+
+func floatFromConfig(input any) (float64, bool) {
+	switch value := input.(type) {
+	case float64:
+		return value, true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func intFromConfig(input any) (int, bool) {
+	switch value := input.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	default:
+		return 0, false
+	}
 }
 
 func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {

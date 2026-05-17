@@ -23,6 +23,9 @@ func TestResponsesChatRequestAndJSONResponse(t *testing.T) {
 		if body["model"] != "gpt-5.2" || body["stream"] != false {
 			t.Fatalf("body = %#v, want model and non-streaming request", body)
 		}
+		if body["temperature"] != 0.2 || body["top_p"] != 0.8 || body["top_k"] != float64(40) || body["max_output_tokens"] != float64(1234) {
+			t.Fatalf("body = %#v, want sampling params", body)
+		}
 		input := body["input"].([]any)
 		first := input[0].(map[string]any)
 		content := first["content"].([]any)[0].(map[string]any)
@@ -52,6 +55,22 @@ func TestResponsesChatRequestAndJSONResponse(t *testing.T) {
 		AuthScheme: "Bearer",
 		Model:      "gpt-5.2",
 		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Temperature: func() *float64 {
+			value := 0.2
+			return &value
+		}(),
+		TopP: func() *float64 {
+			value := 0.8
+			return &value
+		}(),
+		TopK: func() *int {
+			value := 40
+			return &value
+		}(),
+		MaxTokens: func() *int {
+			value := 1234
+			return &value
+		}(),
 	})
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)

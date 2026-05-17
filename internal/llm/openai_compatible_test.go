@@ -23,6 +23,9 @@ func TestOpenAICompatibleChatRequestAndResponse(t *testing.T) {
 		if body["model"] != "mock-model" || body["stream"] != false {
 			t.Fatalf("body = %#v, want model and non-streaming request", body)
 		}
+		if body["temperature"] != 0.2 || body["top_p"] != 0.8 || body["top_k"] != float64(40) || body["max_tokens"] != float64(1234) {
+			t.Fatalf("body = %#v, want sampling params", body)
+		}
 		messages := body["messages"].([]any)
 		first := messages[0].(map[string]any)
 		if first["role"] != "user" || first["content"] != "hello" {
@@ -46,6 +49,22 @@ func TestOpenAICompatibleChatRequestAndResponse(t *testing.T) {
 		BaseURL: mock.URL + "/v1",
 		APIKey:  "test-key",
 		Model:   "mock-model",
+		Temperature: func() *float64 {
+			value := 0.2
+			return &value
+		}(),
+		TopP: func() *float64 {
+			value := 0.8
+			return &value
+		}(),
+		TopK: func() *int {
+			value := 40
+			return &value
+		}(),
+		MaxTokens: func() *int {
+			value := 1234
+			return &value
+		}(),
 		Messages: []Message{{
 			Role:    "user",
 			Content: "hello",
