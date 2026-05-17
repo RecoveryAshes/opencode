@@ -120,6 +120,43 @@ func TestBedrockChatSendsToolDefinitions(t *testing.T) {
 	}
 }
 
+func TestBedrockChatSendsInferenceConfig(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		config := body["inferenceConfig"].(map[string]any)
+		if config["maxTokens"] != float64(1234) ||
+			config["temperature"] != 0.6 ||
+			config["topP"] != 0.95 {
+			t.Fatalf("inferenceConfig = %#v, want maxTokens, temperature, and topP", config)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"content":[{"text":"ok"}]}},"stopReason":"end_turn"}`))
+	}))
+	defer mock.Close()
+
+	maxTokens := 1234
+	temperature := 0.6
+	topP := 0.95
+	_, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
+		ProviderID:  "amazon-bedrock",
+		Protocol:    "bedrock-converse",
+		BaseURL:     mock.URL,
+		APIKey:      "bedrock-token",
+		Model:       "us.amazon.nova-micro-v1:0",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
+		TopP:        &topP,
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestBedrockChatParsesEventStream(t *testing.T) {
 	clearBedrockAuthEnv(t)
 	body := encodeBedrockEventStream(t,

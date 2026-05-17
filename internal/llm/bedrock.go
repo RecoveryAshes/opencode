@@ -44,10 +44,11 @@ func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (Cha
 	if len(request.Tools) > 0 {
 		body.ToolConfig = bedrockToolConfigFor(request.Tools)
 	}
-	if request.MaxTokens != nil || request.Temperature != nil {
+	if request.MaxTokens != nil || request.Temperature != nil || request.TopP != nil {
 		body.InferenceConfig = &bedrockInferenceConfig{
 			MaxTokens:   request.MaxTokens,
 			Temperature: request.Temperature,
+			TopP:        request.TopP,
 		}
 	}
 	for _, message := range request.Messages {
@@ -132,6 +133,7 @@ type bedrockToolUse struct {
 type bedrockInferenceConfig struct {
 	MaxTokens   *int     `json:"maxTokens,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"topP,omitempty"`
 }
 
 type bedrockToolConfig struct {
