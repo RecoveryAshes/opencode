@@ -1547,6 +1547,112 @@ func TestExperimentalWorktreeHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestSyncHTTPAPI(t *testing.T) {
+	store := integration.NewSyncStore()
+	eventsBus := newEventBus()
+	server := httptest.NewServer(NewHandler(Options{Sync: store, Events: eventsBus}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
+	if err != nil {
+		t.Fatalf("new event request: %v", err)
+	}
+	eventResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /event error = %v", err)
+	}
+	defer closeBody(t, eventResp)
+	events := make(chan event, 16)
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		readSSEEvents(eventResp, events, errs)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	_ = waitEventType(t, events, errs, "server.connected")
+
+	resp, err := http.Post(server.URL+"/sync/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /sync/start error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var started bool
+	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+		t.Fatalf("decode sync start: %v", err)
+	}
+	if !started {
+		t.Fatalf("started = false, want true")
+	}
+
+	replay := `{"directory":"/tmp","events":[` +
+		`{"id":"evt_a","aggregateID":"ses_sync","seq":0,"type":"session.created.1","data":{"sessionID":"ses_sync","info":{"id":"ses_sync","title":"sync"}}},` +
+		`{"id":"evt_b","aggregateID":"ses_sync","seq":1,"type":"session.updated.1","data":{"sessionID":"ses_sync","info":{"title":"updated"}}}` +
+		`]}`
+	resp, err = http.Post(server.URL+"/sync/replay", "application/json", strings.NewReader(replay))
+	if err != nil {
+		t.Fatalf("POST /sync/replay error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var replayed map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&replayed); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if replayed["sessionID"] != "ses_sync" {
+		t.Fatalf("replayed = %#v, want ses_sync", replayed)
+	}
+	if got := waitEventType(t, events, errs, "sync.replayed"); got.Properties["sessionID"] != "ses_sync" {
+		t.Fatalf("sync.replayed = %#v, want session id", got)
+	}
+
+	resp, err = http.Post(server.URL+"/sync/history", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST /sync/history error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var history []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&history); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(history) != 2 || history[0]["aggregate_id"] != "ses_sync" || history[1]["seq"] != float64(1) {
+		t.Fatalf("history = %#v, want replayed events", history)
+	}
+
+	resp, err = http.Post(server.URL+"/sync/history", "application/json", strings.NewReader(`{"ses_sync":0}`))
+	if err != nil {
+		t.Fatalf("POST /sync/history cursor error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&history); err != nil {
+		t.Fatalf("decode cursor history: %v", err)
+	}
+	if len(history) != 1 || history[0]["id"] != "evt_b" {
+		t.Fatalf("cursor history = %#v, want event after seq 0", history)
+	}
+
+	resp, err = http.Post(server.URL+"/sync/steal?workspace=wrk_sync", "application/json", strings.NewReader(`{"sessionID":"ses_sync"}`))
+	if err != nil {
+		t.Fatalf("POST /sync/steal error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var stolen map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&stolen); err != nil {
+		t.Fatalf("decode stolen: %v", err)
+	}
+	if stolen["sessionID"] != "ses_sync" {
+		t.Fatalf("stolen = %#v, want session id", stolen)
+	}
+	if got := waitEventType(t, events, errs, "session.updated"); got.Properties["workspaceID"] != "wrk_sync" {
+		t.Fatalf("session.updated = %#v, want workspace id", got)
+	}
+}
+
 type serverFakeChatClient struct {
 	request llm.ChatRequest
 }

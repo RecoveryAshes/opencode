@@ -34,6 +34,7 @@ type Options struct {
 	PTY       *integration.PTYManager
 	Interact  *integration.InteractionManager
 	Workspace *integration.WorkspaceStore
+	Sync      *integration.SyncStore
 	Events    *eventBus
 }
 
@@ -120,6 +121,9 @@ func NewHandler(opts Options) http.Handler {
 	if opts.Workspace == nil {
 		opts.Workspace = integration.NewWorkspaceStore()
 	}
+	if opts.Sync == nil {
+		opts.Sync = integration.NewSyncStore()
+	}
 	if opts.Events == nil {
 		opts.Events = newEventBus()
 	}
@@ -182,6 +186,10 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/experimental/tool", experimentalToolList())
 	mux.HandleFunc("/experimental/worktree/reset", experimentalWorktreeReset(opts.Workspace))
 	mux.HandleFunc("/experimental/worktree", experimentalWorktreeRoot(opts.Workspace))
+	mux.HandleFunc("/sync/start", syncStart(opts.Sync, opts.Workspace))
+	mux.HandleFunc("/sync/replay", syncReplay(opts.Sync, opts.Events))
+	mux.HandleFunc("/sync/steal", syncSteal(opts.Sync, opts.Events))
+	mux.HandleFunc("/sync/history", syncHistory(opts.Sync))
 	mux.HandleFunc("/question/", questionByID(opts.Interact, opts.Events))
 	mux.HandleFunc("/question", questions(opts.Interact))
 	mux.HandleFunc("/permission/", permissionByID(opts.Interact, opts.Events))
@@ -327,6 +335,18 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/experimental/worktree/reset": map[string]any{
 				"post": map[string]any{"operationId": "worktree.reset"},
+			},
+			"/sync/start": map[string]any{
+				"post": map[string]any{"operationId": "sync.start"},
+			},
+			"/sync/replay": map[string]any{
+				"post": map[string]any{"operationId": "sync.replay"},
+			},
+			"/sync/steal": map[string]any{
+				"post": map[string]any{"operationId": "sync.steal"},
+			},
+			"/sync/history": map[string]any{
+				"post": map[string]any{"operationId": "sync.history.list"},
 			},
 			"/question": map[string]any{
 				"get": map[string]any{"operationId": "question.list"},
