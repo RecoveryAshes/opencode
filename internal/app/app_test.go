@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
@@ -44,6 +48,54 @@ func TestRunRetryDelay(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout.String()) != "8000" {
 		t.Fatalf("stdout = %q, want 8000", stdout.String())
+	}
+}
+
+func TestRunServeLoadsConfiguredMCP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	t.Chdir(root)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer remote.Close()
+	configContent := fmt.Sprintf(`{"mcp":{"remote":{"type":"remote","url":%q,"timeout":1000}}}`, remote.URL)
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdout := &lockedBuffer{}
+	var stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"serve", "--hostname", "127.0.0.1", "--port", "0"}, stdout, &stderr, "test")
+	}()
+
+	serverURL := waitForServeURL(t, stdout)
+	resp, err := http.Get(serverURL + "/mcp")
+	if err != nil {
+		t.Fatalf("GET /mcp error = %v; stderr=%q", err, stderr.String())
+	}
+	defer closeResponseBody(t, resp)
+	var status map[string]map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode mcp status: %v", err)
+	}
+	if status["remote"]["status"] != "connected" {
+		t.Fatalf("mcp status = %#v, want remote connected", status)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0; stderr=%q", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serve did not exit after cancellation")
 	}
 }
 
@@ -1452,4 +1504,48 @@ func runAppJSON[T any](t *testing.T, ctx context.Context, args []string) T {
 		t.Fatalf("Run(%v) decode JSON: %v\nstdout=%s", args, err, stdout.String())
 	}
 	return result
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.Write(data)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buf.String()
+}
+
+var _ io.Writer = (*lockedBuffer)(nil)
+
+func waitForServeURL(t *testing.T, stdout interface{ String() string }) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		text := strings.TrimSpace(stdout.String())
+		if text != "" {
+			firstLine := strings.Split(text, "\n")[0]
+			parsed, err := url.Parse(firstLine)
+			if err == nil && parsed.Scheme == "http" && parsed.Host != "" {
+				return firstLine
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("serve URL was not written to stdout; stdout=%q", stdout.String())
+	return ""
+}
+
+func closeResponseBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
 }

@@ -202,12 +202,22 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 	}
 	defer closeRepo()
 
+	mcpManager, closeMCP, err := openMCPManager(ctx, ".")
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stderr, "open mcp failed: %v\n", err); writeErr != nil {
+			return 1
+		}
+		return 1
+	}
+	defer closeMCP()
+
 	listener, err := server.Listen(ctx, server.Options{
 		Hostname: *hostname,
 		Port:     *port,
 		Version:  version,
 		Sessions: sessionRepo,
 		Messages: messageRepo,
+		MCP:      mcpManager,
 		Sync:     syncStore,
 	})
 	if err != nil {
@@ -227,6 +237,33 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 	}
 	<-ctx.Done()
 	return 0
+}
+
+func openMCPManager(ctx context.Context, directory string) (*integration.MCPManager, func(), error) {
+	manager := integration.NewMCPManager()
+	servers, err := integration.LoadConfiguredMCPServers(directory)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	for _, configured := range servers {
+		if configured.Disabled {
+			manager.Add(ctx, configured.Name, integration.MCPConfig{
+				Type:    defaultAppString(configured.Config.Type, "local"),
+				Enabled: boolPtr(false),
+			})
+			continue
+		}
+		manager.Add(ctx, configured.Name, configured.Config)
+	}
+	return manager, func() {
+		for _, configured := range servers {
+			manager.Disconnect(configured.Name)
+		}
+	}, nil
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func openRepositories(dbPath string) (server.SessionRepository, server.MessageRepository, *integration.SyncStore, func(), error) {
