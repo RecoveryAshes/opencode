@@ -277,6 +277,68 @@ func TestPromptRuntimeConfiguredOptionsOverrideProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeMergesConfiguredAgentOptions(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"provider": {
+			"openai": {
+				"models": {
+					"gpt-5.2": {
+						"options": {
+							"reasoningEffort": "low",
+							"metadata": {"model": "gpt-5", "shared": "model"}
+						},
+						"variants": {
+							"max": {
+								"reasoningEffort": "max",
+								"metadata": {"variant": "max", "shared": "variant"}
+							}
+						}
+					}
+				}
+			}
+		},
+		"agent": {
+			"review": {
+				"options": {
+					"reasoningEffort": "high",
+					"metadata": {"agent": "review", "shared": "agent"}
+				}
+			}
+		}
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Agent: "review",
+		Model: &session.ModelRef{ProviderID: "openai", ModelID: "gpt-5.2", Variant: "max"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	t.Setenv("OPENAI_BASE_URL", "https://local.openai.test/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	if _, err := runtime.Reply(ctx, info.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Options["reasoningEffort"] != "max" {
+		t.Fatalf("options = %#v, want variant to override agent and model options", client.request.Options)
+	}
+	metadata := client.request.Options["metadata"].(map[string]any)
+	if metadata["model"] != "gpt-5" || metadata["agent"] != "review" || metadata["variant"] != "max" || metadata["shared"] != "variant" {
+		t.Fatalf("metadata = %#v, want model < agent < variant merge order", metadata)
+	}
+}
+
 func TestPromptRuntimeAppliesProviderCacheKeyDefaults(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

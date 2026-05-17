@@ -64,7 +64,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	if err != nil {
 		return session.WithParts{}, err
 	}
-	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, localToolDefinitions(userMessage.Info.Tools), providerConfig)
+	response, tools, usage, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, localToolDefinitions(userMessage.Info.Tools), providerConfig)
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -94,7 +94,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	})
 }
 
-func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition, providerConfig config.Info) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID session.ID, client ChatClient, messages []llm.Message, model session.ModelRef, agentName string, definitions []llm.ToolDefinition, providerConfig config.Info) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
 	maxIterations := runtime.MaxToolIterations
 	if maxIterations <= 0 {
 		maxIterations = 4
@@ -107,7 +107,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, err
 		}
-		applyConfiguredProviderOptions(&request, providerConfig, model, sessionID)
+		applyConfiguredProviderOptions(&request, providerConfig, model, agentName, sessionID)
 		request.Tools = definitions
 		next, err := client.Chat(ctx, request)
 		if err != nil {
@@ -142,7 +142,7 @@ func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
 	return loaded.Info, nil
 }
 
-func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef, sessionID session.ID) {
+func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, model session.ModelRef, agentName string, sessionID session.ID) {
 	providers, ok := info["provider"].(map[string]any)
 	var rawProvider map[string]any
 	if ok {
@@ -168,6 +168,10 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 		applyChatOptions(request, rawModelOptions)
 		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawModelOptions))
 	}
+	if rawAgentOptions := configuredAgentOptions(info, agentName); len(rawAgentOptions) > 0 {
+		applyChatOptions(request, rawAgentOptions)
+		request.Options = mergeAnyOptions(request.Options, bodyOptionsFromConfig(rawAgentOptions))
+	}
 	if model.Variant != "" {
 		if rawVariants, ok := rawModel["variants"].(map[string]any); ok {
 			if rawVariant, ok := rawVariants[model.Variant].(map[string]any); ok {
@@ -179,6 +183,20 @@ func applyConfiguredProviderOptions(request *llm.ChatRequest, info config.Info, 
 	if rawHeaders, ok := rawModel["headers"].(map[string]any); ok {
 		request.Headers = mergeHeaders(request.Headers, stringMapFromConfig(rawHeaders))
 	}
+}
+
+func configuredAgentOptions(info config.Info, agentName string) map[string]any {
+	name := defaultString(agentName, "build")
+	agents, ok := info["agent"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	rawAgent, ok := agents[name].(map[string]any)
+	if !ok {
+		return nil
+	}
+	options, _ := rawAgent["options"].(map[string]any)
+	return options
 }
 
 func defaultProviderBodyOptions(request llm.ChatRequest, rawProvider map[string]any, rawModel map[string]any, sessionID session.ID) map[string]any {
