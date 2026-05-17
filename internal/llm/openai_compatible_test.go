@@ -172,6 +172,49 @@ func TestOpenAICompatibleChatParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleChatSendsToolDefinitions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body["tool_choice"] != "auto" {
+			t.Fatalf("tool_choice = %#v, want auto", body["tool_choice"])
+		}
+		tools := body["tools"].([]any)
+		first := tools[0].(map[string]any)
+		fn := first["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		if first["type"] != "function" || fn["name"] != "read" || params["type"] != "object" {
+			t.Fatalf("tools = %#v, want OpenAI function tool schema", tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewOpenAICompatibleClient().Chat(t.Context(), ChatRequest{
+		BaseURL: mock.URL,
+		Model:   "mock-model",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Tools: []ToolDefinition{{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"filePath": map[string]any{"type": "string"}},
+				"required":   []string{"filePath"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestOpenAICompatibleChatStreamParsesToolCalls(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

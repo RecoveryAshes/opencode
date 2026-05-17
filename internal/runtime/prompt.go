@@ -58,7 +58,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 
 	model := modelRef(userMessage)
-	response, tools, usage, err := runtime.runProviderLoop(ctx, client, messages, model)
+	response, tools, usage, err := runtime.runProviderLoop(ctx, client, messages, model, localToolDefinitions(userMessage.Info.Tools))
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -88,7 +88,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	})
 }
 
-func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatClient, messages []llm.Message, model session.ModelRef) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
+func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatClient, messages []llm.Message, model session.ModelRef, definitions []llm.ToolDefinition) (llm.ChatResponse, []session.ToolExecution, llm.Usage, error) {
 	maxIterations := runtime.MaxToolIterations
 	if maxIterations <= 0 {
 		maxIterations = 4
@@ -101,6 +101,7 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatCl
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, err
 		}
+		request.Tools = definitions
 		next, err := client.Chat(ctx, request)
 		if err != nil {
 			return llm.ChatResponse{}, nil, llm.Usage{}, err
@@ -116,6 +117,62 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, client ChatCl
 			return response, tools, usage, nil
 		}
 		messages = append(messages, toolResultMessage(next, executed))
+	}
+}
+
+func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
+	result := []llm.ToolDefinition{}
+	for _, tool := range integration.AllTools() {
+		if allowed, ok := enabled[tool.Name]; ok && !allowed {
+			continue
+		}
+		result = append(result, llm.ToolDefinition{
+			Name:        tool.Name,
+			Description: toolDescription(tool),
+			Parameters:  map[string]any(integration.ToolSchema(tool.Name)),
+		})
+	}
+	return result
+}
+
+func toolDescription(tool integration.Tool) string {
+	switch tool.Name {
+	case "read":
+		return "Read a file or list a directory from the local workspace."
+	case "write":
+		return "Write complete content to a file in the local workspace."
+	case "edit":
+		return "Replace exact text in a local workspace file."
+	case "apply_patch":
+		return "Apply an opencode patch to add, update, move, or delete files."
+	case "shell":
+		return "Run a shell command in the local workspace."
+	case "glob":
+		return "Find files by glob pattern in the local workspace."
+	case "grep":
+		return "Search local files using a regular expression."
+	case "lsp":
+		return "Query language-server-style symbols or hover information."
+	case "webfetch":
+		return "Fetch content from an HTTP or HTTPS URL."
+	case "websearch":
+		return "Search the web through the configured Go search bridge."
+	case "question":
+		return "Ask the user structured questions when more input is required."
+	case "task":
+		return "Start or simulate a subtask handled by the session runtime."
+	case "task_status":
+		return "Check the status or result of a background task."
+	case "skill":
+		return "Load a local opencode skill by name."
+	case "todo", "todowrite":
+		return "Create or update the session todo list."
+	case "repo_clone":
+		return "Clone or refresh a Git repository into the local cache."
+	case "repo_overview":
+		return "Summarize a local or cached Git repository."
+	default:
+		return "Run the migrated opencode " + tool.Category + " tool."
 	}
 }
 

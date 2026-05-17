@@ -49,6 +49,7 @@ type ChatRequest struct {
 	AWSRegion      string
 	AWSProfile     string
 	AWSCredentials *AWSCredentials
+	Tools          []ToolDefinition
 }
 
 // Usage is token accounting returned by OpenAI-compatible providers.
@@ -67,6 +68,13 @@ type ChatResponse struct {
 	FinishReason string
 	Usage        Usage
 	ToolCalls    []ToolCall
+}
+
+// ToolDefinition describes one provider-neutral tool callable by an LLM.
+type ToolDefinition struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 // ToolCall describes a provider-requested local tool invocation.
@@ -104,6 +112,10 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 		Stream:      false,
 		Temperature: request.Temperature,
 		MaxTokens:   request.MaxTokens,
+	}
+	if len(request.Tools) > 0 {
+		body.Tools = openAIToolDefinitions(request.Tools)
+		body.ToolChoice = "auto"
 	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
@@ -168,6 +180,10 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 		Temperature: streamRequest.Temperature,
 		MaxTokens:   streamRequest.MaxTokens,
 	}
+	if len(streamRequest.Tools) > 0 {
+		body.Tools = openAIToolDefinitions(streamRequest.Tools)
+		body.ToolChoice = "auto"
+	}
 	for _, message := range streamRequest.Messages {
 		if message.Role == "" || message.Content == "" {
 			continue
@@ -224,6 +240,8 @@ type openAIChatRequest struct {
 	StreamOptions map[string]bool     `json:"stream_options,omitempty"`
 	Temperature   *float64            `json:"temperature,omitempty"`
 	MaxTokens     *int                `json:"max_tokens,omitempty"`
+	Tools         []openAIToolDef     `json:"tools,omitempty"`
+	ToolChoice    string              `json:"tool_choice,omitempty"`
 }
 
 type openAIChatMessage struct {
@@ -260,6 +278,35 @@ type openAIToolCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+}
+
+type openAIToolDef struct {
+	Type     string             `json:"type"`
+	Function openAIFunctionTool `json:"function"`
+}
+
+type openAIFunctionTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func openAIToolDefinitions(tools []ToolDefinition) []openAIToolDef {
+	result := make([]openAIToolDef, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		result = append(result, openAIToolDef{
+			Type: "function",
+			Function: openAIFunctionTool{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  defaultToolParameters(tool.Parameters),
+			},
+		})
+	}
+	return result
 }
 
 type openAIUsage struct {

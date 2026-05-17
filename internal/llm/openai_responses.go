@@ -37,6 +37,9 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 		Input:  make([]responsesInputItem, 0, len(request.Messages)),
 		Stream: false,
 	}
+	if len(request.Tools) > 0 {
+		body.Tools = responsesToolDefinitions(request.Tools)
+	}
 	if request.MaxTokens != nil {
 		body.MaxOutputTokens = request.MaxTokens
 	}
@@ -107,6 +110,7 @@ type responsesRequest struct {
 	Stream          bool                 `json:"stream"`
 	MaxOutputTokens *int                 `json:"max_output_tokens,omitempty"`
 	Temperature     *float64             `json:"temperature,omitempty"`
+	Tools           []responsesToolDef   `json:"tools,omitempty"`
 }
 
 type responsesInputItem struct {
@@ -132,6 +136,29 @@ func (item responsesInputItem) MarshalJSON() ([]byte, error) {
 type responsesContent struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+type responsesToolDef struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func responsesToolDefinitions(tools []ToolDefinition) []responsesToolDef {
+	result := make([]responsesToolDef, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		result = append(result, responsesToolDef{
+			Type:        "function",
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  defaultToolParameters(tool.Parameters),
+		})
+	}
+	return result
 }
 
 type responsesJSON struct {

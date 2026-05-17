@@ -128,6 +128,44 @@ func TestResponsesChatSupportsAzureAuthAndQuery(t *testing.T) {
 	}
 }
 
+func TestResponsesChatSendsToolDefinitions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		tools := body["tools"].([]any)
+		first := tools[0].(map[string]any)
+		params := first["parameters"].(map[string]any)
+		if first["type"] != "function" || first["name"] != "read" || params["type"] != "object" {
+			t.Fatalf("tools = %#v, want Responses function tool schema", tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output_text":"ok"}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewResponsesClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "openai",
+		Protocol:   "openai-responses",
+		BaseURL:    mock.URL,
+		Model:      "gpt-5.2",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Tools: []ToolDefinition{{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"filePath": map[string]any{"type": "string"}},
+				"required":   []string{"filePath"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestProviderChatClientRoutesResponses(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
