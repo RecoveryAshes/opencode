@@ -116,3 +116,62 @@ func TestProviderChatClientRoutesGemini(t *testing.T) {
 		t.Fatalf("Chat() = %#v, want Gemini response", got)
 	}
 }
+
+func TestGeminiChatParsesFunctionCall(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates":[{
+				"content":{"role":"model","parts":[{"functionCall":{"name":"read","args":{"filePath":"README.md"}}}]},
+				"finishReason":"FUNCTION_CALL"
+			}],
+			"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}
+		}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "google",
+		Protocol:   "gemini",
+		BaseURL:    mock.URL,
+		Model:      "gemini-2.5-flash",
+		Messages:   []Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one function call", got)
+	}
+	if got.ToolCalls[0].Name != "read" || got.ToolCalls[0].Arguments["filePath"] != "README.md" {
+		t.Fatalf("tool call = %#v, want read README.md", got.ToolCalls[0])
+	}
+}
+
+func TestGeminiChatStreamParsesFunctionCall(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"glob","args":{"pattern":"*.go"}}}]},"finishReason":"FUNCTION_CALL"}]}`,
+			``,
+		}, "\n\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "google",
+		Protocol:   "gemini",
+		BaseURL:    mock.URL,
+		Model:      "gemini-2.5-flash",
+		Messages:   []Message{{Role: "user", Content: "glob"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one streamed function call", got)
+	}
+	if got.ToolCalls[0].Name != "glob" || got.ToolCalls[0].Arguments["pattern"] != "*.go" {
+		t.Fatalf("tool call = %#v, want glob *.go", got.ToolCalls[0])
+	}
+}

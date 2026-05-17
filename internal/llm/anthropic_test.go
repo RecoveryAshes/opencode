@@ -130,3 +130,65 @@ func TestProviderChatClientRoutesAnthropic(t *testing.T) {
 		t.Fatalf("Chat() = %#v, want Anthropic response", got)
 	}
 }
+
+func TestAnthropicChatParsesToolUse(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"content":[{"type":"tool_use","id":"toolu_1","name":"read","input":{"filePath":"README.md"}}],
+			"stop_reason":"tool_use",
+			"usage":{"input_tokens":1,"output_tokens":2}
+		}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewAnthropicClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "anthropic",
+		Protocol:   "anthropic-messages",
+		BaseURL:    mock.URL,
+		Model:      "claude-sonnet-4-5",
+		Messages:   []Message{{Role: "user", Content: "read"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one tool call", got)
+	}
+	if got.ToolCalls[0].ID != "toolu_1" || got.ToolCalls[0].Name != "read" || got.ToolCalls[0].Arguments["filePath"] != "README.md" {
+		t.Fatalf("tool call = %#v, want read README.md", got.ToolCalls[0])
+	}
+}
+
+func TestAnthropicChatStreamParsesToolUse(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"glob","input":{"pattern":"*.go"}}}`,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}`,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewAnthropicClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "anthropic",
+		Protocol:   "anthropic-messages",
+		BaseURL:    mock.URL,
+		Model:      "claude-sonnet-4-5",
+		Messages:   []Message{{Role: "user", Content: "glob"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.FinishReason != "tool-calls" || len(got.ToolCalls) != 1 {
+		t.Fatalf("Chat() = %#v, want one streamed tool call", got)
+	}
+	if got.ToolCalls[0].Name != "glob" || got.ToolCalls[0].Arguments["pattern"] != "*.go" {
+		t.Fatalf("tool call = %#v, want glob *.go", got.ToolCalls[0])
+	}
+}

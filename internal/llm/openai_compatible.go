@@ -360,11 +360,33 @@ func decodeOpenAIToolCalls(input []openAIToolCall) ([]ToolCall, error) {
 		result = append(result, ToolCall{
 			ID:        call.ID,
 			Name:      call.Function.Name,
-			Arguments: args,
+			Arguments: cloneAnyMap(args),
 			Raw:       raw,
 		})
 	}
 	return result, nil
+}
+
+func cloneAnyMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func rawToolArguments(input map[string]any) string {
+	if input == nil {
+		return ""
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func mapOpenAIUsage(usage openAIUsage) Usage {

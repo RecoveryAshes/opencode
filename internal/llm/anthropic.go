@@ -110,8 +110,11 @@ type anthropicMessage struct {
 }
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string         `json:"type"`
+	Text  string         `json:"text,omitempty"`
+	ID    string         `json:"id,omitempty"`
+	Name  string         `json:"name,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -133,8 +136,11 @@ type anthropicStreamEvent struct {
 		Usage *anthropicStreamUsage `json:"usage"`
 	} `json:"message"`
 	ContentBlock *struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type  string         `json:"type"`
+		Text  string         `json:"text"`
+		ID    string         `json:"id"`
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
 	} `json:"content_block"`
 	Delta *struct {
 		Type       string  `json:"type"`
@@ -161,19 +167,30 @@ func decodeAnthropicResponse(data []byte) (ChatResponse, error) {
 		return ChatResponse{}, fmt.Errorf("decode Anthropic response: %w", err)
 	}
 	var text strings.Builder
+	toolCalls := []ToolCall{}
 	for _, block := range response.Content {
-		if block.Type != "text" {
+		switch block.Type {
+		case "text":
+			text.WriteString(block.Text)
+		case "tool_use":
+			toolCalls = append(toolCalls, ToolCall{
+				ID:        block.ID,
+				Name:      block.Name,
+				Arguments: cloneAnyMap(block.Input),
+				Raw:       rawToolArguments(block.Input),
+			})
+		default:
 			continue
 		}
-		text.WriteString(block.Text)
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("anthropic response did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapAnthropicFinishReason(response.StopReason),
 		Usage:        mapAnthropicUsage(response.Usage),
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
@@ -183,6 +200,7 @@ func decodeAnthropicStream(reader io.Reader) (ChatResponse, error) {
 	var text strings.Builder
 	var usage *anthropicStreamUsage
 	reason := ""
+	toolCalls := []ToolCall{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -200,8 +218,19 @@ func decodeAnthropicStream(reader io.Reader) (ChatResponse, error) {
 		case "message_start":
 			usage = mergeAnthropicStreamUsage(usage, event.MessageUsage())
 		case "content_block_start":
-			if event.ContentBlock != nil && event.ContentBlock.Type == "text" {
+			if event.ContentBlock == nil {
+				continue
+			}
+			switch event.ContentBlock.Type {
+			case "text":
 				text.WriteString(event.ContentBlock.Text)
+			case "tool_use":
+				toolCalls = append(toolCalls, ToolCall{
+					ID:        event.ContentBlock.ID,
+					Name:      event.ContentBlock.Name,
+					Arguments: cloneAnyMap(event.ContentBlock.Input),
+					Raw:       rawToolArguments(event.ContentBlock.Input),
+				})
 			}
 		case "content_block_delta":
 			if event.Delta != nil && event.Delta.Type == "text_delta" {
@@ -222,13 +251,14 @@ func decodeAnthropicStream(reader io.Reader) (ChatResponse, error) {
 	if err := scanner.Err(); err != nil {
 		return ChatResponse{}, fmt.Errorf("read Anthropic stream: %w", err)
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("anthropic stream did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapAnthropicFinishReason(reason),
 		Usage:        mapAnthropicStreamUsage(usage),
+		ToolCalls:    toolCalls,
 	}, nil
 }
 

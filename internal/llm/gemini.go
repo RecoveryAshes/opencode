@@ -105,8 +105,14 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text    string `json:"text,omitempty"`
-	Thought bool   `json:"thought,omitempty"`
+	Text         string              `json:"text,omitempty"`
+	Thought      bool                `json:"thought,omitempty"`
+	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
+}
+
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args"`
 }
 
 type geminiGenerationConfig struct {
@@ -142,19 +148,29 @@ func decodeGeminiResponse(data []byte) (ChatResponse, error) {
 	}
 	candidate := response.Candidates[0]
 	var text strings.Builder
+	toolCalls := []ToolCall{}
 	for _, part := range candidate.Content.Parts {
 		if part.Thought {
 			continue
 		}
 		text.WriteString(part.Text)
+		if part.FunctionCall != nil && part.FunctionCall.Name != "" {
+			toolCalls = append(toolCalls, ToolCall{
+				ID:        part.FunctionCall.Name,
+				Name:      part.FunctionCall.Name,
+				Arguments: cloneAnyMap(part.FunctionCall.Args),
+				Raw:       rawToolArguments(part.FunctionCall.Args),
+			})
+		}
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("gemini response did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapGeminiFinishReason(candidate.FinishReason),
 		Usage:        mapGeminiUsage(response.UsageMetadata),
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
@@ -164,6 +180,7 @@ func decodeGeminiStream(reader io.Reader) (ChatResponse, error) {
 	var text strings.Builder
 	usage := Usage{}
 	reason := ""
+	toolCalls := []ToolCall{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -192,18 +209,27 @@ func decodeGeminiStream(reader io.Reader) (ChatResponse, error) {
 				continue
 			}
 			text.WriteString(part.Text)
+			if part.FunctionCall != nil && part.FunctionCall.Name != "" {
+				toolCalls = append(toolCalls, ToolCall{
+					ID:        part.FunctionCall.Name,
+					Name:      part.FunctionCall.Name,
+					Arguments: cloneAnyMap(part.FunctionCall.Args),
+					Raw:       rawToolArguments(part.FunctionCall.Args),
+				})
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return ChatResponse{}, fmt.Errorf("read Gemini stream: %w", err)
 	}
-	if text.Len() == 0 {
+	if text.Len() == 0 && len(toolCalls) == 0 {
 		return ChatResponse{}, fmt.Errorf("gemini stream did not include text content")
 	}
 	return ChatResponse{
 		Text:         text.String(),
 		FinishReason: mapGeminiFinishReason(reason),
 		Usage:        usage,
+		ToolCalls:    toolCalls,
 	}, nil
 }
 
@@ -226,6 +252,8 @@ func mapGeminiFinishReason(reason string) string {
 	switch reason {
 	case "STOP":
 		return "stop"
+	case "FUNCTION_CALL":
+		return "tool-calls"
 	case "MAX_TOKENS":
 		return "length"
 	case "IMAGE_SAFETY", "RECITATION", "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
