@@ -309,13 +309,13 @@ func TestRunDBMigrateAndQuery(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run(ctx, []string{"db", "--db", dbPath, "query", "select id, title from session order by title"}, &stdout, &stderr, "test")
+	code = Run(ctx, []string{"db", "--db", dbPath, "query", "select title, id from session order by title"}, &stdout, &stderr, "test")
 	if code != 0 {
 		t.Fatalf("query exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) != 2 || lines[0] != "id\ttitle" || lines[1] != sessionID+"\tDB CLI" {
-		t.Fatalf("query stdout = %q, want TSV header and row", stdout.String())
+	if len(lines) != 2 || lines[0] != "title\tid" || lines[1] != "DB CLI\t"+sessionID {
+		t.Fatalf("query stdout = %q, want TSV header and row in selected column order", stdout.String())
 	}
 
 	stdout.Reset()

@@ -999,20 +999,15 @@ func dbQuery(ctx context.Context, path string, query string, format string, stdo
 		}
 		return 0
 	}
-	if len(result) == 0 {
+	if len(result.Rows) == 0 {
 		return 0
 	}
-	columns := make([]string, 0, len(result[0]))
-	for key := range result[0] {
-		columns = append(columns, key)
-	}
-	slices.Sort(columns)
-	if _, err := fmt.Fprintln(stdout, strings.Join(columns, "\t")); err != nil {
+	if _, err := fmt.Fprintln(stdout, strings.Join(result.Columns, "\t")); err != nil {
 		return 1
 	}
-	for _, row := range result {
-		values := make([]string, 0, len(columns))
-		for _, column := range columns {
+	for _, row := range result.Rows {
+		values := make([]string, 0, len(result.Columns))
+		for _, column := range result.Columns {
 			values = append(values, dbCellString(row[column]))
 		}
 		if _, err := fmt.Fprintln(stdout, strings.Join(values, "\t")); err != nil {
@@ -1029,12 +1024,21 @@ func sqliteReadOnlyDSN(path string) string {
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
 }
 
-func scanDBRows(rows *sql.Rows) ([]map[string]any, error) {
+type dbQueryResult struct {
+	Columns []string
+	Rows    []map[string]any
+}
+
+func (result dbQueryResult) MarshalJSON() ([]byte, error) {
+	return json.Marshal(result.Rows)
+}
+
+func scanDBRows(rows *sql.Rows) (dbQueryResult, error) {
 	columns, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return dbQueryResult{}, err
 	}
-	result := []map[string]any{}
+	result := dbQueryResult{Columns: columns, Rows: []map[string]any{}}
 	for rows.Next() {
 		values := make([]any, len(columns))
 		destinations := make([]any, len(columns))
@@ -1042,16 +1046,16 @@ func scanDBRows(rows *sql.Rows) ([]map[string]any, error) {
 			destinations[i] = &values[i]
 		}
 		if err := rows.Scan(destinations...); err != nil {
-			return nil, err
+			return dbQueryResult{}, err
 		}
 		row := map[string]any{}
 		for i, column := range columns {
 			row[column] = normalizeDBValue(values[i])
 		}
-		result = append(result, row)
+		result.Rows = append(result.Rows, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return dbQueryResult{}, err
 	}
 	return result, nil
 }
