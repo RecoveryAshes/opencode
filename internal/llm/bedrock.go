@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 )
@@ -65,7 +66,7 @@ func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (Cha
 		return ChatResponse{}, fmt.Errorf("encode Bedrock request: %w", err)
 	}
 
-	endpoint, err := url.JoinPath(strings.TrimRight(request.BaseURL, "/"), "model", body.ModelID, "converse")
+	endpoint, err := url.JoinPath(strings.TrimRight(request.BaseURL, "/"), "model", body.ModelID, "converse-stream")
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Bedrock endpoint: %w", err)
 	}
@@ -95,6 +96,9 @@ func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (Cha
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ChatResponse{}, fmt.Errorf("bedrock response status %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if isBedrockEventStream(response.Header.Get("Content-Type")) {
+		return decodeBedrockEventStream(bytes.NewReader(data))
 	}
 	return decodeBedrockResponse(data)
 }
@@ -127,6 +131,52 @@ type bedrockResponse struct {
 	Usage      bedrockUsage `json:"usage"`
 }
 
+type bedrockStreamEvent struct {
+	MessageStart *struct {
+		Role string `json:"role"`
+	} `json:"messageStart"`
+	ContentBlockStart *struct {
+		ContentBlockIndex int `json:"contentBlockIndex"`
+		Start             *struct {
+			ToolUse *struct {
+				ToolUseID string `json:"toolUseId"`
+				Name      string `json:"name"`
+			} `json:"toolUse"`
+		} `json:"start"`
+	} `json:"contentBlockStart"`
+	ContentBlockDelta *struct {
+		ContentBlockIndex int `json:"contentBlockIndex"`
+		Delta             *struct {
+			Text    string `json:"text"`
+			ToolUse *struct {
+				Input string `json:"input"`
+			} `json:"toolUse"`
+			ReasoningContent *struct {
+				Text      string `json:"text"`
+				Signature string `json:"signature"`
+			} `json:"reasoningContent"`
+		} `json:"delta"`
+	} `json:"contentBlockDelta"`
+	ContentBlockStop *struct {
+		ContentBlockIndex int `json:"contentBlockIndex"`
+	} `json:"contentBlockStop"`
+	MessageStop *struct {
+		StopReason string `json:"stopReason"`
+	} `json:"messageStop"`
+	Metadata *struct {
+		Usage bedrockUsage `json:"usage"`
+	} `json:"metadata"`
+	InternalServerException *bedrockStreamException `json:"internalServerException"`
+	ModelStreamError        *bedrockStreamException `json:"modelStreamErrorException"`
+	ValidationException     *bedrockStreamException `json:"validationException"`
+	ThrottlingException     *bedrockStreamException `json:"throttlingException"`
+	ServiceUnavailable      *bedrockStreamException `json:"serviceUnavailableException"`
+}
+
+type bedrockStreamException struct {
+	Message string `json:"message"`
+}
+
 type bedrockUsage struct {
 	InputTokens           int `json:"inputTokens"`
 	OutputTokens          int `json:"outputTokens"`
@@ -152,6 +202,84 @@ func decodeBedrockResponse(data []byte) (ChatResponse, error) {
 		FinishReason: mapBedrockFinishReason(response.StopReason),
 		Usage:        mapBedrockUsage(response.Usage),
 	}, nil
+}
+
+func decodeBedrockEventStream(reader io.Reader) (ChatResponse, error) {
+	decoder := eventstream.NewDecoder()
+	var payload []byte
+	var text strings.Builder
+	usage := Usage{}
+	reason := ""
+	for {
+		message, err := decoder.Decode(reader, payload)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return ChatResponse{}, fmt.Errorf("decode Bedrock event-stream frame: %w", err)
+		}
+		payload = message.Payload
+		messageType, _ := message.Headers.Get(":message-type").Get().(string)
+		if messageType != "event" {
+			continue
+		}
+		eventType, _ := message.Headers.Get(":event-type").Get().(string)
+		if eventType == "" || len(message.Payload) == 0 {
+			continue
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(message.Payload, &raw); err != nil {
+			return ChatResponse{}, fmt.Errorf("decode Bedrock event-stream payload: %w", err)
+		}
+		delete(raw, "p")
+		wrappedPayload, err := json.Marshal(map[string]map[string]json.RawMessage{eventType: raw})
+		if err != nil {
+			return ChatResponse{}, fmt.Errorf("wrap Bedrock event-stream payload: %w", err)
+		}
+		var event bedrockStreamEvent
+		if err := json.Unmarshal(wrappedPayload, &event); err != nil {
+			return ChatResponse{}, fmt.Errorf("decode Bedrock event-stream event: %w", err)
+		}
+		if err := applyBedrockStreamEvent(&text, &usage, &reason, event); err != nil {
+			return ChatResponse{}, err
+		}
+	}
+	if text.Len() == 0 {
+		return ChatResponse{}, fmt.Errorf("bedrock event-stream did not include text content")
+	}
+	return ChatResponse{
+		Text:         text.String(),
+		FinishReason: mapBedrockFinishReason(reason),
+		Usage:        usage,
+	}, nil
+}
+
+func applyBedrockStreamEvent(text *strings.Builder, usage *Usage, reason *string, event bedrockStreamEvent) error {
+	if event.ContentBlockDelta != nil && event.ContentBlockDelta.Delta != nil {
+		text.WriteString(event.ContentBlockDelta.Delta.Text)
+	}
+	if event.MessageStop != nil {
+		*reason = event.MessageStop.StopReason
+	}
+	if event.Metadata != nil {
+		*usage = mapBedrockUsage(event.Metadata.Usage)
+	}
+	if event.InternalServerException != nil {
+		return fmt.Errorf("bedrock event-stream internal server exception: %s", event.InternalServerException.Message)
+	}
+	if event.ModelStreamError != nil {
+		return fmt.Errorf("bedrock event-stream model stream error: %s", event.ModelStreamError.Message)
+	}
+	if event.ServiceUnavailable != nil {
+		return fmt.Errorf("bedrock event-stream service unavailable: %s", event.ServiceUnavailable.Message)
+	}
+	if event.ValidationException != nil {
+		return fmt.Errorf("bedrock event-stream validation exception: %s", event.ValidationException.Message)
+	}
+	if event.ThrottlingException != nil {
+		return fmt.Errorf("bedrock event-stream throttling exception: %s", event.ThrottlingException.Message)
+	}
+	return nil
 }
 
 func mapBedrockUsage(usage bedrockUsage) Usage {
@@ -185,7 +313,7 @@ func mapBedrockFinishReason(reason string) string {
 
 func applyBedrockHeaders(ctx context.Context, httpRequest *http.Request, request ChatRequest, payload []byte) error {
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Accept", "application/vnd.amazon.eventstream, application/json")
 	for key, value := range request.Headers {
 		if key == "" || value == "" {
 			continue
@@ -213,6 +341,11 @@ func applyBedrockHeaders(ctx context.Context, httpRequest *http.Request, request
 		return fmt.Errorf("sign Bedrock request: %w", err)
 	}
 	return nil
+}
+
+func isBedrockEventStream(contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	return strings.Contains(contentType, "application/vnd.amazon.eventstream") || strings.Contains(contentType, "application/octet-stream")
 }
 
 func bedrockRole(role string) string {
