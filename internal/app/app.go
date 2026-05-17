@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/RecoveryAshes/opencode/internal/config"
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
@@ -72,6 +73,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return agentCommand(args[1:], stdout, stderr)
 	case "mcp":
 		return mcpCommand(ctx, args[1:], stdout, stderr)
+	case "pty":
+		return ptyCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1187,6 +1190,103 @@ func mcpConfigHint(config integration.MCPConfig) string {
 	}
 }
 
+func ptyCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pty", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOutput := fs.Bool("json", false, "write PTY data JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode pty [--json] COMMAND")
+		return 2
+	}
+	switch fs.Arg(0) {
+	case "shells":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode pty [--json] shells")
+			return 2
+		}
+		shells := integration.Shells()
+		if *jsonOutput {
+			return writeJSON(stdout, shells)
+		}
+		for _, shell := range shells {
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%v\n", shell["name"], shell["path"], shell["acceptable"]); err != nil {
+				return 1
+			}
+		}
+		return 0
+	case "run":
+		return ptyRun(ctx, fs.Args()[1:], *jsonOutput, stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown pty command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
+func ptyRun(ctx context.Context, args []string, jsonOutput bool, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pty run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	command := fs.String("command", "", "command to execute")
+	cwd := fs.String("cwd", "", "working directory")
+	title := fs.String("title", "", "session title")
+	timeout := fs.Duration("timeout", 5*time.Second, "maximum time to wait for command output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *command == "" {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode pty [--json] run --command COMMAND [--cwd DIR] [--timeout DURATION]")
+		return 2
+	}
+	manager := integration.NewPTYManager()
+	runCtx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	info, err := manager.Create(runCtx, integration.PTYCreateInput{
+		Command: "/bin/sh",
+		Args:    []string{"-c", *command},
+		CWD:     *cwd,
+		Title:   *title,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "pty run failed: %v\n", err)
+		return 1
+	}
+	defer manager.Remove(info.ID)
+	info = waitForPTYExit(runCtx, manager, info.ID)
+	output, _ := manager.Buffer(info.ID)
+	if jsonOutput {
+		return writeJSON(stdout, map[string]any{
+			"info":   info,
+			"output": output,
+		})
+	}
+	if _, err := fmt.Fprint(stdout, output); err != nil {
+		return 1
+	}
+	if runCtx.Err() != nil && info.Status != "exited" {
+		_, _ = fmt.Fprintf(stderr, "pty run timed out after %s\n", timeout.String())
+		return 1
+	}
+	return 0
+}
+
+func waitForPTYExit(ctx context.Context, manager *integration.PTYManager, id string) integration.PTYInfo {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		info, ok := manager.Get(id)
+		if !ok || info.Status == "exited" {
+			return info
+		}
+		select {
+		case <-ctx.Done():
+			return info
+		case <-ticker.C:
+		}
+	}
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1769,6 +1869,7 @@ commands:
   import [--db PATH] FILE
   agent [--directory DIR] [--json] COMMAND
   mcp [--directory DIR] [--json] COMMAND
+  pty [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

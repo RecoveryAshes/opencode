@@ -410,6 +410,46 @@ func TestRunMCPToolsAndCallConfiguredLocalServer(t *testing.T) {
 	}
 }
 
+func TestRunPTYShellsJSON(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(context.Background(), []string{"pty", "--json", "shells"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var shells []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &shells); err != nil {
+		t.Fatalf("decode shells JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if len(shells) == 0 || shells[0]["path"] == "" || shells[0]["name"] == "" {
+		t.Fatalf("shells = %#v, want shell list", shells)
+	}
+}
+
+func TestRunPTYRunCommandJSON(t *testing.T) {
+	root := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(context.Background(), []string{"pty", "--json", "run", "--cwd", root, "--command", `printf "%s:%s" "$PWD" "$OPENCODE_TERMINAL"`}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode pty run JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	info := result["info"].(map[string]any)
+	if info["status"] != "exited" || info["cwd"] != root {
+		t.Fatalf("info = %#v, want exited in cwd", info)
+	}
+	output := result["output"].(string)
+	if !strings.Contains(output, root+":1") {
+		t.Fatalf("output = %q, want cwd and terminal env", output)
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()
