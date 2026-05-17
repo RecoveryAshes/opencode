@@ -70,6 +70,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return importCommand(ctx, args[1:], stdout, stderr)
 	case "agent":
 		return agentCommand(args[1:], stdout, stderr)
+	case "mcp":
+		return mcpCommand(ctx, args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -948,6 +950,118 @@ func sortAgentsForCLI(agents []integration.AgentInfo) {
 	})
 }
 
+type mcpListItem struct {
+	Name   string                `json:"name"`
+	Type   string                `json:"type,omitempty"`
+	Status integration.MCPStatus `json:"status"`
+	Config integration.MCPConfig `json:"config,omitempty"`
+}
+
+func mcpCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover MCP config")
+	jsonOutput := fs.Bool("json", false, "write MCP status JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode mcp [--directory DIR] [--json] COMMAND")
+		return 2
+	}
+	switch fs.Arg(0) {
+	case "list", "ls":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode mcp [--directory DIR] [--json] list")
+			return 2
+		}
+		return mcpList(ctx, *directory, *jsonOutput, stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown mcp command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
+func mcpList(ctx context.Context, directory string, jsonOutput bool, stdout io.Writer, stderr io.Writer) int {
+	servers, err := integration.LoadConfiguredMCPServers(directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load mcp config failed: %v\n", err)
+		return 1
+	}
+	if len(servers) == 0 {
+		if jsonOutput {
+			return writeJSON(stdout, []mcpListItem{})
+		}
+		_, _ = fmt.Fprintln(stdout, "No MCP servers configured")
+		return 0
+	}
+	manager := integration.NewMCPManager()
+	defer disconnectMCPServers(manager, servers)
+	items := make([]mcpListItem, 0, len(servers))
+	for _, server := range servers {
+		status := integration.MCPStatus{Status: "disabled"}
+		if !server.Disabled {
+			statuses := manager.Add(ctx, server.Name, server.Config)
+			status = statuses[server.Name]
+		}
+		items = append(items, mcpListItem{
+			Name:   server.Name,
+			Type:   server.Config.Type,
+			Status: status,
+			Config: server.Config,
+		})
+	}
+	if jsonOutput {
+		return writeJSON(stdout, items)
+	}
+	for _, item := range items {
+		icon := mcpStatusIcon(item.Status.Status)
+		if _, err := fmt.Fprintf(stdout, "%s %s %s\n", icon, item.Name, item.Status.Status); err != nil {
+			return 1
+		}
+		hint := mcpConfigHint(item.Config)
+		if hint != "" {
+			if _, err := fmt.Fprintf(stdout, "  %s\n", hint); err != nil {
+				return 1
+			}
+		}
+		if item.Status.Error != "" {
+			if _, err := fmt.Fprintf(stdout, "  %s\n", item.Status.Error); err != nil {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+func disconnectMCPServers(manager *integration.MCPManager, servers []integration.MCPConfiguredServer) {
+	for _, server := range servers {
+		manager.Disconnect(server.Name)
+	}
+}
+
+func mcpStatusIcon(status string) string {
+	switch status {
+	case "connected":
+		return "ok"
+	case "disabled":
+		return "--"
+	default:
+		return "!!"
+	}
+}
+
+func mcpConfigHint(config integration.MCPConfig) string {
+	switch config.Type {
+	case "remote":
+		return config.URL
+	case "local":
+		return strings.Join(config.Command, " ")
+	default:
+		return ""
+	}
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1529,6 +1643,7 @@ commands:
   export [--db PATH] [--sanitize] [SESSION_ID]
   import [--db PATH] FILE
   agent [--directory DIR] [--json] COMMAND
+  mcp [--directory DIR] [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

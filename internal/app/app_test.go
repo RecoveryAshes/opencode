@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -256,6 +257,60 @@ func TestRunAgentGetMissing(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "agent not found: missing") {
 		t.Fatalf("stderr = %q, want missing agent error", stderr.String())
+	}
+}
+
+func TestRunMCPListJSONConnectsConfiguredServers(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer remote.Close()
+	configContent := fmt.Sprintf(`{
+  "mcp": {
+    "disabled": {"enabled": false},
+    "remote": {"type": "remote", "url": %q, "timeout": 1000}
+  }
+}`, remote.URL)
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"mcp", "--directory", root, "--json", "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil {
+		t.Fatalf("decode mcp JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	statuses := map[string]string{}
+	for _, item := range items {
+		status := item["status"].(map[string]any)
+		statuses[item["name"].(string)] = status["status"].(string)
+	}
+	if statuses["disabled"] != "disabled" || statuses["remote"] != "connected" {
+		t.Fatalf("statuses = %#v, want disabled and connected", statuses)
+	}
+}
+
+func TestRunMCPListTextShowsEmptyState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(context.Background(), []string{"mcp", "--directory", root, "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "No MCP servers configured" {
+		t.Fatalf("stdout = %q, want empty state", stdout.String())
 	}
 }
 
