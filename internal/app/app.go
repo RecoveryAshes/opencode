@@ -75,6 +75,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return mcpCommand(ctx, args[1:], stdout, stderr)
 	case "pty":
 		return ptyCommand(ctx, args[1:], stdout, stderr)
+	case "skills":
+		return skillsCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1287,6 +1289,64 @@ func waitForPTYExit(ctx context.Context, manager *integration.PTYManager, id str
 	}
 }
 
+func skillsCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("skills", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover skills")
+	jsonOutput := fs.Bool("json", false, "write skill data JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode skills [--directory DIR] [--json] COMMAND")
+		return 2
+	}
+	skills, err := integration.ListSkills(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "list skills failed: %v\n", err)
+		return 1
+	}
+	switch fs.Arg(0) {
+	case "list":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode skills [--directory DIR] [--json] list")
+			return 2
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, skills)
+		}
+		for _, skill := range skills {
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\n", skill.Name, skill.Location); err != nil {
+				return 1
+			}
+		}
+		return 0
+	case "get":
+		if fs.NArg() != 2 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode skills [--directory DIR] [--json] get NAME")
+			return 2
+		}
+		name := fs.Arg(1)
+		for _, skill := range skills {
+			if skill.Name != name {
+				continue
+			}
+			if *jsonOutput {
+				return writeJSON(stdout, skill)
+			}
+			if _, err := fmt.Fprintln(stdout, strings.TrimSpace(skill.Content)); err != nil {
+				return 1
+			}
+			return 0
+		}
+		_, _ = fmt.Fprintf(stderr, "skill not found: %s\n", name)
+		return 2
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown skills command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1870,6 +1930,7 @@ commands:
   agent [--directory DIR] [--json] COMMAND
   mcp [--directory DIR] [--json] COMMAND
   pty [--json] COMMAND
+  skills [--directory DIR] [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

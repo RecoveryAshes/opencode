@@ -450,6 +450,49 @@ func TestRunPTYRunCommandJSON(t *testing.T) {
 	}
 }
 
+func TestRunSkillsListAndGet(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	skillDir := filepath.Join(root, ".opencode", "skills", "audit")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	content := strings.Join([]string{
+		"---",
+		"name: audit",
+		"description: Audit skill",
+		"---",
+		"Audit the current change.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"skills", "--directory", root, "--json", "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("list exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var skills []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &skills); err != nil {
+		t.Fatalf("decode skills JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	if len(skills) != 1 || skills[0]["name"] != "audit" || skills[0]["description"] != "Audit skill" {
+		t.Fatalf("skills = %#v, want audit skill", skills)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"skills", "--directory", root, "get", "audit"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("get exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "Audit the current change." {
+		t.Fatalf("skill content = %q, want content without frontmatter", stdout.String())
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()
