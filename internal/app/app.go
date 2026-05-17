@@ -79,6 +79,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return skillsCommand(args[1:], stdout, stderr)
 	case "formatters":
 		return formattersCommand(args[1:], stdout, stderr)
+	case "lsp":
+		return lspCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1387,6 +1389,44 @@ func formattersCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 }
 
+func lspCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("lsp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to load LSP config")
+	jsonOutput := fs.Bool("json", false, "write LSP status JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode lsp [--directory DIR] [--json] COMMAND")
+		return 2
+	}
+	switch fs.Arg(0) {
+	case "list", "status":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode lsp [--directory DIR] [--json] list")
+			return 2
+		}
+		statuses, err := integration.LSPStatuses(*directory)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "list lsp failed: %v\n", err)
+			return 1
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, statuses)
+		}
+		for _, status := range statuses {
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\n", status.ID, status.Status, status.Root); err != nil {
+				return 1
+			}
+		}
+		return 0
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown lsp command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1972,6 +2012,7 @@ commands:
   pty [--json] COMMAND
   skills [--directory DIR] [--json] COMMAND
   formatters [--directory DIR] [--json] COMMAND
+  lsp [--directory DIR] [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools

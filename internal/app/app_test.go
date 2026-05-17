@@ -546,6 +546,50 @@ func TestRunFormattersList(t *testing.T) {
 	}
 }
 
+func TestRunLSPList(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	configContent := strings.Join([]string{
+		"{",
+		`  "lsp": {`,
+		`    "custom-lsp": {"command": ["custom-lsp"], "extensions": [".custom"]}`,
+		"  }",
+		"}",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"lsp", "--directory", root, "--json", "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("json list exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var statuses []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &statuses); err != nil {
+		t.Fatalf("decode lsp JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	byID := map[string]map[string]any{}
+	for _, status := range statuses {
+		byID[status["id"].(string)] = status
+	}
+	custom := byID["custom-lsp"]
+	if custom == nil || custom["status"] != "connected" || custom["root"] != root {
+		t.Fatalf("custom-lsp status = %#v, want connected in root; all statuses = %#v", custom, statuses)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"lsp", "--directory", root, "status"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("text status exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "custom-lsp\tconnected\t"+root) {
+		t.Fatalf("lsp text = %q, want custom-lsp status", stdout.String())
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()
