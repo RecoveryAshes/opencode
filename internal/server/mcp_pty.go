@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,6 +74,9 @@ func ptyRoot(manager *integration.PTYManager) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		switch r.Method {
 		case http.MethodGet:
+			if r.URL.Path == "/pty/shells" {
+				return integration.Shells(), http.StatusOK, nil
+			}
 			return manager.List(), http.StatusOK, nil
 		case http.MethodPost:
 			var input integration.PTYCreateInput
@@ -122,6 +127,16 @@ func ptyByID(manager *integration.PTYManager) http.HandlerFunc {
 				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 			}
 		}
+		if len(parts) == 2 && parts[1] == "connect-token" && r.Method == http.MethodPost {
+			if _, ok := manager.Get(id); !ok {
+				return nil, http.StatusNotFound, fmt.Errorf("pty session not found")
+			}
+			ticket, err := randomToken(16)
+			if err != nil {
+				return nil, http.StatusInternalServerError, err
+			}
+			return map[string]any{"ticket": ticket, "expires_in": 60}, http.StatusOK, nil
+		}
 		if len(parts) == 2 && parts[1] == "input" && r.Method == http.MethodPost {
 			var payload struct {
 				Data string `json:"data"`
@@ -148,4 +163,12 @@ func statusFromGenericError(err error) int {
 		return http.StatusOK
 	}
 	return http.StatusBadRequest
+}
+
+func randomToken(bytesLen int) (string, error) {
+	data := make([]byte, bytesLen)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return hex.EncodeToString(data), nil
 }

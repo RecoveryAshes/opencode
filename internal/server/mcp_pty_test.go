@@ -46,7 +46,20 @@ func TestPTYHTTPAPI(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{PTY: manager}))
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/pty", "application/json", strings.NewReader(`{"command":"/bin/sh","args":["-c","printf pty-ready"],"title":"test"}`))
+	resp, err := http.Get(server.URL + "/pty/shells")
+	if err != nil {
+		t.Fatalf("GET /pty/shells error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var shells []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&shells); err != nil {
+		t.Fatalf("decode shells: %v", err)
+	}
+	if len(shells) == 0 || shells[0]["path"] == "" || shells[0]["name"] == "" {
+		t.Fatalf("shells = %#v, want shell list", shells)
+	}
+
+	resp, err = http.Post(server.URL+"/pty", "application/json", strings.NewReader(`{"command":"/bin/sh","args":["-c","printf pty-ready"],"title":"test"}`))
 	if err != nil {
 		t.Fatalf("POST /pty error = %v", err)
 	}
@@ -100,5 +113,18 @@ func TestPTYHTTPAPI(t *testing.T) {
 	}
 	if updated.Size == nil || updated.Size.Rows != 30 || updated.Size.Cols != 100 {
 		t.Fatalf("updated = %#v, want size contract preserved", updated)
+	}
+
+	resp, err = http.Post(server.URL+"/pty/"+info.ID+"/connect-token", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /pty/id/connect-token error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var token map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	if token["ticket"] == "" || token["expires_in"] != float64(60) {
+		t.Fatalf("token = %#v, want connect token shape", token)
 	}
 }
