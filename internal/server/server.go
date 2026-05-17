@@ -116,13 +116,15 @@ func NewHandler(opts Options) http.Handler {
 		opts.Events = newEventBus()
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleJSON(func(_ *http.Request) (any, int, error) {
+	health := handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{
 			"ok":      true,
 			"service": "opencode-go",
 			"version": opts.Version,
 		}, http.StatusOK, nil
-	}))
+	})
+	mux.HandleFunc("/health", health)
+	mux.HandleFunc("/global/health", health)
 	mux.HandleFunc("/openapi.json", handleJSON(func(_ *http.Request) (any, int, error) {
 		return OpenAPI(opts.Version), http.StatusOK, nil
 	}))

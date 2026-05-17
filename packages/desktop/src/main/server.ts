@@ -1,4 +1,6 @@
+import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
 import type { Details } from "electron"
@@ -67,6 +69,117 @@ export function preferAppEnv(userDataPath: string) {
 }
 
 export async function spawnLocalServer(
+  hostname: string,
+  port: number,
+  password: string,
+  options: SpawnLocalServerOptions,
+) {
+  const goSidecar = resolveGoSidecarPath()
+  if (goSidecar) {
+    return spawnGoLocalServer(goSidecar, hostname, port, password, options)
+  }
+  return spawnLegacyLocalServer(hostname, port, password, options)
+}
+
+export function resolveGoSidecarPath(env: NodeJS.ProcessEnv = process.env, platform = process.platform): string | null {
+  const fromEnv = env.OPENCODE_GO_SIDECAR
+  if (fromEnv && existsSync(fromEnv)) return fromEnv
+
+  const extension = platform === "win32" ? ".exe" : ""
+  const root = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    join(root, `opencode-sidecar${extension}`),
+    join(root, "..", "bin", `opencode-sidecar${extension}`),
+    join(process.resourcesPath ?? root, `opencode-sidecar${extension}`),
+    join(process.resourcesPath ?? root, "bin", `opencode-sidecar${extension}`),
+  ]
+  return candidates.find((candidate) => existsSync(candidate)) ?? null
+}
+
+async function spawnGoLocalServer(
+  sidecar: string,
+  hostname: string,
+  port: number,
+  password: string,
+  options: SpawnLocalServerOptions,
+) {
+  const env = createSidecarEnv()
+  Object.assign(env, {
+    OPENCODE_SERVER_USERNAME: "opencode",
+    OPENCODE_SERVER_PASSWORD: password,
+    XDG_STATE_HOME: env.XDG_STATE_HOME ?? options.userDataPath,
+  })
+  const child = spawn(sidecar, ["--hostname", hostname, "--port", String(port)], {
+    cwd: process.cwd(),
+    env,
+    stdio: "pipe",
+  })
+  return await waitForGoSidecar(child, sidecar, hostname, port, password, options)
+}
+
+async function waitForGoSidecar(
+  child: ChildProcessWithoutNullStreams,
+  sidecar: string,
+  hostname: string,
+  port: number,
+  password: string,
+  options: SpawnLocalServerOptions,
+) {
+  let exited = false
+  const exit = defer<number>()
+  child.once("exit", (code) => {
+    exited = true
+    options.onExit?.(code ?? 0)
+    exit.resolve(code ?? 0)
+  })
+  child.once("error", (error) => options.onStderr?.(`go sidecar error: ${serializeError(error).message}`))
+  child.stdout.on("data", (chunk: Buffer) => options.onStdout?.(chunk.toString("utf8").trimEnd()))
+  child.stderr.on("data", (chunk: Buffer) => options.onStderr?.(chunk.toString("utf8").trimEnd()))
+
+  const url = `http://${hostname}:${port}`
+  try {
+    await Promise.race([
+      waitForHealth(url, password),
+      delay(SIDECAR_START_STALL_TIMEOUT).then(() => {
+        throw new Error(`Go sidecar did not become healthy within ${SIDECAR_START_STALL_TIMEOUT}ms: ${sidecar}`)
+      }),
+      exit.promise.then((code) => {
+        throw new Error(`Go sidecar exited before healthy with code ${code}`)
+      }),
+    ])
+  } catch (error) {
+    if (!exited) child.kill()
+    throw error
+  }
+
+  let stopping: Promise<void> | undefined
+  return {
+    listener: {
+      stop: () => {
+        if (stopping) return stopping
+        if (exited) return Promise.resolve()
+        child.kill("SIGTERM")
+        stopping = Promise.race([
+          exit.promise.then(() => undefined),
+          delay(SIDECAR_STOP_TIMEOUT).then(() => {
+            if (!exited) child.kill("SIGKILL")
+          }),
+        ])
+        return stopping
+      },
+    },
+    health: { wait: Promise.resolve() },
+  }
+}
+
+async function waitForHealth(url: string, password: string) {
+  while (true) {
+    if (await checkHealth(url, password)) return
+    await delay(100)
+  }
+}
+
+async function spawnLegacyLocalServer(
   hostname: string,
   port: number,
   password: string,

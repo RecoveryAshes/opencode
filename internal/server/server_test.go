@@ -25,18 +25,20 @@ func TestHealth(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/health")
-	if err != nil {
-		t.Fatalf("GET /health error = %v", err)
-	}
-	defer closeBody(t, resp)
+	for _, path := range []string{"/health", "/global/health"} {
+		resp, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s error = %v", path, err)
+		}
+		defer closeBody(t, resp)
 
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK || body["ok"] != true || body["service"] != "opencode-go" {
-		t.Fatalf("status/body = %d %#v, want health ok", resp.StatusCode, body)
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK || body["ok"] != true || body["service"] != "opencode-go" {
+			t.Fatalf("%s status/body = %d %#v, want health ok", path, resp.StatusCode, body)
+		}
 	}
 }
 
