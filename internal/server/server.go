@@ -129,6 +129,7 @@ func NewHandler(opts Options) http.Handler {
 		return OpenAPI(opts.Version), http.StatusOK, nil
 	}))
 	mux.HandleFunc("/event", handleEvent(opts.Version, opts.Events))
+	mux.HandleFunc("/config", configGet())
 	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{}, http.StatusOK, nil
 	}))
@@ -174,6 +175,9 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/command": map[string]any{
 				"get": map[string]any{"operationId": "command.list"},
+			},
+			"/config": map[string]any{
+				"get": map[string]any{"operationId": "config.get"},
 			},
 			"/tool": map[string]any{
 				"get": map[string]any{"operationId": "tool.list"},
@@ -248,6 +252,19 @@ func OpenAPI(version string) map[string]any {
 			"phase":  "go-foundation",
 		},
 	}
+}
+
+func configGet() http.HandlerFunc {
+	return handleJSON(func(r *http.Request) (any, int, error) {
+		if r.Method != http.MethodGet {
+			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
+		}
+		result, err := config.Load(config.LoadOptions{
+			Directory: defaultString(r.URL.Query().Get("directory"), "."),
+			Worktree:  r.URL.Query().Get("worktree"),
+		})
+		return result, statusFromError(err), err
+	})
 }
 
 func commands() http.HandlerFunc {

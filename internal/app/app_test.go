@@ -499,6 +499,43 @@ func TestRunSessionCommandCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestRunConfigLoadsLocalConfig(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	writeAppFile(t, filepath.Join(xdg, "opencode", "opencode.jsonc"), `{"model":"global/model"}`)
+	writeAppFile(t, filepath.Join(root, "opencode.jsonc"), `{"model":"project/model","instructions":["local.md"]}`)
+
+	got := runAppJSON[map[string]any](t, context.Background(), []string{"config", "--directory", root})
+	info, ok := got["info"].(map[string]any)
+	if !ok {
+		t.Fatalf("info = %#v, want object", got["info"])
+	}
+	if info["model"] != "project/model" {
+		t.Fatalf("model = %#v, want project/model", info["model"])
+	}
+	files, ok := got["files"].([]any)
+	if !ok || len(files) != 2 {
+		t.Fatalf("files = %#v, want global and project files", got["files"])
+	}
+}
+
+func writeAppFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 func TestRunSessionPromptRejectsTextAndTextFileTogether(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

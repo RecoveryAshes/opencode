@@ -297,6 +297,53 @@ func TestCommandHTTPAPIAndSessionCommand(t *testing.T) {
 	}
 }
 
+func TestConfigHTTPAPI(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	root := filepath.Join(home, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_TEST_HOME", home)
+
+	writeServerFile(t, filepath.Join(xdg, "opencode", "opencode.jsonc"), `{"model":"global/model"}`)
+	writeServerFile(t, filepath.Join(root, "opencode.json"), `{"model":"project/model","instructions":["project.md"]}`)
+	writeServerFile(t, filepath.Join(root, ".opencode", "agent", "review.md"), "review agent")
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/config?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /config error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	info, ok := body["info"].(map[string]any)
+	if !ok {
+		t.Fatalf("info = %#v, want object", body["info"])
+	}
+	if info["model"] != "project/model" {
+		t.Fatalf("model = %#v, want project/model", info["model"])
+	}
+	discovery, ok := body["discovery"].(map[string]any)
+	if !ok {
+		t.Fatalf("discovery = %#v, want object", body["discovery"])
+	}
+	agents, ok := discovery["agents"].([]any)
+	if !ok || len(agents) != 1 || filepath.Base(agents[0].(string)) != "review.md" {
+		t.Fatalf("agents = %#v, want review.md", discovery["agents"])
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -471,6 +518,16 @@ func quoteJSON(value string) string {
 
 func urlQueryEscape(value string) string {
 	return url.QueryEscape(value)
+}
+
+func writeServerFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
 
 func readSSEEvents(resp *http.Response, events chan<- event, errs chan<- error) {

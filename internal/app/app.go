@@ -52,6 +52,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return retryDelay(args[1:], stdout, stderr)
 	case "commands":
 		return commands(args[1:], stdout, stderr)
+	case "config":
+		return configCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "tools":
@@ -665,6 +667,29 @@ func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	return writeJSON(stdout, result)
 }
 
+func configCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover project config")
+	worktree := fs.String("worktree", "", "worktree boundary for project config discovery")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode config [--directory DIR] [--worktree DIR]")
+		return 2
+	}
+	result, err := config.Load(config.LoadOptions{
+		Directory: *directory,
+		Worktree:  *worktree,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load config failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result)
+}
+
 func tool(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tool", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -735,6 +760,7 @@ commands:
   serve [--hostname HOST] [--port PORT] [--db PATH]
   run [--db PATH] [--text TEXT | --text-file PATH] [--json] [PROMPT]
   session [--db PATH] COMMAND
+  config [--directory DIR] [--worktree DIR]
   commands [--directory DIR]
   providers
   tools
