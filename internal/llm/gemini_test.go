@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func TestGeminiChatRequestAndResponse(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1beta/models/gemini-2.5-flash:generateContent" {
-			t.Fatalf("path = %q, want Gemini generateContent path", r.URL.Path)
+		if r.URL.Path != "/v1beta/models/gemini-2.5-flash:streamGenerateContent" {
+			t.Fatalf("path = %q, want Gemini streamGenerateContent path", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("alt"); got != "sse" {
+			t.Fatalf("alt = %q, want sse", got)
 		}
 		if got := r.Header.Get("x-goog-api-key"); got != "google-key" {
 			t.Fatalf("x-goog-api-key = %q, want Google key", got)
@@ -59,6 +63,35 @@ func TestGeminiChatRequestAndResponse(t *testing.T) {
 	}
 	if got.Usage.InputTokens != 5 || got.Usage.OutputTokens != 3 || got.Usage.ReasoningTokens != 1 || got.Usage.CacheReadTokens != 1 || got.Usage.TotalTokens != 8 {
 		t.Fatalf("usage = %#v, want Gemini token mapping", got.Usage)
+	}
+}
+
+func TestGeminiChatParsesSSE(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"thinking","thought":true},{"text":"hel"}]}}]}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"cachedContentTokenCount":1,"totalTokenCount":9}}`,
+			``,
+		}, "\n\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "google",
+		Protocol:   "gemini",
+		BaseURL:    mock.URL + "/v1beta",
+		Model:      "gemini-2.5-flash",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Text != "hello" || got.FinishReason != "length" {
+		t.Fatalf("Chat() = %#v, want streamed text length", got)
+	}
+	if got.Usage.InputTokens != 3 || got.Usage.OutputTokens != 6 || got.Usage.ReasoningTokens != 2 || got.Usage.CacheReadTokens != 1 || got.Usage.TotalTokens != 9 {
+		t.Fatalf("usage = %#v, want stream usage", got.Usage)
 	}
 }
 

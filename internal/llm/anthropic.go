@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -35,6 +36,7 @@ func (client *AnthropicClient) Chat(ctx context.Context, request ChatRequest) (C
 	body := anthropicRequest{
 		Model:     defaultString(request.Model, "claude-sonnet-4-5"),
 		Messages:  make([]anthropicMessage, 0, len(request.Messages)),
+		Stream:    true,
 		MaxTokens: defaultInt(request.MaxTokens, 4096),
 	}
 	if request.Temperature != nil {
@@ -88,12 +90,16 @@ func (client *AnthropicClient) Chat(ctx context.Context, request ChatRequest) (C
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ChatResponse{}, fmt.Errorf("anthropic response status %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
 	}
+	if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") || bytes.Contains(data, []byte("data:")) {
+		return decodeAnthropicStream(bytes.NewReader(data))
+	}
 	return decodeAnthropicResponse(data)
 }
 
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	Messages    []anthropicMessage `json:"messages"`
+	Stream      bool               `json:"stream"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
 }
@@ -121,6 +127,34 @@ type anthropicUsage struct {
 	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
 }
 
+type anthropicStreamEvent struct {
+	Type    string `json:"type"`
+	Message *struct {
+		Usage *anthropicStreamUsage `json:"usage"`
+	} `json:"message"`
+	ContentBlock *struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content_block"`
+	Delta *struct {
+		Type       string  `json:"type"`
+		Text       string  `json:"text"`
+		StopReason *string `json:"stop_reason"`
+	} `json:"delta"`
+	Usage *anthropicStreamUsage `json:"usage"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type anthropicStreamUsage struct {
+	InputTokens              *int `json:"input_tokens"`
+	OutputTokens             *int `json:"output_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+}
+
 func decodeAnthropicResponse(data []byte) (ChatResponse, error) {
 	var response anthropicResponse
 	if err := json.Unmarshal(data, &response); err != nil {
@@ -141,6 +175,109 @@ func decodeAnthropicResponse(data []byte) (ChatResponse, error) {
 		FinishReason: mapAnthropicFinishReason(response.StopReason),
 		Usage:        mapAnthropicUsage(response.Usage),
 	}, nil
+}
+
+func decodeAnthropicStream(reader io.Reader) (ChatResponse, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var text strings.Builder
+	var usage *anthropicStreamUsage
+	reason := ""
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event anthropicStreamEvent
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return ChatResponse{}, fmt.Errorf("decode Anthropic stream event: %w", err)
+		}
+		switch event.Type {
+		case "message_start":
+			usage = mergeAnthropicStreamUsage(usage, event.MessageUsage())
+		case "content_block_start":
+			if event.ContentBlock != nil && event.ContentBlock.Type == "text" {
+				text.WriteString(event.ContentBlock.Text)
+			}
+		case "content_block_delta":
+			if event.Delta != nil && event.Delta.Type == "text_delta" {
+				text.WriteString(event.Delta.Text)
+			}
+		case "message_delta":
+			usage = mergeAnthropicStreamUsage(usage, event.Usage)
+			if event.Delta != nil && event.Delta.StopReason != nil {
+				reason = *event.Delta.StopReason
+			}
+		case "error":
+			if event.Error != nil {
+				return ChatResponse{}, fmt.Errorf("anthropic stream error %s: %s", event.Error.Type, event.Error.Message)
+			}
+			return ChatResponse{}, fmt.Errorf("anthropic stream error")
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ChatResponse{}, fmt.Errorf("read Anthropic stream: %w", err)
+	}
+	if text.Len() == 0 {
+		return ChatResponse{}, fmt.Errorf("anthropic stream did not include text content")
+	}
+	return ChatResponse{
+		Text:         text.String(),
+		FinishReason: mapAnthropicFinishReason(reason),
+		Usage:        mapAnthropicStreamUsage(usage),
+	}, nil
+}
+
+func (event anthropicStreamEvent) MessageUsage() *anthropicStreamUsage {
+	if event.Message == nil {
+		return nil
+	}
+	return event.Message.Usage
+}
+
+func mergeAnthropicStreamUsage(left *anthropicStreamUsage, right *anthropicStreamUsage) *anthropicStreamUsage {
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+	output := *left
+	if right.InputTokens != nil {
+		output.InputTokens = right.InputTokens
+	}
+	if right.OutputTokens != nil {
+		output.OutputTokens = right.OutputTokens
+	}
+	if right.CacheCreationInputTokens != nil {
+		output.CacheCreationInputTokens = right.CacheCreationInputTokens
+	}
+	if right.CacheReadInputTokens != nil {
+		output.CacheReadInputTokens = right.CacheReadInputTokens
+	}
+	return &output
+}
+
+func mapAnthropicStreamUsage(usage *anthropicStreamUsage) Usage {
+	if usage == nil {
+		return Usage{}
+	}
+	nonCached := optionalIntValue(usage.InputTokens)
+	cacheRead := optionalIntValue(usage.CacheReadInputTokens)
+	cacheWrite := optionalIntValue(usage.CacheCreationInputTokens)
+	output := optionalIntValue(usage.OutputTokens)
+	input := nonCached + cacheRead + cacheWrite
+	return Usage{
+		InputTokens:      input,
+		OutputTokens:     output,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+		TotalTokens:      input + output,
+	}
 }
 
 func mapAnthropicUsage(usage anthropicUsage) Usage {
@@ -178,7 +315,7 @@ func mapAnthropicFinishReason(reason string) string {
 
 func applyAnthropicHeaders(httpRequest *http.Request, request ChatRequest) {
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Accept", "text/event-stream, application/json")
 	httpRequest.Header.Set("anthropic-version", "2023-06-01")
 	for key, value := range request.Headers {
 		if key == "" || value == "" {
@@ -194,6 +331,13 @@ func applyAnthropicHeaders(httpRequest *http.Request, request ChatRequest) {
 func defaultInt(value *int, fallback int) int {
 	if value == nil || *value <= 0 {
 		return fallback
+	}
+	return *value
+}
+
+func optionalIntValue(value *int) int {
+	if value == nil {
+		return 0
 	}
 	return *value
 }

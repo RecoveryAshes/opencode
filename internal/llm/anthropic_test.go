@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,8 @@ func TestAnthropicChatRequestAndResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if body["model"] != "claude-sonnet-4-5" || body["max_tokens"] != float64(64) {
-			t.Fatalf("body = %#v, want model and max_tokens", body)
+		if body["model"] != "claude-sonnet-4-5" || body["max_tokens"] != float64(64) || body["stream"] != true {
+			t.Fatalf("body = %#v, want model, stream, and max_tokens", body)
 		}
 		messages := body["messages"].([]any)
 		first := messages[0].(map[string]any)
@@ -69,6 +70,43 @@ func TestAnthropicChatRequestAndResponse(t *testing.T) {
 	}
 	if got.Usage.CacheReadTokens != 1 || got.Usage.CacheWriteTokens != 2 {
 		t.Fatalf("cache usage = %#v, want read/write", got.Usage)
+	}
+}
+
+func TestAnthropicChatParsesSSE(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1}}}`,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel"}}`,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}`,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4,"cache_creation_input_tokens":3}}`,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n")))
+	}))
+	defer mock.Close()
+
+	got, err := NewAnthropicClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "anthropic",
+		Protocol:   "anthropic-messages",
+		BaseURL:    mock.URL,
+		Model:      "claude-sonnet-4-5",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Text != "hello" || got.FinishReason != "length" {
+		t.Fatalf("Chat() = %#v, want streamed text length", got)
+	}
+	if got.Usage.InputTokens != 6 || got.Usage.OutputTokens != 4 || got.Usage.CacheReadTokens != 1 || got.Usage.CacheWriteTokens != 3 || got.Usage.TotalTokens != 10 {
+		t.Fatalf("usage = %#v, want merged stream usage", got.Usage)
 	}
 }
 

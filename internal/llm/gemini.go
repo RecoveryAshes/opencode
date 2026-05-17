@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -59,7 +60,7 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 		return ChatResponse{}, fmt.Errorf("encode Gemini request: %w", err)
 	}
 
-	endpoint, err := url.JoinPath(strings.TrimRight(defaultString(request.BaseURL, defaultGeminiBaseURL), "/"), "models", defaultString(request.Model, "gemini-2.5-flash")+":generateContent")
+	endpoint, err := geminiEndpoint(strings.TrimRight(defaultString(request.BaseURL, defaultGeminiBaseURL), "/"), defaultString(request.Model, "gemini-2.5-flash"))
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Gemini endpoint: %w", err)
 	}
@@ -86,6 +87,9 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ChatResponse{}, fmt.Errorf("gemini response status %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") || bytes.Contains(data, []byte("data:")) {
+		return decodeGeminiStream(bytes.NewReader(data))
 	}
 	return decodeGeminiResponse(data)
 }
@@ -154,6 +158,55 @@ func decodeGeminiResponse(data []byte) (ChatResponse, error) {
 	}, nil
 }
 
+func decodeGeminiStream(reader io.Reader) (ChatResponse, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var text strings.Builder
+	usage := Usage{}
+	reason := ""
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event geminiResponse
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return ChatResponse{}, fmt.Errorf("decode Gemini stream event: %w", err)
+		}
+		if mapped := mapGeminiUsage(event.UsageMetadata); mapped.TotalTokens != 0 || mapped.InputTokens != 0 || mapped.OutputTokens != 0 {
+			usage = mapped
+		}
+		if len(event.Candidates) == 0 {
+			continue
+		}
+		candidate := event.Candidates[0]
+		if candidate.FinishReason != "" {
+			reason = candidate.FinishReason
+		}
+		for _, part := range candidate.Content.Parts {
+			if part.Thought {
+				continue
+			}
+			text.WriteString(part.Text)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ChatResponse{}, fmt.Errorf("read Gemini stream: %w", err)
+	}
+	if text.Len() == 0 {
+		return ChatResponse{}, fmt.Errorf("gemini stream did not include text content")
+	}
+	return ChatResponse{
+		Text:         text.String(),
+		FinishReason: mapGeminiFinishReason(reason),
+		Usage:        usage,
+	}, nil
+}
+
 func mapGeminiUsage(usage geminiUsage) Usage {
 	output := usage.CandidatesTokenCount + usage.ThoughtsTokenCount
 	total := usage.TotalTokenCount
@@ -186,7 +239,7 @@ func mapGeminiFinishReason(reason string) string {
 
 func applyGeminiHeaders(httpRequest *http.Request, request ChatRequest) {
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Accept", "text/event-stream, application/json")
 	for key, value := range request.Headers {
 		if key == "" || value == "" {
 			continue
@@ -196,6 +249,21 @@ func applyGeminiHeaders(httpRequest *http.Request, request ChatRequest) {
 	if request.APIKey != "" {
 		httpRequest.Header.Set(defaultString(request.AuthHeader, "x-goog-api-key"), request.APIKey)
 	}
+}
+
+func geminiEndpoint(baseURL string, model string) (string, error) {
+	endpoint, err := url.JoinPath(baseURL, "models", model+":streamGenerateContent")
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	query.Set("alt", "sse")
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 func geminiRole(role string) string {
