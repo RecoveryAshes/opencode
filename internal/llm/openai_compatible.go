@@ -25,8 +25,13 @@ type Message struct {
 
 // ChatRequest describes one text-only OpenAI-compatible chat completion.
 type ChatRequest struct {
+	ProviderID  string
 	BaseURL     string
 	APIKey      string
+	AuthHeader  string
+	AuthScheme  string
+	Headers     map[string]string
+	QueryParams map[string]string
 	Model       string
 	Messages    []Message
 	Temperature *float64
@@ -91,7 +96,7 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 		return ChatResponse{}, fmt.Errorf("encode chat request: %w", err)
 	}
 
-	endpoint, err := url.JoinPath(baseURL, "chat", "completions")
+	endpoint, err := chatEndpoint(baseURL, request.QueryParams)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat endpoint: %w", err)
 	}
@@ -99,11 +104,7 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat request: %w", err)
 	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
-	if request.APIKey != "" {
-		httpRequest.Header.Set("Authorization", "Bearer "+request.APIKey)
-	}
+	applyOpenAICompatibleHeaders(httpRequest, request, "application/json")
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -154,7 +155,7 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("encode chat stream request: %w", err)
 	}
-	endpoint, err := url.JoinPath(baseURL, "chat", "completions")
+	endpoint, err := chatEndpoint(baseURL, streamRequest.QueryParams)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat stream endpoint: %w", err)
 	}
@@ -162,11 +163,7 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat stream request: %w", err)
 	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "text/event-stream")
-	if streamRequest.APIKey != "" {
-		httpRequest.Header.Set("Authorization", "Bearer "+streamRequest.APIKey)
-	}
+	applyOpenAICompatibleHeaders(httpRequest, streamRequest, "text/event-stream")
 	httpClient := client.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -190,12 +187,11 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 
 // ChatRequestFromEnv builds runtime provider config from environment variables.
 func ChatRequestFromEnv(messages []Message, model string) ChatRequest {
-	return ChatRequest{
-		BaseURL:  firstEnv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"),
-		APIKey:   firstEnv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"),
-		Model:    defaultString(model, firstEnv("OPENCODE_OPENAI_COMPATIBLE_MODEL", "OPENAI_MODEL")),
-		Messages: messages,
+	request, err := ResolveChatRequest(messages, "openai-compatible", model)
+	if err != nil {
+		return ChatRequest{Messages: messages, Model: model}
 	}
+	return request
 }
 
 type openAIChatRequest struct {
@@ -330,6 +326,53 @@ func mapFinishReason(reason string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func chatEndpoint(baseURL string, queryParams map[string]string) (string, error) {
+	endpoint, err := url.JoinPath(baseURL, "chat", "completions")
+	if err != nil {
+		return "", err
+	}
+	if len(queryParams) == 0 {
+		return endpoint, nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	for key, value := range queryParams {
+		if key == "" || value == "" {
+			continue
+		}
+		query.Set(key, value)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func applyOpenAICompatibleHeaders(httpRequest *http.Request, request ChatRequest, accept string) {
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Accept", accept)
+	for key, value := range request.Headers {
+		if key == "" || value == "" {
+			continue
+		}
+		httpRequest.Header.Set(key, value)
+	}
+	if request.APIKey == "" {
+		return
+	}
+	header := defaultString(request.AuthHeader, "Authorization")
+	scheme := request.AuthScheme
+	if scheme == "" && strings.EqualFold(header, "Authorization") {
+		scheme = "Bearer"
+	}
+	value := request.APIKey
+	if scheme != "" {
+		value = scheme + " " + value
+	}
+	httpRequest.Header.Set(header, value)
 }
 
 func firstEnv(names ...string) string {

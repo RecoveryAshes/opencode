@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 	got := map[string]bool{}
@@ -12,5 +15,96 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
+	}
+}
+
+func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		provider  string
+		envKey    string
+		envValue  string
+		baseURL   string
+		apiKeyEnv string
+	}{
+		{
+			name:      "openrouter",
+			provider:  "openrouter",
+			envKey:    "OPENROUTER_BASE_URL",
+			envValue:  "https://local.openrouter.test/v1",
+			baseURL:   "https://local.openrouter.test/v1",
+			apiKeyEnv: "OPENROUTER_API_KEY",
+		},
+		{
+			name:      "xai",
+			provider:  "xai",
+			envKey:    "XAI_BASE_URL",
+			envValue:  "https://local.xai.test/v1",
+			baseURL:   "https://local.xai.test/v1",
+			apiKeyEnv: "XAI_API_KEY",
+		},
+		{
+			name:      "groq",
+			provider:  "groq",
+			envKey:    "GROQ_BASE_URL",
+			envValue:  "https://local.groq.test/openai/v1",
+			baseURL:   "https://local.groq.test/openai/v1",
+			apiKeyEnv: "GROQ_API_KEY",
+		},
+		{
+			name:      "together legacy id",
+			provider:  "togetherai",
+			envKey:    "TOGETHER_AI_BASE_URL",
+			envValue:  "https://local.together.test/v1",
+			baseURL:   "https://local.together.test/v1",
+			apiKeyEnv: "TOGETHER_AI_API_KEY",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.envKey, test.envValue)
+			t.Setenv(test.apiKeyEnv, "provider-key")
+
+			got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, test.provider, "mock-model")
+			if err != nil {
+				t.Fatalf("ResolveChatRequest() error = %v", err)
+			}
+			if got.ProviderID != test.provider || got.BaseURL != test.baseURL || got.APIKey != "provider-key" || got.Model != "mock-model" {
+				t.Fatalf("request = %#v, want provider profile", got)
+			}
+			if got.AuthHeader != "Authorization" || got.AuthScheme != "Bearer" {
+				t.Fatalf("auth = %q/%q, want bearer authorization", got.AuthHeader, got.AuthScheme)
+			}
+		})
+	}
+}
+
+func TestResolveChatRequestAzureUsesAPIKeyHeaderAndVersion(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_RESOURCE_NAME", "opencode-test")
+	t.Setenv("AZURE_OPENAI_API_KEY", "azure-key")
+	t.Setenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "azure", "deployment")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.BaseURL != "https://opencode-test.openai.azure.com/openai/v1" {
+		t.Fatalf("baseURL = %q, want resource URL", got.BaseURL)
+	}
+	if got.AuthHeader != "api-key" || got.AuthScheme != "" || got.APIKey != "azure-key" {
+		t.Fatalf("auth = %#v, want Azure api-key header", got)
+	}
+	if got.QueryParams["api-version"] != "2024-10-21" {
+		t.Fatalf("query params = %#v, want api-version", got.QueryParams)
+	}
+}
+
+func TestResolveChatRequestUnknownOrUnsupportedProvider(t *testing.T) {
+	if _, err := ResolveChatRequest(nil, "anthropic", "claude"); err == nil || !strings.Contains(err.Error(), "non-OpenAI chat protocol") {
+		t.Fatalf("anthropic error = %v, want unsupported protocol", err)
+	}
+	if _, err := ResolveChatRequest(nil, "missing", "model"); err == nil || !strings.Contains(err.Error(), "unknown provider") {
+		t.Fatalf("missing error = %v, want unknown provider", err)
 	}
 }

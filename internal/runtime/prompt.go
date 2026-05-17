@@ -54,7 +54,10 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	}
 
 	model := modelRef(userMessage)
-	request := llm.ChatRequestFromEnv(messages, model.ModelID)
+	request, err := llm.ResolveChatRequest(messages, model.ProviderID, model.ModelID)
+	if err != nil {
+		return session.WithParts{}, err
+	}
 	response, err := client.Chat(ctx, request)
 	if err != nil {
 		return session.WithParts{}, err
