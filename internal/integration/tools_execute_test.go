@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -452,6 +453,70 @@ func TestListSkillsIncludesConfiguredLocalPaths(t *testing.T) {
 	}
 	if len(skills) != 1 || skills[0].Name != "audit" || skills[0].Description != "Audit from configured path" {
 		t.Fatalf("skills = %#v, want configured audit skill", skills)
+	}
+}
+
+func TestListSkillsIncludesConfiguredRemoteURLs(t *testing.T) {
+	root := t.TempDir()
+	cacheRoot := filepath.Join(root, "cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	downloads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/skills/index.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"skills": [
+					{"name":"remote-audit","files":["SKILL.md","references/guide.md"]},
+					{"name":"missing-main","files":["README.md"]}
+				]
+			}`))
+		case "/.well-known/skills/remote-audit/SKILL.md":
+			downloads++
+			_, _ = w.Write([]byte(strings.Join([]string{
+				"---",
+				"name: remote-audit",
+				"description: Audit from remote URL",
+				"---",
+				"Audit remote path.",
+			}, "\n")))
+		case "/.well-known/skills/remote-audit/references/guide.md":
+			downloads++
+			_, _ = w.Write([]byte("# Guide"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	writeIntegrationFile(t, filepath.Join(root, "opencode.jsonc"), fmt.Sprintf(`{
+		"skills": {
+			"urls": [%q]
+		}
+	}`, server.URL+"/.well-known/skills"))
+
+	first, err := ListSkills(root)
+	if err != nil {
+		t.Fatalf("ListSkills() error = %v", err)
+	}
+	if len(first) != 1 || first[0].Name != "remote-audit" || first[0].Description != "Audit from remote URL" {
+		t.Fatalf("first skills = %#v, want remote-audit only", first)
+	}
+	if !strings.HasPrefix(first[0].Location, filepath.Join(cacheRoot, "opencode", "skills", "remote-audit")) {
+		t.Fatalf("remote skill location = %q, want cached under XDG cache", first[0].Location)
+	}
+	if downloads != 2 {
+		t.Fatalf("downloads after first pull = %d, want 2", downloads)
+	}
+
+	second, err := ListSkills(root)
+	if err != nil {
+		t.Fatalf("second ListSkills() error = %v", err)
+	}
+	if len(second) != len(first) || second[0].Name != first[0].Name {
+		t.Fatalf("second skills = %#v, want cached first result %#v", second, first)
+	}
+	if downloads != 2 {
+		t.Fatalf("downloads after cached pull = %d, want unchanged", downloads)
 	}
 }
 

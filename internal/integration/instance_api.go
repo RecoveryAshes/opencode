@@ -360,7 +360,8 @@ func ListAgents(directory string) ([]AgentInfo, error) {
 	return result, nil
 }
 
-// ListSkills returns project-local skills discovered under .opencode.
+// ListSkills returns skills discovered from opencode directories, configured
+// local paths, external skill directories, and remote skill indexes.
 func ListSkills(directory string) ([]SkillInfo, error) {
 	cfg, err := config.Load(config.LoadOptions{Directory: directory})
 	if err != nil {
@@ -369,6 +370,17 @@ func ListSkills(directory string) ([]SkillInfo, error) {
 	result := []SkillInfo{}
 	paths := append([]string{}, cfg.Discovery.Skills...)
 	for _, root := range configuredSkillRoots(directory, cfg.Info) {
+		matches, err := skillFiles(root)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, matches...)
+	}
+	remoteRoots, err := configuredRemoteSkillRoots(cfg.Info)
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range remoteRoots {
 		matches, err := skillFiles(root)
 		if err != nil {
 			return nil, err
