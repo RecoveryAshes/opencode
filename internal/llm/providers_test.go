@@ -113,6 +113,24 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 	}
 }
 
+func TestSortPublicModelsUsesCatalogPriority(t *testing.T) {
+	models := []PublicModel{
+		{ID: "z-local", ProviderID: "local"},
+		{ID: "claude-sonnet-4-5", ProviderID: "anthropic"},
+		{ID: "gpt-5", ProviderID: "openai"},
+		{ID: "gpt-4o-mini", ProviderID: "openai"},
+	}
+	SortPublicModels(models)
+	got := []string{}
+	for _, model := range models {
+		got = append(got, model.ProviderID+"/"+model.ID)
+	}
+	want := []string{"anthropic/claude-sonnet-4-5", "openai/gpt-5", "local/z-local", "openai/gpt-4o-mini"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %#v, want %#v", got, want)
+	}
+}
+
 func TestConfigProvidersUsesProvidersKey(t *testing.T) {
 	result := ConfigProviders(config.Info{
 		"disabled_providers": []any{"openai"},

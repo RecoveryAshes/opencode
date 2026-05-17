@@ -360,20 +360,48 @@ func defaultModelIDs(providers []PublicProvider) map[string]string {
 		if len(provider.Models) == 0 {
 			continue
 		}
-		result[provider.ID] = sortedModelIDs(provider.Models)[0]
+		result[provider.ID] = SortedModelIDs(provider.Models)[0]
 	}
 	return result
 }
 
-func sortedModelIDs(models map[string]PublicModel) []string {
+// SortedModelIDs applies the same user-facing model priority ordering as the
+// TypeScript provider catalog.
+func SortedModelIDs(models map[string]PublicModel) []string {
 	ids := make([]string, 0, len(models))
 	for id := range models {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool {
-		return modelSortRank(ids[i]) < modelSortRank(ids[j])
+		return CompareModelIDs(ids[i], ids[j]) < 0
 	})
 	return ids
+}
+
+// SortPublicModels applies the public model catalog order and keeps provider
+// IDs as a deterministic tie-breaker when multiple providers expose the same
+// model id.
+func SortPublicModels(models []PublicModel) {
+	sort.Slice(models, func(i, j int) bool {
+		if compare := CompareModelIDs(models[i].ID, models[j].ID); compare != 0 {
+			return compare < 0
+		}
+		return models[i].ProviderID < models[j].ProviderID
+	})
+}
+
+// CompareModelIDs orders model ids using the migrated TypeScript priority
+// rules.
+func CompareModelIDs(left string, right string) int {
+	leftRank := modelSortRank(left)
+	rightRank := modelSortRank(right)
+	if leftRank < rightRank {
+		return -1
+	}
+	if leftRank > rightRank {
+		return 1
+	}
+	return 0
 }
 
 func modelSortRank(id string) string {

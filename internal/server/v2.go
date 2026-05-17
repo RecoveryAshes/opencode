@@ -220,10 +220,11 @@ func v2Models() http.HandlerFunc {
 		}
 		result := []llm.PublicModel{}
 		for _, provider := range llm.ListProviders(cfg.Info).All {
-			for _, id := range sortedModelIDs(provider.Models) {
+			for _, id := range llm.SortedModelIDs(provider.Models) {
 				result = append(result, provider.Models[id])
 			}
 		}
+		llm.SortPublicModels(result)
 		return result, http.StatusOK, nil
 	})
 }
@@ -468,15 +469,6 @@ func promptText(value any) string {
 		}
 	}
 	return ""
-}
-
-func sortedModelIDs(models map[string]llm.PublicModel) []string {
-	ids := make([]string, 0, len(models))
-	for id := range models {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	return ids
 }
 
 func stringValueMap(input map[string]any, key string) string {

@@ -1758,6 +1758,15 @@ func TestV2HTTPAPICompatibility(t *testing.T) {
 		t.Fatalf("provider = %#v, want local-ai", provider)
 	}
 
+	resp, err = http.Get(server.URL + "/api/provider/missing?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /api/provider/missing error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing provider status = %d, want 404", resp.StatusCode)
+	}
+
 	resp, err = http.Get(server.URL + "/api/model?directory=" + urlQueryEscape(root))
 	if err != nil {
 		t.Fatalf("GET /api/model error = %v", err)
@@ -1769,6 +1778,9 @@ func TestV2HTTPAPICompatibility(t *testing.T) {
 	}
 	if !hasModel(models, "local-ai", "local-model") {
 		t.Fatalf("models = %#v, want local model", models)
+	}
+	if len(models) == 0 || models[0]["id"] != "claude-sonnet-4-5" {
+		t.Fatalf("models = %#v, want catalog-priority model first", models)
 	}
 }
 
