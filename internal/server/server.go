@@ -178,6 +178,10 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/experimental/workspace/warp", workspaceWarp(opts.Workspace))
 	mux.HandleFunc("/experimental/workspace/", workspaceByID(opts.Workspace))
 	mux.HandleFunc("/experimental/workspace", workspaceRoot(opts.Workspace))
+	mux.HandleFunc("/experimental/tool/ids", experimentalToolIDs())
+	mux.HandleFunc("/experimental/tool", experimentalToolList())
+	mux.HandleFunc("/experimental/worktree/reset", experimentalWorktreeReset(opts.Workspace))
+	mux.HandleFunc("/experimental/worktree", experimentalWorktreeRoot(opts.Workspace))
 	mux.HandleFunc("/question/", questionByID(opts.Interact, opts.Events))
 	mux.HandleFunc("/question", questions(opts.Interact))
 	mux.HandleFunc("/permission/", permissionByID(opts.Interact, opts.Events))
@@ -309,6 +313,20 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/experimental/workspace/{workspaceID}": map[string]any{
 				"delete": map[string]any{"operationId": "experimental.workspace.remove"},
+			},
+			"/experimental/tool": map[string]any{
+				"get": map[string]any{"operationId": "tool.list"},
+			},
+			"/experimental/tool/ids": map[string]any{
+				"get": map[string]any{"operationId": "tool.ids"},
+			},
+			"/experimental/worktree": map[string]any{
+				"get":    map[string]any{"operationId": "worktree.list"},
+				"post":   map[string]any{"operationId": "worktree.create"},
+				"delete": map[string]any{"operationId": "worktree.remove"},
+			},
+			"/experimental/worktree/reset": map[string]any{
+				"post": map[string]any{"operationId": "worktree.reset"},
 			},
 			"/question": map[string]any{
 				"get": map[string]any{"operationId": "question.list"},

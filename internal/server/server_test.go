@@ -1428,6 +1428,125 @@ func TestProjectInitGitHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestExperimentalToolHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(NewHandler(Options{}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/experimental/tool/ids")
+	if err != nil {
+		t.Fatalf("GET /experimental/tool/ids error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var ids []string
+	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+		t.Fatalf("decode ids: %v", err)
+	}
+	if !stringSliceContains(ids, "read") || !stringSliceContains(ids, "apply_patch") {
+		t.Fatalf("ids = %#v, want migrated tool ids", ids)
+	}
+
+	resp, err = http.Get(server.URL + "/experimental/tool?provider=openai&model=gpt")
+	if err != nil {
+		t.Fatalf("GET /experimental/tool error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var tools []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tools); err != nil {
+		t.Fatalf("decode tools: %v", err)
+	}
+	if !hasToolWithParameters(tools, "read") {
+		t.Fatalf("tools = %#v, want read tool with parameters", tools)
+	}
+}
+
+func TestExperimentalWorktreeHTTPAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	root := t.TempDir()
+	root = serverRealPath(t, root)
+	runServerCommand(t, root, "git", "init", "--quiet")
+	runServerCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runServerCommand(t, root, "git", "config", "user.name", "Test User")
+	writeServerFile(t, filepath.Join(root, "README.md"), "hello\n")
+	runServerCommand(t, root, "git", "add", "README.md")
+	runServerCommand(t, root, "git", "commit", "--quiet", "-m", "init")
+
+	server := httptest.NewServer(NewHandler(Options{Workspace: integration.NewWorkspaceStore()}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/experimental/worktree?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /experimental/worktree error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var directories []string
+	if err := json.NewDecoder(resp.Body).Decode(&directories); err != nil {
+		t.Fatalf("decode worktrees: %v", err)
+	}
+	if len(directories) != 0 {
+		t.Fatalf("directories = %#v, want empty before create", directories)
+	}
+
+	resp, err = http.Post(server.URL+"/experimental/worktree?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"name":"review"}`))
+	if err != nil {
+		t.Fatalf("POST /experimental/worktree error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create worktree status = %d, want 200", resp.StatusCode)
+	}
+	var created map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created worktree: %v", err)
+	}
+	directory, _ := created["directory"].(string)
+	if created["name"] != "review" || created["branch"] != "opencode/review" || directory == "" {
+		t.Fatalf("created = %#v, want named worktree", created)
+	}
+
+	resp, err = http.Get(server.URL + "/experimental/worktree?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /experimental/worktree after create error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&directories); err != nil {
+		t.Fatalf("decode worktrees after create: %v", err)
+	}
+	if len(directories) != 1 || directories[0] != directory {
+		t.Fatalf("directories = %#v, want created worktree directory", directories)
+	}
+
+	writeServerFile(t, filepath.Join(directory, "scratch.txt"), "scratch\n")
+	resp, err = http.Post(server.URL+"/experimental/worktree/reset?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"directory":`+quoteJSON(directory)+`}`))
+	if err != nil {
+		t.Fatalf("POST /experimental/worktree/reset error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reset worktree status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "scratch.txt")); !os.IsNotExist(err) {
+		t.Fatalf("scratch.txt exists after reset, stat err = %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/experimental/worktree?directory="+urlQueryEscape(root), strings.NewReader(`{"directory":`+quoteJSON(directory)+`}`))
+	if err != nil {
+		t.Fatalf("new delete worktree request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /experimental/worktree error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete worktree status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory exists after delete, stat err = %v", err)
+	}
+}
+
 type serverFakeChatClient struct {
 	request llm.ChatRequest
 }
@@ -1528,6 +1647,26 @@ func serverRealPath(t *testing.T, path string) string {
 func hasNamedItem(items []map[string]any, name string) bool {
 	for _, item := range items {
 		if item["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolWithParameters(items []map[string]any, id string) bool {
+	for _, item := range items {
+		if item["id"] != id {
+			continue
+		}
+		parameters, ok := item["parameters"].(map[string]any)
+		return ok && parameters["type"] == "object"
+	}
+	return false
+}
+
+func stringSliceContains(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
 			return true
 		}
 	}

@@ -61,6 +61,24 @@ type WorkspaceWarpInput struct {
 	CopyChanges bool    `json:"copyChanges,omitempty"`
 }
 
+// WorktreeInfo is the experimental worktree DTO.
+type WorktreeInfo struct {
+	Name      string `json:"name"`
+	Branch    string `json:"branch,omitempty"`
+	Directory string `json:"directory"`
+}
+
+// WorktreeCreateInput is the POST /experimental/worktree payload.
+type WorktreeCreateInput struct {
+	Name         string `json:"name,omitempty"`
+	StartCommand string `json:"startCommand,omitempty"`
+}
+
+// WorktreeDirectoryInput is used by worktree remove and reset endpoints.
+type WorktreeDirectoryInput struct {
+	Directory string `json:"directory"`
+}
+
 // WorkspaceStore stores local experimental workspaces for the Go sidecar.
 type WorkspaceStore struct {
 	mu         sync.RWMutex
@@ -323,6 +341,133 @@ func (store *WorkspaceStore) WarpWorkspaceSession(_ context.Context, input Works
 	return nil
 }
 
+// ListWorktreeDirectories returns sandbox worktree directories for the current project.
+func (store *WorkspaceStore) ListWorktreeDirectories(ctx context.Context, directory string) ([]string, error) {
+	project, err := CurrentProject(ctx, directory)
+	if err != nil {
+		return nil, err
+	}
+	if project.VCS != "git" {
+		return []string{}, nil
+	}
+	items, err := gitWorktreeList(ctx, project.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	result := []string{}
+	for _, item := range items {
+		if item.path == "" || samePath(item.path, project.Worktree) {
+			continue
+		}
+		result = append(result, item.path)
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+// CreateWorktree creates a git sandbox worktree with a branch.
+func (store *WorkspaceStore) CreateWorktree(ctx context.Context, directory string, input WorktreeCreateInput) (WorktreeInfo, error) {
+	project, err := CurrentProject(ctx, directory)
+	if err != nil {
+		return WorktreeInfo{}, err
+	}
+	if project.VCS != "git" {
+		return WorktreeInfo{}, fmt.Errorf("worktrees are only supported for git projects")
+	}
+	name := slugifyWorkspaceName(input.Name)
+	root := filepath.Join(globalStateDir(userHomeDir()), "worktree", project.ID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return WorktreeInfo{}, fmt.Errorf("create worktree root: %w", err)
+	}
+	target := filepath.Join(root, name)
+	branch := "opencode/" + name
+	for suffix := 2; pathExists(target) || gitRefExists(ctx, project.Worktree, branch); suffix++ {
+		name = fmt.Sprintf("%s-%d", slugifyWorkspaceName(input.Name), suffix)
+		target = filepath.Join(root, name)
+		branch = "opencode/" + name
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--no-checkout", "-b", branch, target, "HEAD")
+	cmd.Dir = project.Worktree
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = "failed to create git worktree"
+		}
+		return WorktreeInfo{}, fmt.Errorf("%s: %w", message, err)
+	}
+	if output, err := gitCombined(ctx, target, "reset", "--hard"); err != nil {
+		return WorktreeInfo{}, fmt.Errorf("%s: %w", defaultMessage(output, "failed to populate git worktree"), err)
+	}
+	if strings.TrimSpace(input.StartCommand) != "" {
+		if err := runShellCommand(ctx, target, input.StartCommand); err != nil {
+			return WorktreeInfo{}, err
+		}
+	}
+	if realTarget, err := filepath.EvalSymlinks(target); err == nil {
+		target = realTarget
+	}
+	return WorktreeInfo{Name: filepath.Base(target), Branch: branch, Directory: target}, nil
+}
+
+// RemoveWorktree removes a git sandbox worktree.
+func (store *WorkspaceStore) RemoveWorktree(ctx context.Context, directory string, input WorktreeDirectoryInput) (bool, error) {
+	project, err := CurrentProject(ctx, directory)
+	if err != nil {
+		return false, err
+	}
+	if project.VCS != "git" {
+		return false, fmt.Errorf("worktrees are only supported for git projects")
+	}
+	if input.Directory == "" {
+		return false, fmt.Errorf("directory is required")
+	}
+	return true, removeGitWorktree(ctx, project.Worktree, input.Directory)
+}
+
+// ResetWorktree resets and cleans a sandbox worktree to the current project HEAD.
+func (store *WorkspaceStore) ResetWorktree(ctx context.Context, directory string, input WorktreeDirectoryInput) (bool, error) {
+	project, err := CurrentProject(ctx, directory)
+	if err != nil {
+		return false, err
+	}
+	if project.VCS != "git" {
+		return false, fmt.Errorf("worktrees are only supported for git projects")
+	}
+	if input.Directory == "" {
+		return false, fmt.Errorf("directory is required")
+	}
+	if samePath(project.Worktree, input.Directory) {
+		return false, fmt.Errorf("cannot reset the primary workspace")
+	}
+	items, err := gitWorktreeList(ctx, project.Worktree)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for _, item := range items {
+		if samePath(item.path, input.Directory) {
+			found = true
+			input.Directory = item.path
+			break
+		}
+	}
+	if !found {
+		return false, fmt.Errorf("worktree not found")
+	}
+	if output, err := gitCombined(ctx, input.Directory, "reset", "--hard", "HEAD"); err != nil {
+		return false, fmt.Errorf("%s: %w", defaultMessage(output, "failed to reset worktree"), err)
+	}
+	if output, err := gitCombined(ctx, input.Directory, "clean", "-ffdx"); err != nil {
+		return false, fmt.Errorf("%s: %w", defaultMessage(output, "failed to clean worktree"), err)
+	}
+	if status := strings.TrimSpace(gitText(ctx, input.Directory, "-c", "core.fsmonitor=false", "status", "--porcelain=v1")); status != "" {
+		return false, fmt.Errorf("worktree reset left local changes:\n%s", status)
+	}
+	return true, nil
+}
+
 func (store *WorkspaceStore) upsertProject(project ProjectInfo) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -461,6 +606,15 @@ func gitWorktreeList(ctx context.Context, directory string) ([]gitWorktreeEntry,
 }
 
 func removeGitWorktree(ctx context.Context, root string, directory string) error {
+	var branch string
+	if entries, err := gitWorktreeList(ctx, root); err == nil {
+		for _, entry := range entries {
+			if samePath(entry.path, directory) {
+				branch = strings.TrimPrefix(entry.branch, "refs/heads/")
+				break
+			}
+		}
+	}
 	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", "--force", directory)
 	cmd.Dir = root
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -472,7 +626,35 @@ func removeGitWorktree(ctx context.Context, root string, directory string) error
 		return fmt.Errorf("%s: %w", message, err)
 	}
 	_ = os.RemoveAll(directory)
+	if branch != "" {
+		_, _ = gitCombined(ctx, root, "branch", "-D", branch)
+	}
 	return nil
+}
+
+func gitCombined(ctx context.Context, directory string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = directory
+	output, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(output)), err
+}
+
+func runShellCommand(ctx context.Context, directory string, command string) error {
+	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd.Dir = directory
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", defaultMessage(strings.TrimSpace(string(output)), "worktree start command failed"), err)
+	}
+	return nil
+}
+
+func defaultMessage(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func newWorkspaceID() string {

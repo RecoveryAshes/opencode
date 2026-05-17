@@ -36,6 +36,13 @@ type Tool struct {
 	Category string `json:"category"`
 }
 
+// ToolListItem mirrors the experimental tool registry HTTP contract.
+type ToolListItem struct {
+	ID          string     `json:"id"`
+	Description string     `json:"description"`
+	Parameters  JSONSchema `json:"parameters"`
+}
+
 // Request describes one Go tool execution.
 type Request struct {
 	Name      string         `json:"name"`
@@ -60,6 +67,24 @@ func ToolNames() []string {
 	result := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		result = append(result, tool.Name)
+	}
+	return result
+}
+
+// ToolIDs returns tool identifiers in stable registry order.
+func ToolIDs() []string {
+	return ToolNames()
+}
+
+// ToolList returns provider-facing tool descriptors for the local Go registry.
+func ToolList() []ToolListItem {
+	result := make([]ToolListItem, 0, len(tools))
+	for _, tool := range tools {
+		result = append(result, ToolListItem{
+			ID:          tool.Name,
+			Description: toolDescription(tool.Name),
+			Parameters:  ToolSchema(tool.Name),
+		})
 	}
 	return result
 }
@@ -125,6 +150,47 @@ var tools = []Tool{
 	{Name: "skill", Category: "plugin"},
 	{Name: "repo_clone", Category: "git"},
 	{Name: "repo_overview", Category: "git"},
+}
+
+func toolDescription(name string) string {
+	switch name {
+	case "read":
+		return "Read a file or directory from the local filesystem."
+	case "write":
+		return "Write a file to the local filesystem."
+	case "edit":
+		return "Perform exact string replacements in files."
+	case "apply_patch":
+		return "Apply a structured patch to local files."
+	case "shell":
+		return "Run a shell command in the workspace."
+	case "glob":
+		return "Fast file pattern matching across the workspace."
+	case "grep":
+		return "Fast content search across the workspace."
+	case "lsp":
+		return "Query language server features such as symbols and hover."
+	case "task":
+		return "Launch a subagent task."
+	case "task_status":
+		return "Poll a background subagent task."
+	case "webfetch":
+		return "Fetch content from a URL."
+	case "websearch":
+		return "Search the web for current information."
+	case "question":
+		return "Ask the user for structured input."
+	case "todo", "todowrite":
+		return "Create and maintain a structured task list."
+	case "skill":
+		return "Load a specialized skill by name."
+	case "repo_clone":
+		return "Clone or refresh a repository in the managed cache."
+	case "repo_overview":
+		return "Summarize a cached or local repository structure."
+	default:
+		return name
+	}
 }
 
 func readTool(request Request) (Result, error) {
