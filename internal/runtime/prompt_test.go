@@ -171,6 +171,47 @@ func TestPromptRuntimeUsesConfiguredDefaultModel(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeInheritsPreviousUserModel(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemorySessionStore()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(`{
+		"model": "custom-only/model"
+	}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	info, err := store.Create(ctx, session.CreateInput{Title: "chat"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openrouter", ModelID: "openai/gpt-4o-mini"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "first"}}},
+	}); err != nil {
+		t.Fatalf("CreatePrompt(first) error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, info.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "second"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt(second) error = %v", err)
+	}
+	t.Setenv("OPENROUTER_BASE_URL", "https://local.openrouter.test/api/v1")
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{Messages: store, Client: client, CWD: root, Root: root}
+
+	assistant, err := runtime.Reply(ctx, info.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "openrouter" || client.request.Model != "openai/gpt-4o-mini" {
+		t.Fatalf("provider request = %#v, want previous user model", client.request)
+	}
+	if assistant.Info.ProviderID != "openrouter" || assistant.Info.ModelID != "openai/gpt-4o-mini" {
+		t.Fatalf("assistant info = %#v, want previous user model", assistant.Info)
+	}
+}
+
 func TestPromptRuntimeFallsBackFromUnresolvedConfiguredDefaultModel(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()

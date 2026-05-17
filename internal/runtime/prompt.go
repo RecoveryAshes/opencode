@@ -63,7 +63,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 	if err != nil {
 		return session.WithParts{}, err
 	}
-	model, configuredDefault := modelRef(userMessage, providerConfig)
+	model, configuredDefault := modelRef(userMessage, providerConfig, transcript)
 	response, tools, usage, effectiveModel, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, localToolDefinitions(userMessage.Info.Tools), providerConfig, configuredDefault)
 	if err != nil {
 		return session.WithParts{}, err
@@ -720,9 +720,18 @@ func textContent(parts []session.Part) string {
 	return output.String()
 }
 
-func modelRef(message session.WithParts, info config.Info) (session.ModelRef, bool) {
+func modelRef(message session.WithParts, info config.Info, transcript []session.WithParts) (session.ModelRef, bool) {
 	if message.Info.Model != nil {
 		return *message.Info.Model, false
+	}
+	for index := len(transcript) - 1; index >= 0; index-- {
+		candidate := transcript[index]
+		if candidate.Info.ID == message.Info.ID {
+			continue
+		}
+		if candidate.Info.Role == "user" && candidate.Info.Model != nil {
+			return *candidate.Info.Model, false
+		}
 	}
 	if configured := stringFromConfig(info["model"]); configured != "" {
 		providerID, modelID := parseModelRef(configured)
