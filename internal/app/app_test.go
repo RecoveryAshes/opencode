@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +242,75 @@ func TestRunSessionUsesOPENCODEDB(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("OPENCODE_DB database was not created: %v", err)
+	}
+}
+
+func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("llm path = %s, want /chat/completions", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer local-key" {
+			t.Fatalf("authorization = %q, want bearer local-key", r.Header.Get("Authorization"))
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode llm request: %v", err)
+		}
+		if request["model"] != "local-model" {
+			t.Fatalf("model = %#v, want local-model", request["model"])
+		}
+		messages, ok := request["messages"].([]any)
+		if !ok || len(messages) != 1 {
+			t.Fatalf("messages = %#v, want one message", request["messages"])
+		}
+		first, ok := messages[0].(map[string]any)
+		if !ok || first["role"] != "user" || first["content"] != "hello llm" {
+			t.Fatalf("first message = %#v, want user hello llm", messages[0])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"assistant from go"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`))
+	}))
+	defer llmServer.Close()
+
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", llmServer.URL)
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	created := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "create", "--title", "Chat",
+	})
+	sessionID := created["id"].(string)
+
+	assistant := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "prompt", "--text", "hello llm", "--model", "local-model", sessionID,
+	})
+	info, ok := assistant["info"].(map[string]any)
+	if !ok || info["role"] != "assistant" || info["finish"] != "stop" {
+		t.Fatalf("assistant info = %#v, want assistant stop", assistant["info"])
+	}
+	if info["providerID"] != "openai-compatible" || info["modelID"] != "local-model" {
+		t.Fatalf("assistant model info = %#v, want openai-compatible/local-model", info)
+	}
+	parts, ok := assistant["parts"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("assistant parts = %#v, want text and step-finish", assistant["parts"])
+	}
+	firstPart, ok := parts[0].(map[string]any)
+	if !ok || firstPart["type"] != "text" || firstPart["text"] != "assistant from go" {
+		t.Fatalf("assistant first part = %#v, want text reply", parts[0])
+	}
+
+	messages := runAppJSON[[]map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "messages", sessionID,
+	})
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want user and assistant", messages)
+	}
+	secondInfo, ok := messages[1]["info"].(map[string]any)
+	if !ok || secondInfo["id"] != info["id"] {
+		t.Fatalf("second message info = %#v, want assistant id %#v", messages[1]["info"], info["id"])
 	}
 }
 

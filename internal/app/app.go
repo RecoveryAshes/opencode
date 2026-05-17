@@ -16,6 +16,7 @@ import (
 	"github.com/RecoveryAshes/opencode/internal/domain/session/retry"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/runtime"
 	"github.com/RecoveryAshes/opencode/internal/server"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
@@ -363,6 +364,14 @@ func sessionPrompt(ctx context.Context, repo server.MessageRepository, args []st
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create prompt failed: %v\n", err)
 		return 1
+	}
+	if !*noReply {
+		assistant, err := runtime.NewPromptRuntime(repo).Reply(ctx, id, result)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "create assistant reply failed: %v\n", err)
+			return 1
+		}
+		return writeJSON(stdout, assistant)
 	}
 	return writeJSON(stdout, result)
 }
