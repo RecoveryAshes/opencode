@@ -1,5 +1,6 @@
 import { $ } from "bun"
 
-await $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`
+import { buildGoSidecar } from "./utils"
 
-await $`cd ../opencode && bun script/build-node.ts`
+await $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`
+await buildGoSidecar()

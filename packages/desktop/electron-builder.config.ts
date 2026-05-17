@@ -35,6 +35,11 @@ const getBase = (): Configuration => ({
   files: ["out/**/*", "resources/**/*"],
   extraResources: [
     {
+      from: "out/bin/",
+      to: "bin/",
+      filter: ["opencode", "opencode.exe", "opencode-sidecar", "opencode-sidecar.exe"],
+    },
+    {
       from: "native/",
       to: "native/",
       filter: ["index.js", "index.d.ts", "build/Release/mac_window.node", "swift-build/**"],

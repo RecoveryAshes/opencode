@@ -1,4 +1,5 @@
 import { $ } from "bun"
+import * as path from "node:path"
 
 export type Channel = "dev" | "beta" | "prod"
 
@@ -69,6 +70,28 @@ export async function copyBinaryToSidecarFolder(source: string) {
   if (process.platform === "darwin") await $`codesign --force --sign - ${dest}`
 
   console.log(`Copied ${source} to ${dest}`)
+}
+
+export async function buildGoSidecar() {
+  const ext = process.platform === "win32" ? ".exe" : ""
+  const outDir = path.join("out", "bin")
+  const sidecar = path.join(outDir, `opencode-sidecar${ext}`)
+  const cli = path.join(outDir, `opencode${ext}`)
+  const rootDir = path.resolve("../..")
+
+  await $`mkdir -p ${outDir}`
+  await $`go build -trimpath -o ${sidecar} ${path.join(rootDir, "cmd", "opencode-sidecar")}`
+  await $`go build -trimpath -o ${cli} ${path.join(rootDir, "cmd", "opencode")}`
+  await ensureExecutable(sidecar)
+  await ensureExecutable(cli)
+
+  console.log(`Built Go sidecar at ${sidecar}`)
+  console.log(`Built Go CLI at ${cli}`)
+}
+
+async function ensureExecutable(target: string) {
+  if (process.platform === "win32") return
+  await $`chmod 755 ${target}`
 }
 
 export function windowsify(path: string) {
