@@ -59,6 +59,38 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 			baseURL:   "https://local.together.test/v1",
 			apiKeyEnv: "TOGETHER_AI_API_KEY",
 		},
+		{
+			name:      "baseten",
+			provider:  "baseten",
+			envKey:    "BASETEN_BASE_URL",
+			envValue:  "https://local.baseten.test/v1",
+			baseURL:   "https://local.baseten.test/v1",
+			apiKeyEnv: "BASETEN_API_KEY",
+		},
+		{
+			name:      "deepseek",
+			provider:  "deepseek",
+			envKey:    "DEEPSEEK_BASE_URL",
+			envValue:  "https://local.deepseek.test/v1",
+			baseURL:   "https://local.deepseek.test/v1",
+			apiKeyEnv: "DEEPSEEK_API_KEY",
+		},
+		{
+			name:      "fireworks",
+			provider:  "fireworks",
+			envKey:    "FIREWORKS_BASE_URL",
+			envValue:  "https://local.fireworks.test/v1",
+			baseURL:   "https://local.fireworks.test/v1",
+			apiKeyEnv: "FIREWORKS_API_KEY",
+		},
+		{
+			name:      "perplexity",
+			provider:  "perplexity",
+			envKey:    "PERPLEXITY_BASE_URL",
+			envValue:  "https://local.perplexity.test",
+			baseURL:   "https://local.perplexity.test",
+			apiKeyEnv: "PERPLEXITY_API_KEY",
+		},
 	}
 
 	for _, test := range tests {
