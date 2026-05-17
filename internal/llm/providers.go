@@ -634,6 +634,10 @@ func cloneProviderAnyMap(input map[string]any) map[string]any {
 	}
 	result := make(map[string]any, len(input))
 	for key, value := range input {
+		if nested, ok := value.(map[string]any); ok {
+			result[key] = cloneProviderAnyMap(nested)
+			continue
+		}
 		result[key] = value
 	}
 	return result
@@ -642,6 +646,14 @@ func cloneProviderAnyMap(input map[string]any) map[string]any {
 func mergeProviderAnyMap(left map[string]any, right map[string]any) map[string]any {
 	result := cloneProviderAnyMap(left)
 	for key, value := range right {
+		if rightMap, ok := value.(map[string]any); ok {
+			if leftMap, ok := result[key].(map[string]any); ok {
+				result[key] = mergeProviderAnyMap(leftMap, rightMap)
+				continue
+			}
+			result[key] = cloneProviderAnyMap(rightMap)
+			continue
+		}
 		result[key] = value
 	}
 	return result

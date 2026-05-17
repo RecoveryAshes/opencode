@@ -195,6 +195,36 @@ func TestConfiguredModelIDUsesKeyForPublicIDAndIDForAPI(t *testing.T) {
 	}
 }
 
+func TestMergePublicProviderDeepMergesOptions(t *testing.T) {
+	base := PublicProvider{
+		ID: "anthropic",
+		Options: map[string]any{
+			"headers": map[string]any{
+				"anthropic-beta": "base",
+			},
+			"timeout": 300000,
+		},
+	}
+	override := PublicProvider{
+		ID: "anthropic",
+		Options: map[string]any{
+			"headers": map[string]any{
+				"X-Custom": "custom",
+			},
+			"chunkTimeout": 15000,
+		},
+	}
+
+	got := mergePublicProvider(base, override)
+	headers := got.Options["headers"].(map[string]any)
+	if headers["anthropic-beta"] != "base" || headers["X-Custom"] != "custom" {
+		t.Fatalf("headers = %#v, want deep merge", headers)
+	}
+	if got.Options["timeout"] != 300000 || got.Options["chunkTimeout"] != 15000 {
+		t.Fatalf("options = %#v, want preserved and override options", got.Options)
+	}
+}
+
 func TestSortPublicModelsUsesCatalogPriority(t *testing.T) {
 	models := []PublicModel{
 		{ID: "z-local", ProviderID: "local"},
