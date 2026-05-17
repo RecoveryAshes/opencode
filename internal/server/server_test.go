@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/llm"
@@ -320,6 +323,86 @@ func TestOpenAPIAndEvent(t *testing.T) {
 	}
 }
 
+func TestEventStreamPublishesSessionAndMessageEvents(t *testing.T) {
+	store := storage.NewMemorySessionStore()
+	server := httptest.NewServer(NewHandler(Options{
+		Version:  "test",
+		Sessions: store,
+		Runtime: &runtime.PromptRuntime{
+			Messages: store,
+			Client:   &serverFakeChatClient{},
+		},
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
+	if err != nil {
+		t.Fatalf("new event request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /event error = %v", err)
+	}
+	defer closeBody(t, resp)
+
+	events := make(chan event, 16)
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		readSSEEvents(resp, events, errs)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	if got := waitEventType(t, events, errs, "server.connected"); got.Properties["version"] != "test" {
+		t.Fatalf("connected event = %#v, want version test", got)
+	}
+
+	createResp, err := http.Post(server.URL+"/session", "application/json", strings.NewReader(`{"title":"events"}`))
+	if err != nil {
+		t.Fatalf("POST /session error = %v", err)
+	}
+	defer closeBody(t, createResp)
+	var created session.Info
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+	if got := waitEventType(t, events, errs, "session.created"); got.Properties["sessionID"] != string(created.ID) {
+		t.Fatalf("session.created = %#v, want session id %s", got, created.ID)
+	}
+
+	body := `{"agent":"build","parts":[{"type":"text","text":"hello"}]}`
+	promptResp, err := http.Post(server.URL+"/session/"+string(created.ID)+"/message", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /session/id/message error = %v", err)
+	}
+	defer closeBody(t, promptResp)
+	if promptResp.StatusCode != http.StatusOK {
+		t.Fatalf("prompt status = %d, want 200", promptResp.StatusCode)
+	}
+	if got := waitEventType(t, events, errs, "message.updated"); got.Properties["sessionID"] != string(created.ID) {
+		t.Fatalf("message.updated = %#v, want session id %s", got, created.ID)
+	}
+	if got := waitEventType(t, events, errs, "message.part.updated"); got.Properties["sessionID"] != string(created.ID) {
+		t.Fatalf("message.part.updated = %#v, want session id %s", got, created.ID)
+	}
+
+	toolResp, err := http.Post(server.URL+"/tool/write", "application/json", strings.NewReader(`{"params":{"filePath":`+quoteJSON(filepath.Join(t.TempDir(), "event.txt"))+`,"content":"event"}}`))
+	if err != nil {
+		t.Fatalf("POST /tool/write error = %v", err)
+	}
+	defer closeBody(t, toolResp)
+	if got := waitEventType(t, events, errs, "tool.executed"); got.Properties["tool"] != "write" {
+		t.Fatalf("tool.executed = %#v, want write", got)
+	}
+}
+
 type serverFakeChatClient struct {
 	request llm.ChatRequest
 }
@@ -386,6 +469,58 @@ func quoteJSON(value string) string {
 
 func urlQueryEscape(value string) string {
 	return url.QueryEscape(value)
+}
+
+func readSSEEvents(resp *http.Response, events chan<- event, errs chan<- error) {
+	scanner := bufio.NewScanner(resp.Body)
+	var data string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data:") {
+			data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			continue
+		}
+		if line != "" || data == "" {
+			continue
+		}
+		var item event
+		if err := json.Unmarshal([]byte(data), &item); err != nil {
+			select {
+			case errs <- err:
+			default:
+			}
+			return
+		}
+		select {
+		case events <- item:
+		default:
+		}
+		data = ""
+	}
+	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "context canceled") {
+		select {
+		case errs <- err:
+		default:
+		}
+	}
+}
+
+func waitEventType(t *testing.T, events <-chan event, errs <-chan error, eventType string) event {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case err := <-errs:
+			t.Fatalf("read SSE event error: %v", err)
+		case item := <-events:
+			if item.Type == eventType {
+				return item
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for event %s", eventType)
+		}
+	}
 }
 
 func closeBody(t *testing.T, resp *http.Response) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,6 +32,7 @@ type Options struct {
 	Runtime  *runtime.PromptRuntime
 	MCP      *integration.MCPManager
 	PTY      *integration.PTYManager
+	Events   *eventBus
 }
 
 // SessionRepository is the storage contract required by the HTTP server.
@@ -110,6 +112,9 @@ func NewHandler(opts Options) http.Handler {
 	if opts.PTY == nil {
 		opts.PTY = integration.NewPTYManager()
 	}
+	if opts.Events == nil {
+		opts.Events = newEventBus()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{
@@ -121,12 +126,12 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/openapi.json", handleJSON(func(_ *http.Request) (any, int, error) {
 		return OpenAPI(opts.Version), http.StatusOK, nil
 	}))
-	mux.HandleFunc("/event", handleEvent(opts.Version))
+	mux.HandleFunc("/event", handleEvent(opts.Version, opts.Events))
 	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{}, http.StatusOK, nil
 	}))
-	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime))
-	mux.HandleFunc("/session", sessions(opts.Sessions))
+	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
+	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
 	mux.HandleFunc("/command", commands())
 	mux.HandleFunc("/provider", handleJSON(func(_ *http.Request) (any, int, error) {
 		return llm.AllProviders(), http.StatusOK, nil
@@ -141,7 +146,7 @@ func NewHandler(opts Options) http.Handler {
 	}))
 	mux.HandleFunc("/pty/", ptyByID(opts.PTY))
 	mux.HandleFunc("/pty", ptyRoot(opts.PTY))
-	mux.HandleFunc("/tool/", toolByName())
+	mux.HandleFunc("/tool/", toolByName(opts.Events))
 	mux.HandleFunc("/tool", tools())
 	return withCommonHeaders(mux)
 }
@@ -263,7 +268,7 @@ func tools() http.HandlerFunc {
 	})
 }
 
-func toolByName() http.HandlerFunc {
+func toolByName(events *eventBus) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		if r.Method != http.MethodPost {
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -285,11 +290,15 @@ func toolByName() http.HandlerFunc {
 		if err != nil {
 			return nil, integration.HTTPStatus(err), err
 		}
+		events.publish("tool.executed", map[string]any{
+			"tool":   name,
+			"result": result,
+		})
 		return result, http.StatusOK, nil
 	})
 }
 
-func sessions(repo session.Repository) http.HandlerFunc {
+func sessions(repo session.Repository, events *eventBus) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		switch r.Method {
 		case http.MethodGet:
@@ -310,6 +319,12 @@ func sessions(repo session.Repository) http.HandlerFunc {
 				}
 			}
 			result, err := repo.Create(r.Context(), input)
+			if err == nil {
+				events.publish("session.created", map[string]any{
+					"sessionID": result.ID,
+					"info":      result,
+				})
+			}
 			return result, http.StatusOK, err
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -317,14 +332,14 @@ func sessions(repo session.Repository) http.HandlerFunc {
 	})
 }
 
-func sessionByID(repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) http.HandlerFunc {
+func sessionByID(repo session.Repository, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus) http.HandlerFunc {
 	return handleJSON(func(r *http.Request) (any, int, error) {
 		id, remainder, err := parseSessionPath(r.URL.Path)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
 		if remainder != "" {
-			return sessionSubresource(r, id, remainder, messages, promptRuntime)
+			return sessionSubresource(r, id, remainder, messages, promptRuntime, events)
 		}
 
 		switch r.Method {
@@ -337,11 +352,22 @@ func sessionByID(repo session.Repository, messages session.MessageRepository, pr
 				return nil, http.StatusBadRequest, err
 			}
 			result, err := repo.Update(r.Context(), id, input)
+			if err == nil {
+				events.publish("session.updated", map[string]any{
+					"sessionID": id,
+					"info":      result,
+				})
+			}
 			return result, statusFromError(err), err
 		case http.MethodDelete:
+			info, _ := repo.Get(r.Context(), id)
 			if err := repo.Remove(r.Context(), id); err != nil {
 				return nil, statusFromError(err), err
 			}
+			events.publish("session.deleted", map[string]any{
+				"sessionID": id,
+				"info":      info,
+			})
 			return true, http.StatusOK, nil
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -349,7 +375,7 @@ func sessionByID(repo session.Repository, messages session.MessageRepository, pr
 	})
 }
 
-func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime) (any, int, error) {
+func sessionSubresource(r *http.Request, sessionID session.ID, path string, messages session.MessageRepository, promptRuntime *runtime.PromptRuntime, events *eventBus) (any, int, error) {
 	parts := strings.Split(path, "/")
 	if len(parts) == 1 && parts[0] == "command" {
 		switch r.Method {
@@ -359,6 +385,9 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 				return nil, http.StatusBadRequest, err
 			}
 			result, err := executeSessionCommand(r.Context(), sessionID, input, messages, promptRuntime)
+			if err == nil {
+				publishMessageEvents(events, sessionID, result)
+			}
 			return result, statusFromError(err), err
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -382,10 +411,13 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 			if err != nil {
 				return result, statusFromError(err), err
 			}
+			publishMessageEvents(events, sessionID, result)
 			if !input.NoReply && promptRuntime != nil {
-				if _, err := promptRuntime.Reply(r.Context(), sessionID, result); err != nil {
+				assistant, err := promptRuntime.Reply(r.Context(), sessionID, result)
+				if err != nil {
 					return nil, statusFromError(err), err
 				}
+				publishMessageEvents(events, sessionID, assistant)
 			}
 			return result, http.StatusOK, nil
 		default:
@@ -400,6 +432,12 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 			return result, statusFromError(err), err
 		case http.MethodDelete:
 			err := messages.RemoveMessage(r.Context(), sessionID, messageID)
+			if err == nil {
+				events.publish("message.removed", map[string]any{
+					"sessionID": sessionID,
+					"messageID": messageID,
+				})
+			}
 			return true, statusFromError(err), err
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -411,6 +449,13 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 		switch r.Method {
 		case http.MethodDelete:
 			err := messages.RemovePart(r.Context(), sessionID, messageID, partID)
+			if err == nil {
+				events.publish("message.part.removed", map[string]any{
+					"sessionID": sessionID,
+					"messageID": messageID,
+					"partID":    partID,
+				})
+			}
 			return true, statusFromError(err), err
 		case http.MethodPatch:
 			var part session.Part
@@ -421,6 +466,13 @@ func sessionSubresource(r *http.Request, sessionID session.ID, path string, mess
 				return nil, http.StatusBadRequest, fmt.Errorf("part path identifiers do not match payload")
 			}
 			result, err := messages.UpdatePart(r.Context(), part)
+			if err == nil {
+				events.publish("message.part.updated", map[string]any{
+					"sessionID": sessionID,
+					"messageID": messageID,
+					"part":      result,
+				})
+			}
 			return result, statusFromError(err), err
 		default:
 			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
@@ -478,6 +530,20 @@ func executeSessionCommand(ctx context.Context, sessionID session.ID, input comm
 	return promptRuntime.Reply(ctx, sessionID, user)
 }
 
+func publishMessageEvents(events *eventBus, sessionID session.ID, message session.WithParts) {
+	events.publish("message.updated", map[string]any{
+		"sessionID": sessionID,
+		"info":      message,
+	})
+	for _, part := range message.Parts {
+		events.publish("message.part.updated", map[string]any{
+			"sessionID": sessionID,
+			"messageID": message.Info.ID,
+			"part":      part,
+		})
+	}
+}
+
 func parseProviderModel(commandProvider string, commandModel string, fallback string) (string, string) {
 	if commandProvider != "" && commandModel != "" {
 		return commandProvider, commandModel
@@ -512,28 +578,71 @@ func parseSessionPath(path string) (session.ID, string, error) {
 	return id, parts[1], nil
 }
 
-func handleEvent(version string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+func handleEvent(version string, events *eventBus) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		event := map[string]any{
-			"type": "server.ready",
-			"properties": map[string]any{
+		w.Header().Set("X-Accel-Buffering", "no")
+		flusher, _ := w.(http.Flusher)
+		if err := writeSSE(w, event{
+			ID:   "evt_ready",
+			Type: "server.connected",
+			Properties: map[string]any{
 				"version": version,
 			},
-		}
-		payload, err := json.Marshal(event)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}); err != nil {
 			return
 		}
-		if _, err := fmt.Fprint(w, "event: ready\n"); err != nil {
-			return
+		if flusher != nil {
+			flusher.Flush()
 		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
-			return
+		ch, unsubscribe := events.subscribe(r.Context())
+		defer unsubscribe()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case item, ok := <-ch:
+				if !ok {
+					return
+				}
+				if err := writeSSE(w, item); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			case <-ticker.C:
+				if err := writeSSE(w, event{ID: "evt_heartbeat", Type: "server.heartbeat", Properties: map[string]any{}}); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 		}
 	}
+}
+
+func writeSSE(w io.Writer, item event) error {
+	payload, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	if item.ID != "" {
+		if _, err := fmt.Fprintf(w, "id: %s\n", item.ID); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprint(w, "event: message\n"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		return err
+	}
+	return nil
 }
 
 func handleJSON(fn func(*http.Request) (any, int, error)) http.HandlerFunc {
