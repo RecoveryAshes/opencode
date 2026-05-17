@@ -38,11 +38,8 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 	if len(request.Tools) > 0 {
 		body.Tools = geminiToolDefinitions(request.Tools)
 	}
-	if request.MaxTokens != nil || request.Temperature != nil {
-		body.GenerationConfig = &geminiGenerationConfig{
-			MaxOutputTokens: request.MaxTokens,
-			Temperature:     request.Temperature,
-		}
+	if generationConfig, ok := geminiGenerationConfigFor(request); ok {
+		body.GenerationConfig = generationConfig
 	}
 	for _, message := range request.Messages {
 		if message.Role == "" || message.Content == "" {
@@ -157,8 +154,31 @@ func sanitizeGeminiSchema(schema map[string]any) map[string]any {
 }
 
 type geminiGenerationConfig struct {
-	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
+	MaxOutputTokens *int           `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	TopP            *float64       `json:"topP,omitempty"`
+	TopK            *int           `json:"topK,omitempty"`
+	ThinkingConfig  map[string]any `json:"thinkingConfig,omitempty"`
+}
+
+func geminiGenerationConfigFor(request ChatRequest) (*geminiGenerationConfig, bool) {
+	config := &geminiGenerationConfig{
+		MaxOutputTokens: request.MaxTokens,
+		Temperature:     request.Temperature,
+		TopP:            request.TopP,
+		TopK:            request.TopK,
+	}
+	if thinkingConfig, ok := request.Options["thinkingConfig"].(map[string]any); ok && len(thinkingConfig) > 0 {
+		config.ThinkingConfig = cloneAnyMap(thinkingConfig)
+	}
+	if config.MaxOutputTokens == nil &&
+		config.Temperature == nil &&
+		config.TopP == nil &&
+		config.TopK == nil &&
+		len(config.ThinkingConfig) == 0 {
+		return nil, false
+	}
+	return config, true
 }
 
 type geminiResponse struct {

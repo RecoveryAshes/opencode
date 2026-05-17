@@ -95,6 +95,56 @@ func TestGeminiChatParsesSSE(t *testing.T) {
 	}
 }
 
+func TestGeminiChatSendsGenerationConfig(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		config := body["generationConfig"].(map[string]any)
+		thinking := config["thinkingConfig"].(map[string]any)
+		if config["maxOutputTokens"] != float64(1234) ||
+			config["temperature"] != 1.0 ||
+			config["topP"] != 0.95 ||
+			config["topK"] != float64(64) ||
+			thinking["includeThoughts"] != true ||
+			thinking["thinkingLevel"] != "high" {
+			t.Fatalf("generationConfig = %#v, want migrated Gemini sampling and thinking options", config)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+			"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+		}`))
+	}))
+	defer mock.Close()
+
+	maxTokens := 1234
+	temperature := 1.0
+	topP := 0.95
+	topK := 64
+	_, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID:  "google",
+		Protocol:    "gemini",
+		BaseURL:     mock.URL + "/v1beta",
+		Model:       "gemini-3-pro",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
+		TopP:        &topP,
+		TopK:        &topK,
+		Options: map[string]any{
+			"thinkingConfig": map[string]any{
+				"includeThoughts": true,
+				"thinkingLevel":   "high",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestGeminiChatSendsToolDefinitions(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
