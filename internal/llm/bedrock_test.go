@@ -75,6 +75,51 @@ func TestBedrockChatRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestBedrockChatSendsToolDefinitions(t *testing.T) {
+	clearBedrockAuthEnv(t)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		toolConfig := body["toolConfig"].(map[string]any)
+		tools := toolConfig["tools"].([]any)
+		spec := tools[0].(map[string]any)["toolSpec"].(map[string]any)
+		inputSchema := spec["inputSchema"].(map[string]any)
+		params := inputSchema["json"].(map[string]any)
+		if spec["name"] != "read" || params["type"] != "object" {
+			t.Fatalf("toolConfig = %#v, want Bedrock toolSpec schema", toolConfig)
+		}
+		if _, ok := toolConfig["toolChoice"].(map[string]any)["auto"]; !ok {
+			t.Fatalf("toolChoice = %#v, want auto", toolConfig["toolChoice"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"content":[{"text":"ok"}]}},"stopReason":"end_turn"}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewBedrockClient().Chat(t.Context(), ChatRequest{
+		ProviderID: "amazon-bedrock",
+		Protocol:   "bedrock-converse",
+		BaseURL:    mock.URL,
+		APIKey:     "bedrock-token",
+		Model:      "us.amazon.nova-micro-v1:0",
+		Messages:   []Message{{Role: "user", Content: "hello"}},
+		Tools: []ToolDefinition{{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"filePath": map[string]any{"type": "string"}},
+				"required":   []string{"filePath"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestBedrockChatParsesEventStream(t *testing.T) {
 	clearBedrockAuthEnv(t)
 	body := encodeBedrockEventStream(t,

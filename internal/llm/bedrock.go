@@ -41,6 +41,9 @@ func (client *BedrockClient) Chat(ctx context.Context, request ChatRequest) (Cha
 		ModelID:  defaultString(request.Model, "us.amazon.nova-micro-v1:0"),
 		Messages: make([]bedrockMessage, 0, len(request.Messages)),
 	}
+	if len(request.Tools) > 0 {
+		body.ToolConfig = bedrockToolConfigFor(request.Tools)
+	}
 	if request.MaxTokens != nil || request.Temperature != nil {
 		body.InferenceConfig = &bedrockInferenceConfig{
 			MaxTokens:   request.MaxTokens,
@@ -107,6 +110,7 @@ type bedrockRequest struct {
 	ModelID         string                  `json:"modelId"`
 	Messages        []bedrockMessage        `json:"messages"`
 	InferenceConfig *bedrockInferenceConfig `json:"inferenceConfig,omitempty"`
+	ToolConfig      *bedrockToolConfig      `json:"toolConfig,omitempty"`
 }
 
 type bedrockMessage struct {
@@ -128,6 +132,46 @@ type bedrockToolUse struct {
 type bedrockInferenceConfig struct {
 	MaxTokens   *int     `json:"maxTokens,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
+}
+
+type bedrockToolConfig struct {
+	Tools      []bedrockToolDef       `json:"tools"`
+	ToolChoice map[string]interface{} `json:"toolChoice,omitempty"`
+}
+
+type bedrockToolDef struct {
+	ToolSpec bedrockToolSpec `json:"toolSpec"`
+}
+
+type bedrockToolSpec struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}
+
+func bedrockToolConfigFor(tools []ToolDefinition) *bedrockToolConfig {
+	result := []bedrockToolDef{}
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		result = append(result, bedrockToolDef{
+			ToolSpec: bedrockToolSpec{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: map[string]interface{}{
+					"json": defaultToolParameters(tool.Parameters),
+				},
+			},
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return &bedrockToolConfig{
+		Tools:      result,
+		ToolChoice: map[string]interface{}{"auto": map[string]interface{}{}},
+	}
 }
 
 type bedrockResponse struct {
