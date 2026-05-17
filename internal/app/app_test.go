@@ -493,6 +493,59 @@ func TestRunSkillsListAndGet(t *testing.T) {
 	}
 }
 
+func TestRunFormattersList(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	configContent := strings.Join([]string{
+		"{",
+		`  "formatter": {`,
+		`    "gofmt": {"disabled": true},`,
+		`    "customfmt": {"command": ["sh", "-c", "true"], "extensions": [".custom"]}`,
+		"  }",
+		"}",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"formatters", "--directory", root, "--json", "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("json list exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var formatters []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &formatters); err != nil {
+		t.Fatalf("decode formatter JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	byName := map[string]map[string]any{}
+	for _, formatter := range formatters {
+		byName[formatter["name"].(string)] = formatter
+	}
+	if _, exists := byName["gofmt"]; exists {
+		t.Fatalf("formatters = %#v, want disabled gofmt omitted", formatters)
+	}
+	custom := byName["customfmt"]
+	if custom == nil || custom["enabled"] != true {
+		t.Fatalf("customfmt = %#v, want enabled custom formatter", custom)
+	}
+	extensions := custom["extensions"].([]any)
+	if len(extensions) != 1 || extensions[0] != ".custom" {
+		t.Fatalf("customfmt extensions = %#v, want .custom", extensions)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"formatters", "--directory", root, "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("text list exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "customfmt\ttrue\t.custom") || strings.Contains(text, "gofmt") {
+		t.Fatalf("formatter text = %q, want customfmt only", text)
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()

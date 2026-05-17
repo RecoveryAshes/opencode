@@ -504,6 +504,7 @@ func FormatterStatuses(directory string) ([]FormatterStatus, error) {
 		return []FormatterStatus{}, nil
 	}
 	statuses := builtinFormatterStatuses()
+	configuredCommands := map[string]bool{}
 	if configured, ok := formatter.(map[string]any); ok {
 		for name, raw := range configured {
 			entry, _ := raw.(map[string]any)
@@ -524,13 +525,18 @@ func FormatterStatuses(directory string) ([]FormatterStatus, error) {
 			if len(status.Extensions) == 0 {
 				status.Extensions = []string{}
 			}
-			status.Enabled = commandAvailable(entry["command"])
+			if _, hasCommand := entry["command"]; hasCommand {
+				configuredCommands[name] = true
+				status.Enabled = commandAvailable(entry["command"])
+			}
 			statuses[name] = status
 		}
 	}
 	result := make([]FormatterStatus, 0, len(statuses))
 	for _, status := range statuses {
-		status.Enabled = status.Enabled && formatterCommandExists(status.Name, directory)
+		if !configuredCommands[status.Name] {
+			status.Enabled = status.Enabled && formatterCommandExists(status.Name, directory)
+		}
 		result = append(result, status)
 	}
 	slices.SortFunc(result, func(a FormatterStatus, b FormatterStatus) int { return strings.Compare(a.Name, b.Name) })

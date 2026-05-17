@@ -77,6 +77,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return ptyCommand(ctx, args[1:], stdout, stderr)
 	case "skills":
 		return skillsCommand(args[1:], stdout, stderr)
+	case "formatters":
+		return formattersCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -1347,6 +1349,44 @@ func skillsCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 }
 
+func formattersCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("formatters", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to load formatter config")
+	jsonOutput := fs.Bool("json", false, "write formatter data JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode formatters [--directory DIR] [--json] COMMAND")
+		return 2
+	}
+	switch fs.Arg(0) {
+	case "list":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode formatters [--directory DIR] [--json] list")
+			return 2
+		}
+		formatters, err := integration.FormatterStatuses(*directory)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "list formatters failed: %v\n", err)
+			return 1
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, formatters)
+		}
+		for _, formatter := range formatters {
+			if _, err := fmt.Fprintf(stdout, "%s\t%v\t%s\n", formatter.Name, formatter.Enabled, strings.Join(formatter.Extensions, ",")); err != nil {
+				return 1
+			}
+		}
+		return 0
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown formatters command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1931,6 +1971,7 @@ commands:
   mcp [--directory DIR] [--json] COMMAND
   pty [--json] COMMAND
   skills [--directory DIR] [--json] COMMAND
+  formatters [--directory DIR] [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools
