@@ -130,12 +130,13 @@ func NewHandler(opts Options) http.Handler {
 	}))
 	mux.HandleFunc("/event", handleEvent(opts.Version, opts.Events))
 	mux.HandleFunc("/config", configGet())
+	mux.HandleFunc("/instance/dispose", instanceDispose())
 	mux.HandleFunc("/session/status", handleJSON(func(_ *http.Request) (any, int, error) {
 		return map[string]any{}, http.StatusOK, nil
 	}))
 	mux.HandleFunc("/session/", sessionByID(opts.Sessions, opts.Messages, opts.Runtime, opts.Events))
 	mux.HandleFunc("/session", sessions(opts.Sessions, opts.Events))
-	mux.HandleFunc("/command", commands())
+	mux.HandleFunc("/command", commandList())
 	mux.HandleFunc("/config/providers", configProviders())
 	mux.HandleFunc("/provider", providersList())
 	mux.HandleFunc("/find/file", findFile())
@@ -144,6 +145,17 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/file/content", fileContent())
 	mux.HandleFunc("/file/status", fileStatus())
 	mux.HandleFunc("/file", fileList())
+	mux.HandleFunc("/path", instancePath())
+	mux.HandleFunc("/vcs/status", vcsStatus())
+	mux.HandleFunc("/vcs/diff/raw", vcsDiffRaw())
+	mux.HandleFunc("/vcs/diff", vcsDiff())
+	mux.HandleFunc("/vcs/apply", vcsApply())
+	mux.HandleFunc("/vcs", vcsInfo())
+	mux.HandleFunc("/agent", agentsList())
+	mux.HandleFunc("/skill", skillsList())
+	mux.HandleFunc("/formatter", formatterStatus())
+	mux.HandleFunc("/lsp", lspStatus())
+	mux.HandleFunc("/project/current", projectCurrent())
 	mux.HandleFunc("/mcp/", mcpByName(opts.MCP))
 	mux.HandleFunc("/mcp", mcpRoot(opts.MCP))
 	mux.HandleFunc("/pty/shells", handleJSON(func(r *http.Request) (any, int, error) {
@@ -175,11 +187,47 @@ func OpenAPI(version string) map[string]any {
 			"/event": map[string]any{
 				"get": map[string]any{"operationId": "event.subscribe"},
 			},
+			"/instance/dispose": map[string]any{
+				"post": map[string]any{"operationId": "instance.dispose"},
+			},
+			"/path": map[string]any{
+				"get": map[string]any{"operationId": "path.get"},
+			},
+			"/vcs": map[string]any{
+				"get": map[string]any{"operationId": "vcs.get"},
+			},
+			"/vcs/status": map[string]any{
+				"get": map[string]any{"operationId": "vcs.status"},
+			},
+			"/vcs/diff": map[string]any{
+				"get": map[string]any{"operationId": "vcs.diff"},
+			},
+			"/vcs/diff/raw": map[string]any{
+				"get": map[string]any{"operationId": "vcs.diff.raw"},
+			},
+			"/vcs/apply": map[string]any{
+				"post": map[string]any{"operationId": "vcs.apply"},
+			},
 			"/provider": map[string]any{
 				"get": map[string]any{"operationId": "provider.list"},
 			},
 			"/command": map[string]any{
 				"get": map[string]any{"operationId": "command.list"},
+			},
+			"/agent": map[string]any{
+				"get": map[string]any{"operationId": "app.agents"},
+			},
+			"/skill": map[string]any{
+				"get": map[string]any{"operationId": "app.skills"},
+			},
+			"/formatter": map[string]any{
+				"get": map[string]any{"operationId": "formatter.status"},
+			},
+			"/lsp": map[string]any{
+				"get": map[string]any{"operationId": "lsp.status"},
+			},
+			"/project/current": map[string]any{
+				"get": map[string]any{"operationId": "project.current"},
 			},
 			"/find": map[string]any{
 				"get": map[string]any{"operationId": "find.text"},
@@ -349,17 +397,6 @@ func loadRequestConfig(r *http.Request) (config.LoadResult, error) {
 	return config.Load(config.LoadOptions{
 		Directory: defaultString(directory, "."),
 		Worktree:  r.URL.Query().Get("worktree"),
-	})
-}
-
-func commands() http.HandlerFunc {
-	return handleJSON(func(r *http.Request) (any, int, error) {
-		if r.Method != http.MethodGet {
-			return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
-		}
-		directory := defaultString(r.URL.Query().Get("directory"), ".")
-		result, err := config.LoadCommands(directory)
-		return result, statusFromError(err), err
 	})
 }
 

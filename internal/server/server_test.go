@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -365,12 +366,11 @@ func TestCommandHTTPAPIAndSessionCommand(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /command status = %d, want 200", resp.StatusCode)
 	}
-	var commands map[string]any
+	var commands []map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&commands); err != nil {
 		t.Fatalf("decode commands: %v", err)
 	}
-	ship, ok := commands["ship"].(map[string]any)
-	if !ok || ship["description"] != "Ship command" {
+	if !hasNamedItem(commands, "ship") {
 		t.Fatalf("commands = %#v, want ship command", commands)
 	}
 
@@ -667,6 +667,241 @@ func TestFileStatusHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestInstanceHTTPAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	root := t.TempDir()
+	runServerCommand(t, root, "git", "init")
+	runServerCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runServerCommand(t, root, "git", "config", "user.name", "Test User")
+	writeServerFile(t, filepath.Join(root, "tracked.txt"), "one\n")
+	runServerCommand(t, root, "git", "add", "tracked.txt")
+	runServerCommand(t, root, "git", "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+	writeServerFile(t, filepath.Join(root, "tracked.txt"), "one\ntwo\n")
+	writeServerFile(t, filepath.Join(root, ".opencode", "agent", "reviewer.md"), strings.Join([]string{
+		"---",
+		"description: Reviews code",
+		"mode: subagent",
+		"model: openai-compatible/local",
+		"---",
+		"Review carefully.",
+	}, "\n"))
+	writeServerFile(t, filepath.Join(root, ".opencode", "skill", "audit.md"), strings.Join([]string{
+		"---",
+		"name: audit",
+		"description: Audit skill",
+		"---",
+		"Audit content.",
+	}, "\n"))
+	writeServerFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"formatter": {
+			"customfmt": {"command": ["sh"], "extensions": [".txt"]},
+			"gofmt": {"disabled": true}
+		},
+		"lsp": {
+			"custom-lsp": {"command": ["custom-lsp"], "extensions": [".txt"]}
+		}
+	}`)
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/path?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /path error = %v", err)
+	}
+	defer closeBody(t, resp)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		resolvedRoot = root
+	}
+	var paths map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&paths); err != nil {
+		t.Fatalf("decode path: %v", err)
+	}
+	if paths["directory"] != root || paths["worktree"] != resolvedRoot || paths["home"] == "" {
+		t.Fatalf("paths = %#v, want local directory/worktree/home", paths)
+	}
+
+	resp, err = http.Get(server.URL + "/vcs?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /vcs error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var vcs map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&vcs); err != nil {
+		t.Fatalf("decode vcs: %v", err)
+	}
+	if vcs["branch"] == "" {
+		t.Fatalf("vcs = %#v, want branch", vcs)
+	}
+
+	resp, err = http.Get(server.URL + "/vcs/status?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /vcs/status error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var status []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode vcs status: %v", err)
+	}
+	if !hasFileStatus(status, "tracked.txt", "modified") {
+		t.Fatalf("vcs status = %#v, want modified tracked.txt", status)
+	}
+
+	resp, err = http.Get(server.URL + "/vcs/diff?directory=" + urlQueryEscape(root) + "&mode=git")
+	if err != nil {
+		t.Fatalf("GET /vcs/diff error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var diffs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&diffs); err != nil {
+		t.Fatalf("decode vcs diff: %v", err)
+	}
+	if !hasFileDiff(diffs, "tracked.txt", "+two") {
+		t.Fatalf("vcs diff = %#v, want tracked diff", diffs)
+	}
+
+	resp, err = http.Get(server.URL + "/vcs/diff/raw?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /vcs/diff/raw error = %v", err)
+	}
+	defer closeBody(t, resp)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read raw diff: %v", err)
+	}
+	if !strings.Contains(string(raw), "+two") || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/x-diff") {
+		t.Fatalf("raw diff = %q content-type=%q, want diff text", raw, resp.Header.Get("Content-Type"))
+	}
+
+	resp, err = http.Get(server.URL + "/agent?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /agent error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var agents []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
+		t.Fatalf("decode agents: %v", err)
+	}
+	if !hasNamedItem(agents, "build") || !hasNamedItem(agents, "reviewer") {
+		t.Fatalf("agents = %#v, want build and reviewer", agents)
+	}
+
+	resp, err = http.Get(server.URL + "/skill?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /skill error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var skills []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&skills); err != nil {
+		t.Fatalf("decode skills: %v", err)
+	}
+	if len(skills) != 1 || skills[0]["name"] != "audit" || !strings.Contains(skills[0]["content"].(string), "Audit content") {
+		t.Fatalf("skills = %#v, want audit skill", skills)
+	}
+
+	resp, err = http.Get(server.URL + "/command?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /command error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var commands []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&commands); err != nil {
+		t.Fatalf("decode commands: %v", err)
+	}
+	if !hasNamedItem(commands, "init") || !hasNamedItem(commands, "review") {
+		t.Fatalf("commands = %#v, want default init/review", commands)
+	}
+
+	resp, err = http.Get(server.URL + "/formatter?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /formatter error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var formatters []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&formatters); err != nil {
+		t.Fatalf("decode formatters: %v", err)
+	}
+	if !hasNamedItem(formatters, "customfmt") || hasNamedItem(formatters, "gofmt") {
+		t.Fatalf("formatters = %#v, want customfmt and no disabled gofmt", formatters)
+	}
+
+	resp, err = http.Get(server.URL + "/lsp?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /lsp error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var lsps []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&lsps); err != nil {
+		t.Fatalf("decode lsp: %v", err)
+	}
+	if len(lsps) != 1 || lsps[0]["id"] != "custom-lsp" || lsps[0]["root"] != root {
+		t.Fatalf("lsp = %#v, want custom-lsp", lsps)
+	}
+
+	resp, err = http.Post(server.URL+"/instance/dispose?directory="+urlQueryEscape(root), "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /instance/dispose error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var disposed bool
+	if err := json.NewDecoder(resp.Body).Decode(&disposed); err != nil {
+		t.Fatalf("decode dispose: %v", err)
+	}
+	if !disposed {
+		t.Fatalf("disposed = false, want true")
+	}
+}
+
+func TestVCSApplyHTTPAPI(t *testing.T) {
+	root := t.TempDir()
+	runServerCommand(t, root, "git", "init")
+	runServerCommand(t, root, "git", "config", "user.email", "test@example.com")
+	runServerCommand(t, root, "git", "config", "user.name", "Test User")
+	writeServerFile(t, filepath.Join(root, "tracked.txt"), "one\n")
+	runServerCommand(t, root, "git", "add", "tracked.txt")
+	runServerCommand(t, root, "git", "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	patch := strings.Join([]string{
+		"diff --git a/tracked.txt b/tracked.txt",
+		"index 5626abf..814f4a4 100644",
+		"--- a/tracked.txt",
+		"+++ b/tracked.txt",
+		"@@ -1 +1,2 @@",
+		" one",
+		"+two",
+		"",
+	}, "\n")
+	resp, err := http.Post(server.URL+"/vcs/apply?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"patch":`+quoteJSON(patch)+`}`))
+	if err != nil {
+		t.Fatalf("POST /vcs/apply error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /vcs/apply status = %d, want 200", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode apply: %v", err)
+	}
+	if result["applied"] != true {
+		t.Fatalf("apply result = %#v, want applied", result)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "tracked.txt"))
+	if err != nil {
+		t.Fatalf("read tracked: %v", err)
+	}
+	if string(data) != "one\ntwo\n" {
+		t.Fatalf("tracked = %q, want applied patch", data)
+	}
+}
+
 func TestOpenAPIAndEvent(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -861,6 +1096,37 @@ func runServerCommand(t *testing.T, dir string, name string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, output)
 	}
+}
+
+func hasNamedItem(items []map[string]any, name string) bool {
+	for _, item := range items {
+		if item["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFileStatus(items []map[string]any, file string, status string) bool {
+	for _, item := range items {
+		if item["file"] == file && item["status"] == status {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFileDiff(items []map[string]any, file string, patchContains string) bool {
+	for _, item := range items {
+		if item["file"] != file {
+			continue
+		}
+		patch, _ := item["patch"].(string)
+		if strings.Contains(patch, patchContains) {
+			return true
+		}
+	}
+	return false
 }
 
 func readSSEEvents(resp *http.Response, events chan<- event, errs chan<- error) {
