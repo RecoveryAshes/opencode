@@ -1,7 +1,10 @@
 // Package llm defines provider contracts for the Go runtime.
 package llm
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // Provider describes an LLM provider that must be owned by the Go runtime.
 type Provider struct {
@@ -101,6 +104,45 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		request := profile.chatRequest(messages, modelID)
 		if request.APIKey == "" {
 			return ChatRequest{}, fmt.Errorf("amazon-bedrock provider requires AWS_BEARER_TOKEN_BEDROCK until SigV4 signing is migrated")
+		}
+		return request, nil
+	case "cloudflare-ai-gateway":
+		profile := openAIProfile{
+			ProviderID:     "cloudflare-ai-gateway",
+			DefaultBaseURL: cloudflareAIGatewayBaseURL(),
+			BaseURLEnvVars: []string{"OPENCODE_CLOUDFLARE_AI_GATEWAY_BASE_URL", "CLOUDFLARE_AI_GATEWAY_BASE_URL"},
+			APIKeyEnvVars: []string{
+				"OPENCODE_CLOUDFLARE_PROVIDER_API_KEY",
+				"CLOUDFLARE_PROVIDER_API_KEY",
+				"OPENAI_API_KEY",
+			},
+			ModelEnvVars: []string{"OPENCODE_CLOUDFLARE_AI_GATEWAY_MODEL", "CLOUDFLARE_AI_GATEWAY_MODEL"},
+			AuthHeader:   "Authorization",
+			AuthScheme:   "Bearer",
+			Headers:      cloudflareAIGatewayHeaders(),
+		}
+		request := profile.chatRequest(messages, modelID)
+		if request.BaseURL == "" {
+			return ChatRequest{}, fmt.Errorf("cloudflare-ai-gateway provider requires CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_AI_GATEWAY_BASE_URL")
+		}
+		return request, nil
+	case "cloudflare-workers-ai":
+		profile := openAIProfile{
+			ProviderID:     "cloudflare-workers-ai",
+			DefaultBaseURL: cloudflareWorkersAIBaseURL(),
+			BaseURLEnvVars: []string{"OPENCODE_CLOUDFLARE_WORKERS_AI_BASE_URL", "CLOUDFLARE_WORKERS_AI_BASE_URL"},
+			APIKeyEnvVars: []string{
+				"OPENCODE_CLOUDFLARE_WORKERS_AI_TOKEN",
+				"CLOUDFLARE_API_KEY",
+				"CLOUDFLARE_WORKERS_AI_TOKEN",
+			},
+			ModelEnvVars: []string{"OPENCODE_CLOUDFLARE_WORKERS_AI_MODEL", "CLOUDFLARE_WORKERS_AI_MODEL"},
+			AuthHeader:   "Authorization",
+			AuthScheme:   "Bearer",
+		}
+		request := profile.chatRequest(messages, modelID)
+		if request.BaseURL == "" {
+			return ChatRequest{}, fmt.Errorf("cloudflare-workers-ai provider requires CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_WORKERS_AI_BASE_URL")
 		}
 		return request, nil
 	case "cohere":
@@ -228,6 +270,8 @@ var providers = []Provider{
 	{ID: "together", Name: "Together AI", Protocols: []string{"openai-compatible"}},
 	{ID: "alibaba", Name: "Alibaba", Protocols: []string{"openai-compatible"}},
 	{ID: "vercel", Name: "Vercel AI Gateway", Protocols: []string{"ai-gateway"}},
+	{ID: "cloudflare-ai-gateway", Name: "Cloudflare AI Gateway", Protocols: []string{"openai-compatible"}},
+	{ID: "cloudflare-workers-ai", Name: "Cloudflare Workers AI", Protocols: []string{"openai-compatible"}},
 	{ID: "github-copilot", Name: "GitHub Copilot", Protocols: []string{"openai-compatible"}},
 	{ID: "digitalocean", Name: "DigitalOcean", Protocols: []string{"openai-compatible"}},
 	{ID: "gitlab-duo", Name: "GitLab Duo", Protocols: []string{"openai-compatible"}},
@@ -445,6 +489,31 @@ func bedrockBaseURL() string {
 	return "https://bedrock-runtime." + region + ".amazonaws.com"
 }
 
+func cloudflareAIGatewayBaseURL() string {
+	accountID := firstEnv("OPENCODE_CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID")
+	if accountID == "" {
+		return ""
+	}
+	gatewayID := defaultString(firstEnv("OPENCODE_CLOUDFLARE_GATEWAY_ID", "CLOUDFLARE_GATEWAY_ID"), "default")
+	return "https://gateway.ai.cloudflare.com/v1/" + urlPathEscape(accountID) + "/" + urlPathEscape(gatewayID) + "/compat"
+}
+
+func cloudflareWorkersAIBaseURL() string {
+	accountID := firstEnv("OPENCODE_CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID")
+	if accountID == "" {
+		return ""
+	}
+	return "https://api.cloudflare.com/client/v4/accounts/" + urlPathEscape(accountID) + "/ai/v1"
+}
+
+func cloudflareAIGatewayHeaders() map[string]string {
+	token := firstEnv("OPENCODE_CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN", "CF_AIG_TOKEN")
+	if token == "" {
+		return nil
+	}
+	return map[string]string{"cf-aig-authorization": "Bearer " + token}
+}
+
 func cloneStringMap(input map[string]string) map[string]string {
 	if len(input) == 0 {
 		return nil
@@ -454,4 +523,8 @@ func cloneStringMap(input map[string]string) map[string]string {
 		output[key] = value
 	}
 	return output
+}
+
+func urlPathEscape(value string) string {
+	return url.PathEscape(value)
 }

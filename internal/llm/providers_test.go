@@ -11,7 +11,7 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		got[id] = true
 	}
 
-	for _, id := range []string{"openai", "anthropic", "google", "azure", "amazon-bedrock", "openrouter", "github-copilot", "openai-compatible"} {
+	for _, id := range []string{"openai", "anthropic", "google", "azure", "amazon-bedrock", "openrouter", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
@@ -197,6 +197,39 @@ func TestResolveChatRequestCohere(t *testing.T) {
 		got.AuthScheme != "Bearer" ||
 		got.Model != "command-r" {
 		t.Fatalf("request = %#v, want Cohere request", got)
+	}
+}
+
+func TestResolveChatRequestCloudflareAIGateway(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "test/account")
+	t.Setenv("CLOUDFLARE_GATEWAY_ID", "test gateway")
+	t.Setenv("CLOUDFLARE_API_TOKEN", "gateway-token")
+	t.Setenv("CLOUDFLARE_PROVIDER_API_KEY", "provider-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "cloudflare-ai-gateway", "openai/gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://gateway.ai.cloudflare.com/v1/test%2Faccount/test%20gateway/compat" ||
+		got.APIKey != "provider-token" ||
+		got.Headers["cf-aig-authorization"] != "Bearer gateway-token" {
+		t.Fatalf("request = %#v, want Cloudflare AI Gateway request", got)
+	}
+}
+
+func TestResolveChatRequestCloudflareWorkersAI(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "test-account")
+	t.Setenv("CLOUDFLARE_WORKERS_AI_TOKEN", "workers-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "cloudflare-workers-ai", "@cf/meta/llama-3.1-8b-instruct")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://api.cloudflare.com/client/v4/accounts/test-account/ai/v1" ||
+		got.APIKey != "workers-token" {
+		t.Fatalf("request = %#v, want Cloudflare Workers AI request", got)
 	}
 }
 
