@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
 	"github.com/RecoveryAshes/opencode/internal/runtime"
 	"github.com/RecoveryAshes/opencode/internal/storage"
@@ -1007,6 +1008,122 @@ func TestEventStreamPublishesSessionAndMessageEvents(t *testing.T) {
 	defer closeBody(t, toolResp)
 	if got := waitEventType(t, events, errs, "tool.executed"); got.Properties["tool"] != "write" {
 		t.Fatalf("tool.executed = %#v, want write", got)
+	}
+}
+
+func TestQuestionPermissionHTTPAPI(t *testing.T) {
+	interactions := integration.NewInteractionManager()
+	question := interactions.AddQuestion(integration.QuestionRequest{
+		SessionID: "ses_test",
+		Questions: []integration.QuestionInfo{{
+			Question: "Deploy?",
+			Header:   "Deploy",
+			Options: []integration.QuestionOption{{
+				Label:       "Yes",
+				Description: "Deploy now.",
+			}},
+		}},
+	})
+	permission := interactions.AddPermission(integration.PermissionRequest{
+		SessionID:  "ses_test",
+		Permission: "shell",
+		Patterns:   []string{"npm test"},
+		Always:     []string{"npm *"},
+		Metadata:   map[string]any{"command": "npm test"},
+	})
+
+	server := httptest.NewServer(NewHandler(Options{
+		Version:  "test",
+		Interact: interactions,
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
+	if err != nil {
+		t.Fatalf("new event request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /event error = %v", err)
+	}
+	defer closeBody(t, resp)
+	events := make(chan event, 16)
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		readSSEEvents(resp, events, errs)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	_ = waitEventType(t, events, errs, "server.connected")
+
+	resp, err = http.Get(server.URL + "/question")
+	if err != nil {
+		t.Fatalf("GET /question error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var questions []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&questions); err != nil {
+		t.Fatalf("decode questions: %v", err)
+	}
+	if len(questions) != 1 || questions[0]["id"] != string(question.ID) {
+		t.Fatalf("questions = %#v, want queued question", questions)
+	}
+
+	replyBody := `{"answers":[["Yes"]]}`
+	resp, err = http.Post(server.URL+"/question/"+string(question.ID)+"/reply", "application/json", strings.NewReader(replyBody))
+	if err != nil {
+		t.Fatalf("POST /question/id/reply error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("question reply status = %d, want 200", resp.StatusCode)
+	}
+	if got := waitEventType(t, events, errs, "question.replied"); got.Properties["requestID"] != string(question.ID) {
+		t.Fatalf("question.replied = %#v, want request id", got)
+	}
+
+	resp, err = http.Get(server.URL + "/permission")
+	if err != nil {
+		t.Fatalf("GET /permission error = %v", err)
+	}
+	defer closeBody(t, resp)
+	var permissions []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&permissions); err != nil {
+		t.Fatalf("decode permissions: %v", err)
+	}
+	if len(permissions) != 1 || permissions[0]["id"] != string(permission.ID) || permissions[0]["permission"] != "shell" {
+		t.Fatalf("permissions = %#v, want queued permission", permissions)
+	}
+
+	resp, err = http.Post(server.URL+"/permission/"+string(permission.ID)+"/reply", "application/json", strings.NewReader(`{"reply":"always"}`))
+	if err != nil {
+		t.Fatalf("POST /permission/id/reply error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("permission reply status = %d, want 200", resp.StatusCode)
+	}
+	if got := waitEventType(t, events, errs, "permission.replied"); got.Properties["requestID"] != string(permission.ID) || got.Properties["reply"] != "always" {
+		t.Fatalf("permission.replied = %#v, want request id and reply", got)
+	}
+
+	resp, err = http.Get(server.URL + "/question")
+	if err != nil {
+		t.Fatalf("GET /question after reply error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if err := json.NewDecoder(resp.Body).Decode(&questions); err != nil {
+		t.Fatalf("decode empty questions: %v", err)
+	}
+	if len(questions) != 0 {
+		t.Fatalf("questions = %#v, want empty after reply", questions)
 	}
 }
 

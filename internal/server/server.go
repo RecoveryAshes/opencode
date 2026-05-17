@@ -32,6 +32,7 @@ type Options struct {
 	Runtime  *runtime.PromptRuntime
 	MCP      *integration.MCPManager
 	PTY      *integration.PTYManager
+	Interact *integration.InteractionManager
 	Events   *eventBus
 }
 
@@ -112,6 +113,9 @@ func NewHandler(opts Options) http.Handler {
 	if opts.PTY == nil {
 		opts.PTY = integration.NewPTYManager()
 	}
+	if opts.Interact == nil {
+		opts.Interact = integration.NewInteractionManager()
+	}
 	if opts.Events == nil {
 		opts.Events = newEventBus()
 	}
@@ -156,6 +160,10 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("/formatter", formatterStatus())
 	mux.HandleFunc("/lsp", lspStatus())
 	mux.HandleFunc("/project/current", projectCurrent())
+	mux.HandleFunc("/question/", questionByID(opts.Interact, opts.Events))
+	mux.HandleFunc("/question", questions(opts.Interact))
+	mux.HandleFunc("/permission/", permissionByID(opts.Interact, opts.Events))
+	mux.HandleFunc("/permission", permissions(opts.Interact))
 	mux.HandleFunc("/mcp/", mcpByName(opts.MCP))
 	mux.HandleFunc("/mcp", mcpRoot(opts.MCP))
 	mux.HandleFunc("/pty/shells", handleJSON(func(r *http.Request) (any, int, error) {
@@ -228,6 +236,21 @@ func OpenAPI(version string) map[string]any {
 			},
 			"/project/current": map[string]any{
 				"get": map[string]any{"operationId": "project.current"},
+			},
+			"/question": map[string]any{
+				"get": map[string]any{"operationId": "question.list"},
+			},
+			"/question/{requestID}/reply": map[string]any{
+				"post": map[string]any{"operationId": "question.reply"},
+			},
+			"/question/{requestID}/reject": map[string]any{
+				"post": map[string]any{"operationId": "question.reject"},
+			},
+			"/permission": map[string]any{
+				"get": map[string]any{"operationId": "permission.list"},
+			},
+			"/permission/{requestID}/reply": map[string]any{
+				"post": map[string]any{"operationId": "permission.reply"},
 			},
 			"/find": map[string]any{
 				"get": map[string]any{"operationId": "find.text"},
