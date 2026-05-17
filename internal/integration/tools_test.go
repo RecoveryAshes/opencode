@@ -2,15 +2,49 @@ package integration
 
 import "testing"
 
-func TestToolInventoryIncludesMigrationTargets(t *testing.T) {
-	got := map[string]bool{}
-	for _, name := range ToolNames() {
-		got[name] = true
+func TestToolInventoryMatchesTypeScriptRegistryOrder(t *testing.T) {
+	want := []string{
+		"invalid",
+		"question",
+		"bash",
+		"read",
+		"glob",
+		"grep",
+		"edit",
+		"write",
+		"task",
+		"task_status",
+		"webfetch",
+		"todowrite",
+		"websearch",
+		"repo_clone",
+		"repo_overview",
+		"skill",
+		"apply_patch",
+		"lsp",
+		"plan_exit",
 	}
+	got := ToolNames()
+	if len(got) != len(want) {
+		t.Fatalf("ToolNames() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ToolNames()[%d] = %q, want %q; all names = %#v", i, got[i], want[i], got)
+		}
+	}
+}
 
-	for _, name := range []string{"read", "write", "edit", "apply_patch", "shell", "grep", "lsp", "webfetch", "websearch", "question", "task", "task_status", "skill", "todo", "todowrite", "repo_clone", "repo_overview"} {
-		if !got[name] {
-			t.Fatalf("tool %q missing from inventory", name)
+func TestToolAliasesCanonicalizeLegacyGoNames(t *testing.T) {
+	tests := map[string]string{
+		"shell": "bash",
+		"bash":  "bash",
+		"todo":  "todowrite",
+		"patch": "apply_patch",
+	}
+	for input, want := range tests {
+		if got := CanonicalToolName(input); got != want {
+			t.Fatalf("CanonicalToolName(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

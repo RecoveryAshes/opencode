@@ -123,7 +123,14 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
 	result := []llm.ToolDefinition{}
 	for _, tool := range integration.AllTools() {
-		if allowed, ok := enabled[tool.Name]; ok && !allowed {
+		disabled := false
+		for _, alias := range integration.ToolAliases(tool.Name) {
+			if allowed, ok := enabled[alias]; ok && !allowed {
+				disabled = true
+				break
+			}
+		}
+		if disabled {
 			continue
 		}
 		result = append(result, llm.ToolDefinition{
@@ -136,7 +143,9 @@ func localToolDefinitions(enabled map[string]bool) []llm.ToolDefinition {
 }
 
 func toolDescription(tool integration.Tool) string {
-	switch tool.Name {
+	switch integration.CanonicalToolName(tool.Name) {
+	case "invalid":
+		return "Report invalid tool arguments back to the model."
 	case "read":
 		return "Read a file or list a directory from the local workspace."
 	case "write":
@@ -145,7 +154,7 @@ func toolDescription(tool integration.Tool) string {
 		return "Replace exact text in a local workspace file."
 	case "apply_patch":
 		return "Apply an opencode patch to add, update, move, or delete files."
-	case "shell":
+	case "bash":
 		return "Run a shell command in the local workspace."
 	case "glob":
 		return "Find files by glob pattern in the local workspace."
@@ -165,12 +174,14 @@ func toolDescription(tool integration.Tool) string {
 		return "Check the status or result of a background task."
 	case "skill":
 		return "Load a local opencode skill by name."
-	case "todo", "todowrite":
+	case "todowrite":
 		return "Create or update the session todo list."
 	case "repo_clone":
 		return "Clone or refresh a Git repository into the local cache."
 	case "repo_overview":
 		return "Summarize a local or cached Git repository."
+	case "plan_exit":
+		return "Signal that plan mode is complete and implementation can begin."
 	default:
 		return "Run the migrated opencode " + tool.Category + " tool."
 	}

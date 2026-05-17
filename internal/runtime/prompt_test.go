@@ -156,8 +156,8 @@ func TestPromptRuntimeHonorsDisabledTools(t *testing.T) {
 	seen := map[string]bool{}
 	for _, tool := range client.request.Tools {
 		seen[tool.Name] = true
-		if tool.Name == "shell" {
-			t.Fatalf("provider tools include disabled shell: %#v", client.request.Tools)
+		if tool.Name == "bash" || tool.Name == "shell" {
+			t.Fatalf("provider tools include disabled shell alias: %#v", client.request.Tools)
 		}
 	}
 	if !seen["read"] || !seen["write"] {

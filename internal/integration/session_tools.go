@@ -10,6 +10,40 @@ import (
 	"strings"
 )
 
+func invalidTool(request Request) (Result, error) {
+	toolName, err := requireString(request.Params, "tool")
+	if err != nil {
+		return Result{}, err
+	}
+	message, err := requireString(request.Params, "error")
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Title: "Invalid Tool",
+		Metadata: map[string]any{
+			"tool":  toolName,
+			"error": message,
+		},
+		Output: "The arguments provided to the tool are invalid: " + message,
+	}, nil
+}
+
+func planExitTool(request Request) (Result, error) {
+	plan := optionalString(request.Params, "plan", "")
+	output := "User approved switching to build agent. Wait for further instructions."
+	if plan != "" {
+		output = fmt.Sprintf("Plan at %s is complete. %s", plan, output)
+	}
+	return Result{
+		Title: "Switching to build agent",
+		Metadata: map[string]any{
+			"plan": plan,
+		},
+		Output: output,
+	}, nil
+}
+
 func todoTool(request Request) (Result, error) {
 	raw, ok := request.Params["todos"]
 	if !ok {

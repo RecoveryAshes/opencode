@@ -76,6 +76,43 @@ func ToolIDs() []string {
 	return ToolNames()
 }
 
+// CanonicalToolName maps legacy Go-local aliases to TypeScript-compatible
+// public tool IDs.
+func CanonicalToolName(name string) string {
+	switch name {
+	case "shell":
+		return "bash"
+	case "todo":
+		return "todowrite"
+	case "fetch":
+		return "webfetch"
+	case "search":
+		return "websearch"
+	case "patch":
+		return "apply_patch"
+	default:
+		return name
+	}
+}
+
+// ToolAliases returns public and compatibility names that may refer to a tool.
+func ToolAliases(name string) []string {
+	switch CanonicalToolName(name) {
+	case "bash":
+		return []string{"bash", "shell"}
+	case "todowrite":
+		return []string{"todowrite", "todo"}
+	case "webfetch":
+		return []string{"webfetch", "fetch"}
+	case "websearch":
+		return []string{"websearch", "search"}
+	case "apply_patch":
+		return []string{"apply_patch", "patch"}
+	default:
+		return []string{CanonicalToolName(name)}
+	}
+}
+
 // ToolList returns provider-facing tool descriptors for the local Go registry.
 func ToolList() []ToolListItem {
 	result := make([]ToolListItem, 0, len(tools))
@@ -91,7 +128,9 @@ func ToolList() []ToolListItem {
 
 // Execute runs a migrated local tool.
 func Execute(ctx context.Context, request Request) (Result, error) {
-	switch request.Name {
+	switch CanonicalToolName(request.Name) {
+	case "invalid":
+		return invalidTool(request)
 	case "read":
 		return readTool(request)
 	case "write":
@@ -104,7 +143,7 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return globTool(request)
 	case "grep":
 		return grepTool(request)
-	case "shell":
+	case "bash":
 		return shellTool(ctx, request)
 	case "lsp":
 		return lspTool(request)
@@ -118,7 +157,7 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return repoCloneTool(ctx, request)
 	case "repo_overview":
 		return repoOverviewTool(ctx, request)
-	case "todo", "todowrite":
+	case "todowrite":
 		return todoTool(request)
 	case "question":
 		return questionTool(request)
@@ -126,34 +165,39 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return taskTool(request)
 	case "task_status":
 		return taskStatusTool(request)
+	case "plan_exit":
+		return planExitTool(request)
 	default:
 		return Result{}, fmt.Errorf("tool %q is not implemented in Go yet", request.Name)
 	}
 }
 
 var tools = []Tool{
+	{Name: "invalid", Category: "control"},
+	{Name: "question", Category: "user-input"},
+	{Name: "bash", Category: "process"},
 	{Name: "read", Category: "filesystem"},
-	{Name: "write", Category: "filesystem"},
-	{Name: "edit", Category: "filesystem"},
-	{Name: "apply_patch", Category: "filesystem"},
-	{Name: "shell", Category: "process"},
 	{Name: "glob", Category: "search"},
 	{Name: "grep", Category: "search"},
-	{Name: "lsp", Category: "language-server"},
+	{Name: "edit", Category: "filesystem"},
+	{Name: "write", Category: "filesystem"},
 	{Name: "task", Category: "agent"},
 	{Name: "task_status", Category: "agent"},
 	{Name: "webfetch", Category: "network"},
-	{Name: "websearch", Category: "network"},
-	{Name: "question", Category: "user-input"},
-	{Name: "todo", Category: "session"},
 	{Name: "todowrite", Category: "session"},
-	{Name: "skill", Category: "plugin"},
+	{Name: "websearch", Category: "network"},
 	{Name: "repo_clone", Category: "git"},
 	{Name: "repo_overview", Category: "git"},
+	{Name: "skill", Category: "plugin"},
+	{Name: "apply_patch", Category: "filesystem"},
+	{Name: "lsp", Category: "language-server"},
+	{Name: "plan_exit", Category: "control"},
 }
 
 func toolDescription(name string) string {
-	switch name {
+	switch CanonicalToolName(name) {
+	case "invalid":
+		return "Report invalid tool arguments back to the model."
 	case "read":
 		return "Read a file or directory from the local filesystem."
 	case "write":
@@ -162,7 +206,7 @@ func toolDescription(name string) string {
 		return "Perform exact string replacements in files."
 	case "apply_patch":
 		return "Apply a structured patch to local files."
-	case "shell":
+	case "bash":
 		return "Run a shell command in the workspace."
 	case "glob":
 		return "Fast file pattern matching across the workspace."
@@ -180,7 +224,7 @@ func toolDescription(name string) string {
 		return "Search the web for current information."
 	case "question":
 		return "Ask the user for structured input."
-	case "todo", "todowrite":
+	case "todowrite":
 		return "Create and maintain a structured task list."
 	case "skill":
 		return "Load a specialized skill by name."
@@ -188,6 +232,8 @@ func toolDescription(name string) string {
 		return "Clone or refresh a repository in the managed cache."
 	case "repo_overview":
 		return "Summarize a cached or local repository structure."
+	case "plan_exit":
+		return "Signal that plan mode is complete and implementation can begin."
 	default:
 		return name
 	}

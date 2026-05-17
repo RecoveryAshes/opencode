@@ -6,7 +6,12 @@ type JSONSchema map[string]any
 
 // ToolSchema returns the migrated tool's provider-facing input schema.
 func ToolSchema(name string) JSONSchema {
-	switch name {
+	switch CanonicalToolName(name) {
+	case "invalid":
+		return objectSchema([]string{"tool", "error"}, map[string]any{
+			"tool":  stringSchema("Tool name that was called with invalid arguments."),
+			"error": stringSchema("Validation error to report back to the model."),
+		})
 	case "read":
 		return objectSchema([]string{"filePath"}, map[string]any{
 			"filePath": stringSchema("File or directory path to read, relative to the workspace unless absolute."),
@@ -40,7 +45,7 @@ func ToolSchema(name string) JSONSchema {
 			"path":    stringSchema("File or directory to search. Defaults to the workspace root."),
 			"include": stringSchema("Optional glob filter for matching file paths."),
 		})
-	case "shell":
+	case "bash":
 		return objectSchema([]string{"command"}, map[string]any{
 			"command": stringSchema("Shell command to run in the workspace."),
 		})
@@ -90,7 +95,7 @@ func ToolSchema(name string) JSONSchema {
 		return objectSchema([]string{"name"}, map[string]any{
 			"name": stringSchema("Skill name to load."),
 		})
-	case "todo", "todowrite":
+	case "todowrite":
 		return objectSchema([]string{"todos"}, map[string]any{
 			"todos": arraySchema("Updated todo list.", objectSchema([]string{"content", "status"}, map[string]any{
 				"content":  stringSchema("Todo item content."),
@@ -110,6 +115,10 @@ func ToolSchema(name string) JSONSchema {
 			"repository": stringSchema("Git repository URL or host/owner/name reference."),
 			"path":       stringSchema("Local repository path."),
 			"depth":      integerSchema("Directory tree depth from 1 to 6."),
+		})
+	case "plan_exit":
+		return objectSchema([]string{}, map[string]any{
+			"plan": stringSchema("Optional relative plan file path."),
 		})
 	default:
 		return objectSchema([]string{}, map[string]any{})

@@ -65,15 +65,27 @@ func TestReadWriteGlobGrepShellTools(t *testing.T) {
 	}
 
 	shellResult, err := Execute(context.Background(), Request{
-		Name:      "shell",
+		Name:      "bash",
 		Directory: root,
 		Params:    map[string]any{"command": "printf migrated"},
 	})
 	if err != nil {
-		t.Fatalf("shell Execute() error = %v", err)
+		t.Fatalf("bash Execute() error = %v", err)
 	}
 	if shellResult.Metadata["exit"] != 0 || shellResult.Output != "migrated" {
-		t.Fatalf("shell result = %#v", shellResult)
+		t.Fatalf("bash result = %#v", shellResult)
+	}
+
+	legacyShellResult, err := Execute(context.Background(), Request{
+		Name:      "shell",
+		Directory: root,
+		Params:    map[string]any{"command": "printf legacy"},
+	})
+	if err != nil {
+		t.Fatalf("legacy shell Execute() error = %v", err)
+	}
+	if legacyShellResult.Metadata["exit"] != 0 || legacyShellResult.Output != "legacy" {
+		t.Fatalf("legacy shell result = %#v", legacyShellResult)
 	}
 }
 
@@ -157,7 +169,7 @@ func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
 	}
 
 	todoResult, err := Execute(context.Background(), Request{
-		Name: "todo",
+		Name: "todowrite",
 		Params: map[string]any{"todos": []map[string]string{{
 			"content":  "migrate",
 			"status":   "pending",
@@ -169,6 +181,21 @@ func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
 	}
 	if todoResult.Title != "1 todos" || !strings.Contains(todoResult.Output, "migrate") {
 		t.Fatalf("todo result = %#v", todoResult)
+	}
+
+	legacyTodoResult, err := Execute(context.Background(), Request{
+		Name: "todo",
+		Params: map[string]any{"todos": []map[string]string{{
+			"content":  "legacy",
+			"status":   "pending",
+			"priority": "medium",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("legacy todo Execute() error = %v", err)
+	}
+	if legacyTodoResult.Title != "1 todos" || !strings.Contains(legacyTodoResult.Output, "legacy") {
+		t.Fatalf("legacy todo result = %#v", legacyTodoResult)
 	}
 
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
@@ -254,6 +281,30 @@ func TestQuestionTaskAndTaskStatusTools(t *testing.T) {
 	}
 	if statusResult.Metadata["state"] != "completed" || !strings.Contains(statusResult.Output, "task_id: task_manual") {
 		t.Fatalf("task_status result = %#v", statusResult)
+	}
+}
+
+func TestInvalidAndPlanExitTools(t *testing.T) {
+	invalidResult, err := Execute(context.Background(), Request{
+		Name:   "invalid",
+		Params: map[string]any{"tool": "read", "error": "filePath is required"},
+	})
+	if err != nil {
+		t.Fatalf("invalid Execute() error = %v", err)
+	}
+	if invalidResult.Title != "Invalid Tool" || !strings.Contains(invalidResult.Output, "filePath is required") {
+		t.Fatalf("invalid result = %#v", invalidResult)
+	}
+
+	planResult, err := Execute(context.Background(), Request{
+		Name:   "plan_exit",
+		Params: map[string]any{"plan": ".opencode/plan.md"},
+	})
+	if err != nil {
+		t.Fatalf("plan_exit Execute() error = %v", err)
+	}
+	if planResult.Title != "Switching to build agent" || !strings.Contains(planResult.Output, ".opencode/plan.md") {
+		t.Fatalf("plan_exit result = %#v", planResult)
 	}
 }
 
