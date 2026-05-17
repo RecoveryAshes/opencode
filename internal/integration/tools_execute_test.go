@@ -431,6 +431,30 @@ func TestAgentFromMarkdownUsesPathDerivedName(t *testing.T) {
 	}
 }
 
+func TestListSkillsIncludesConfiguredLocalPaths(t *testing.T) {
+	root := t.TempDir()
+	writeIntegrationFile(t, filepath.Join(root, "opencode.jsonc"), `{
+		"skills": {
+			"paths": ["extra-skills"]
+		}
+	}`)
+	writeIntegrationFile(t, filepath.Join(root, "extra-skills", "audit", "SKILL.md"), strings.Join([]string{
+		"---",
+		"name: audit",
+		"description: Audit from configured path",
+		"---",
+		"Audit configured path.",
+	}, "\n"))
+
+	skills, err := ListSkills(root)
+	if err != nil {
+		t.Fatalf("ListSkills() error = %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "audit" || skills[0].Description != "Audit from configured path" {
+		t.Fatalf("skills = %#v, want configured audit skill", skills)
+	}
+}
+
 func TestReadDirectoryAndBinaryRejection(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
@@ -472,4 +496,14 @@ func mapsEqual(left map[string]string, right map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func writeIntegrationFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }

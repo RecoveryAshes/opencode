@@ -367,7 +367,15 @@ func ListSkills(directory string) ([]SkillInfo, error) {
 		return nil, err
 	}
 	result := []SkillInfo{}
-	for _, path := range cfg.Discovery.Skills {
+	paths := append([]string{}, cfg.Discovery.Skills...)
+	for _, root := range configuredSkillRoots(directory, cfg.Info) {
+		matches, err := skillFiles(root)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, matches...)
+	}
+	for _, path := range uniqueStringsLocal(paths) {
 		skill, err := parseSkillFile(path)
 		if err != nil {
 			return nil, err
@@ -378,6 +386,71 @@ func ListSkills(directory string) ([]SkillInfo, error) {
 	}
 	slices.SortFunc(result, func(a SkillInfo, b SkillInfo) int { return strings.Compare(a.Name, b.Name) })
 	return result, nil
+}
+
+func configuredSkillRoots(directory string, info config.Info) []string {
+	skills, ok := info["skills"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := skills["paths"].([]any)
+	if !ok {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	result := []string{}
+	for _, item := range raw {
+		text, ok := item.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			continue
+		}
+		text = strings.TrimSpace(text)
+		if strings.HasPrefix(text, "~/") && home != "" {
+			text = filepath.Join(home, strings.TrimPrefix(text, "~/"))
+		}
+		if !filepath.IsAbs(text) {
+			text = filepath.Join(directory, text)
+		}
+		result = append(result, filepath.Clean(text))
+	}
+	return result
+}
+
+func skillFiles(root string) ([]string, error) {
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return []string{}, nil
+	}
+	result := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Name() == "SKILL.md" {
+			result = append(result, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+func uniqueStringsLocal(input []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, item := range input {
+		if seen[item] {
+			continue
+		}
+		seen[item] = true
+		result = append(result, item)
+	}
+	return result
 }
 
 // ListCommands returns command list items for instance routes.
