@@ -352,6 +352,7 @@ func modelFromConfig(providerID string, modelID string, providerInput map[string
 			ExperimentalOver200K: over200KCostFromConfig(cost["context_over_200k"]),
 		}
 	}
+	model.Variants = variantsFromConfig(input["variants"])
 	model.Capabilities = capabilitiesFromConfig(input, model.Capabilities)
 	return model
 }
@@ -397,6 +398,27 @@ func over200KCostFromConfig(input any) *Over200KModelCost {
 			Write: floatFromAny(record["cache_write"], 0),
 		},
 	}
+}
+
+func variantsFromConfig(input any) map[string]map[string]any {
+	raw, ok := input.(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := map[string]map[string]any{}
+	for name, item := range raw {
+		record, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if boolFromAny(record["disabled"], false) {
+			continue
+		}
+		cleaned := cloneProviderAnyMap(record)
+		delete(cleaned, "disabled")
+		result[name] = cleaned
+	}
+	return result
 }
 
 func capabilitiesFromConfig(input map[string]any, fallback Capabilities) Capabilities {

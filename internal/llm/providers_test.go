@@ -103,6 +103,19 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 							"api": "https://custom.local/model-api",
 							"npm": "@ai-sdk/model-custom",
 						},
+						"variants": map[string]any{
+							"low": map[string]any{
+								"reasoningEffort": "low",
+							},
+							"high": map[string]any{
+								"disabled":        true,
+								"reasoningEffort": "high",
+							},
+							"custom": map[string]any{
+								"disabled":     false,
+								"budgetTokens": 5000,
+							},
+						},
 					},
 				},
 			},
@@ -138,10 +151,16 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 		model.Cost.ExperimentalOver200K == nil ||
 		model.Cost.ExperimentalOver200K.Input != 5 ||
 		model.Cost.ExperimentalOver200K.Cache.Read != 0.5 ||
+		model.Variants["low"]["reasoningEffort"] != "low" ||
+		model.Variants["custom"]["budgetTokens"] != 5000 ||
+		model.Variants["custom"]["disabled"] != nil ||
 		model.Limit.Context != 200000 ||
 		model.Limit.Output != 8192 ||
 		!model.Capabilities.Input.Image {
 		t.Fatalf("custom model = %#v, want config model fields", model)
+	}
+	if _, ok := model.Variants["high"]; ok {
+		t.Fatalf("variants = %#v, did not want disabled high variant", model.Variants)
 	}
 	if result.Default["custom-ai"] != "custom-large" {
 		t.Fatalf("default = %#v, want custom-large", result.Default)
