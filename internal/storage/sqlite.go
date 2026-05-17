@@ -233,6 +233,12 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 	if input.Archived != nil {
 		current.Time.Archived = input.Archived
 	}
+	if input.Compacting != nil {
+		current.Time.Compacting = input.Compacting
+	}
+	if input.ClearCompact {
+		current.Time.Compacting = nil
+	}
 	if input.Permission != nil {
 		current.Permission = append([]string(nil), (*input.Permission)...)
 	}
@@ -280,6 +286,10 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 	if current.Time.Archived != nil {
 		archived = sql.NullInt64{Int64: *current.Time.Archived, Valid: true}
 	}
+	compacting := sql.NullInt64{}
+	if current.Time.Compacting != nil {
+		compacting = sql.NullInt64{Int64: *current.Time.Compacting, Valid: true}
+	}
 	if err := store.ensureProject(ctx, current.ProjectID, current.Directory, session.NowMillis()); err != nil {
 		return session.Info{}, err
 	}
@@ -288,7 +298,7 @@ func (store *SQLiteSessionStore) Update(ctx context.Context, id session.ID, inpu
 title = ?, slug = ?, project_id = ?, workspace_id = ?, directory = ?, path = ?, agent = ?, model = ?, version = ?,
 cost = ?, tokens_input = ?, tokens_output = ?, tokens_reasoning = ?, tokens_cache_read = ?, tokens_cache_write = ?,
 permission = ?, time_updated = ?, time_archived = ?, share_url = ?,
-summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, revert = ?
+summary_additions = ?, summary_deletions = ?, summary_files = ?, summary_diffs = ?, revert = ?, time_compacting = ?
 WHERE id = ?`,
 		current.Title,
 		current.Slug,
@@ -314,6 +324,7 @@ WHERE id = ?`,
 		nullableInt(summary, func(value *session.SummaryInfo) int { return value.Files }),
 		nullableString(string(summaryDiffs), summary != nil && len(summary.Diffs) > 0),
 		nullableString(revertJSON, current.Revert != nil),
+		compacting,
 		id,
 	)
 	if err != nil {
@@ -1147,7 +1158,7 @@ type sessionScanner interface {
 
 const sessionSelectColumns = `SELECT id, slug, project_id, workspace_id, directory, path, parent_id, title, agent, model, version,
 cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,
-permission, time_created, time_updated, time_archived, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert`
+permission, time_created, time_updated, time_archived, time_compacting, share_url, summary_additions, summary_deletions, summary_files, summary_diffs, revert`
 
 func scanSession(scanner sessionScanner) (session.Info, error) {
 	var id string
@@ -1171,6 +1182,7 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 	var created int64
 	var updated int64
 	var archived sql.NullInt64
+	var compacting sql.NullInt64
 	var shareURL sql.NullString
 	var summaryAdditions sql.NullInt64
 	var summaryDeletions sql.NullInt64
@@ -1199,6 +1211,7 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 		&created,
 		&updated,
 		&archived,
+		&compacting,
 		&shareURL,
 		&summaryAdditions,
 		&summaryDeletions,
@@ -1254,6 +1267,9 @@ func scanSession(scanner sessionScanner) (session.Info, error) {
 	}
 	if archived.Valid {
 		info.Time.Archived = &archived.Int64
+	}
+	if compacting.Valid {
+		info.Time.Compacting = &compacting.Int64
 	}
 	if permissionJSON.Valid && permissionJSON.String != "" {
 		if err := json.Unmarshal([]byte(permissionJSON.String), &info.Permission); err != nil {

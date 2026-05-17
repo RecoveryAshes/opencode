@@ -325,23 +325,25 @@ type CreateInput struct {
 
 // UpdateInput is the mutable subset of a session.
 type UpdateInput struct {
-	Title       *string       `json:"title,omitempty"`
-	ProjectID   *string       `json:"projectID,omitempty"`
-	WorkspaceID *string       `json:"workspaceID,omitempty"`
-	Directory   *string       `json:"directory,omitempty"`
-	Path        *string       `json:"path,omitempty"`
-	Agent       *string       `json:"agent,omitempty"`
-	Model       *SessionModel `json:"model,omitempty"`
-	Version     *string       `json:"version,omitempty"`
-	Cost        *float64      `json:"cost,omitempty"`
-	Tokens      *TokenUsage   `json:"tokens,omitempty"`
-	Archived    *int64        `json:"-"`
-	Permission  *[]string     `json:"permission,omitempty"`
-	Revert      *RevertInfo   `json:"revert,omitempty"`
-	ClearRevert bool          `json:"-"`
-	Summary     *SummaryInfo  `json:"summary,omitempty"`
-	Share       *ShareInfo    `json:"share,omitempty"`
-	ClearShare  bool          `json:"-"`
+	Title        *string       `json:"title,omitempty"`
+	ProjectID    *string       `json:"projectID,omitempty"`
+	WorkspaceID  *string       `json:"workspaceID,omitempty"`
+	Directory    *string       `json:"directory,omitempty"`
+	Path         *string       `json:"path,omitempty"`
+	Agent        *string       `json:"agent,omitempty"`
+	Model        *SessionModel `json:"model,omitempty"`
+	Version      *string       `json:"version,omitempty"`
+	Cost         *float64      `json:"cost,omitempty"`
+	Tokens       *TokenUsage   `json:"tokens,omitempty"`
+	Archived     *int64        `json:"-"`
+	Compacting   *int64        `json:"-"`
+	ClearCompact bool          `json:"-"`
+	Permission   *[]string     `json:"permission,omitempty"`
+	Revert       *RevertInfo   `json:"revert,omitempty"`
+	ClearRevert  bool          `json:"-"`
+	Summary      *SummaryInfo  `json:"summary,omitempty"`
+	Share        *ShareInfo    `json:"share,omitempty"`
+	ClearShare   bool          `json:"-"`
 }
 
 // ListFilter represents the currently migrated list query fields.

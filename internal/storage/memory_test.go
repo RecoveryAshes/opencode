@@ -85,12 +85,27 @@ func TestMemorySessionStoreMetadataAndFilters(t *testing.T) {
 	}
 
 	nextWorkspace := "wrk_2"
+	compacting := int64(12345)
 	updated, err := store.Update(ctx, created.ID, session.UpdateInput{WorkspaceID: &nextWorkspace})
 	if err != nil {
 		t.Fatalf("Update(workspaceID) error = %v", err)
 	}
 	if updated.WorkspaceID != "wrk_2" {
 		t.Fatalf("updated workspace = %q, want wrk_2", updated.WorkspaceID)
+	}
+	updated, err = store.Update(ctx, created.ID, session.UpdateInput{Compacting: &compacting})
+	if err != nil {
+		t.Fatalf("Update(compacting) error = %v", err)
+	}
+	if updated.Time.Compacting == nil || *updated.Time.Compacting != compacting {
+		t.Fatalf("compacting = %#v, want %d", updated.Time.Compacting, compacting)
+	}
+	updated, err = store.Update(ctx, created.ID, session.UpdateInput{ClearCompact: true})
+	if err != nil {
+		t.Fatalf("Update(clear compacting) error = %v", err)
+	}
+	if updated.Time.Compacting != nil {
+		t.Fatalf("compacting = %#v, want nil", updated.Time.Compacting)
 	}
 }
 

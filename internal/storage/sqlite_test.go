@@ -104,6 +104,28 @@ func TestSQLiteSessionMetadataAndFilters(t *testing.T) {
 	if updated.ProjectID != "proj_2" || updated.WorkspaceID != "wrk_2" {
 		t.Fatalf("updated project/workspace = %q/%q, want proj_2/wrk_2", updated.ProjectID, updated.WorkspaceID)
 	}
+	compacting := int64(12345)
+	updated, err = store.Update(ctx, created.ID, session.UpdateInput{Compacting: &compacting})
+	if err != nil {
+		t.Fatalf("Update(compacting) error = %v", err)
+	}
+	if updated.Time.Compacting == nil || *updated.Time.Compacting != compacting {
+		t.Fatalf("compacting = %#v, want %d", updated.Time.Compacting, compacting)
+	}
+	reloaded, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get(compacting) error = %v", err)
+	}
+	if reloaded.Time.Compacting == nil || *reloaded.Time.Compacting != compacting {
+		t.Fatalf("reloaded compacting = %#v, want %d", reloaded.Time.Compacting, compacting)
+	}
+	updated, err = store.Update(ctx, created.ID, session.UpdateInput{ClearCompact: true})
+	if err != nil {
+		t.Fatalf("Update(clear compacting) error = %v", err)
+	}
+	if updated.Time.Compacting != nil {
+		t.Fatalf("compacting = %#v, want nil", updated.Time.Compacting)
+	}
 }
 
 func TestSQLiteSessionTodoStatusAndDiff(t *testing.T) {

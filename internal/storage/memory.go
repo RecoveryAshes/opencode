@@ -144,6 +144,12 @@ func (store *MemorySessionStore) Update(_ context.Context, id session.ID, input 
 	if input.Archived != nil {
 		info.Time.Archived = input.Archived
 	}
+	if input.Compacting != nil {
+		info.Time.Compacting = input.Compacting
+	}
+	if input.ClearCompact {
+		info.Time.Compacting = nil
+	}
 	if input.Permission != nil {
 		info.Permission = append([]string(nil), (*input.Permission)...)
 	}
