@@ -28,7 +28,7 @@ func Discover(root string) (Discovery, error) {
 	if result.Agents, err = markdownFiles(filepath.Join(root, ".opencode", "agent")); err != nil {
 		return Discovery{}, err
 	}
-	if result.Commands, err = markdownFiles(filepath.Join(root, ".opencode", "command")); err != nil {
+	if result.Commands, err = commandFileList(root); err != nil {
 		return Discovery{}, err
 	}
 	if result.Skills, err = markdownFiles(filepath.Join(root, ".opencode", "skill")); err != nil {
@@ -38,6 +38,14 @@ func Discover(root string) (Discovery, error) {
 		return Discovery{}, err
 	}
 	return result, nil
+}
+
+func commandFileList(root string) ([]string, error) {
+	files, err := commandFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 func markdownFiles(dir string) ([]string, error) {

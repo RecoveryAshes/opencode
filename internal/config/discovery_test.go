@@ -13,8 +13,12 @@ func TestDiscoverLocalOpenCodeFiles(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(root, ".opencode", "commands", "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir nested commands: %v", err)
+	}
 	writeFile(t, filepath.Join(root, ".opencode", "agent", "build.md"))
 	writeFile(t, filepath.Join(root, ".opencode", "command", "commit.markdown"))
+	writeFile(t, filepath.Join(root, ".opencode", "commands", "nested", "review.md"))
 	writeFile(t, filepath.Join(root, ".opencode", "skill", "review.md"))
 	writeFile(t, filepath.Join(root, ".opencode", "theme", "dark.jsonc"))
 	writeFile(t, filepath.Join(root, ".opencode", "theme", "ignored.txt"))
@@ -26,8 +30,8 @@ func TestDiscoverLocalOpenCodeFiles(t *testing.T) {
 	if len(got.Agents) != 1 || filepath.Base(got.Agents[0]) != "build.md" {
 		t.Fatalf("agents = %#v, want build.md", got.Agents)
 	}
-	if len(got.Commands) != 1 || filepath.Base(got.Commands[0]) != "commit.markdown" {
-		t.Fatalf("commands = %#v, want commit.markdown", got.Commands)
+	if len(got.Commands) != 2 || filepath.Base(got.Commands[0]) != "commit.markdown" || filepath.Base(got.Commands[1]) != "review.md" {
+		t.Fatalf("commands = %#v, want commit.markdown and nested review.md", got.Commands)
 	}
 	if len(got.Skills) != 1 || filepath.Base(got.Skills[0]) != "review.md" {
 		t.Fatalf("skills = %#v, want review.md", got.Skills)

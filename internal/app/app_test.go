@@ -314,6 +314,129 @@ func TestRunSessionPromptCreatesAssistantReply(t *testing.T) {
 	}
 }
 
+func TestRunCommandsAndSessionCommand(t *testing.T) {
+	root := t.TempDir()
+	commandPath := filepath.Join(root, ".opencode", "command", "ship.md")
+	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
+		t.Fatalf("mkdir command dir: %v", err)
+	}
+	commandMarkdown := strings.Join([]string{
+		"---",
+		"description: Ship command",
+		"agent: build",
+		"model: openai-compatible/local-model",
+		"---",
+		"Ship $1",
+		"Rest $2",
+		"Shell !`printf ok`",
+	}, "\n")
+	if err := os.WriteFile(commandPath, []byte(commandMarkdown), 0o644); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+
+	commands := runAppJSON[map[string]any](t, ctx, []string{"commands", "--directory", root})
+	ship, ok := commands["ship"].(map[string]any)
+	if !ok || ship["description"] != "Ship command" || ship["model"] != "openai-compatible/local-model" {
+		t.Fatalf("commands = %#v, want ship metadata", commands)
+	}
+
+	created := runAppJSON[map[string]any](t, ctx, []string{"session", "--db", dbPath, "create", "--title", "Command"})
+	sessionID := created["id"].(string)
+	message := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "command",
+		"--directory", root,
+		"--argument", `"first arg" second third`,
+		"--no-reply",
+		sessionID,
+		"ship",
+	})
+	info, ok := message["info"].(map[string]any)
+	if !ok || info["role"] != "user" || info["agent"] != "build" {
+		t.Fatalf("message info = %#v, want build user message", message["info"])
+	}
+	model, ok := info["model"].(map[string]any)
+	if !ok || model["providerID"] != "openai-compatible" || model["modelID"] != "local-model" {
+		t.Fatalf("message model = %#v, want command model", info["model"])
+	}
+	parts, ok := message["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("message parts = %#v, want one text part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("part = %#v, want object", parts[0])
+	}
+	text, ok := part["text"].(string)
+	if !ok {
+		t.Fatalf("part text = %#v, want string", part["text"])
+	}
+	for _, want := range []string{"Ship first arg", "Rest second third", "Shell ok"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rendered command text = %q, missing %q", text, want)
+		}
+	}
+	metadata, ok := part["metadata"].(map[string]any)
+	if !ok || metadata["command"] != "ship" || metadata["arguments"] != `"first arg" second third` {
+		t.Fatalf("metadata = %#v, want command metadata", part["metadata"])
+	}
+}
+
+func TestRunSessionCommandCreatesAssistantReply(t *testing.T) {
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode llm request: %v", err)
+		}
+		messages, ok := request["messages"].([]any)
+		if !ok || len(messages) != 1 {
+			t.Fatalf("messages = %#v, want one command prompt", request["messages"])
+		}
+		first, ok := messages[0].(map[string]any)
+		if !ok || first["content"] != "Run command" {
+			t.Fatalf("first message = %#v, want rendered command prompt", messages[0])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"command reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer llmServer.Close()
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_BASE_URL", llmServer.URL)
+	t.Setenv("OPENCODE_OPENAI_COMPATIBLE_API_KEY", "local-key")
+
+	root := t.TempDir()
+	commandPath := filepath.Join(root, ".opencode", "command", "run.md")
+	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
+		t.Fatalf("mkdir command dir: %v", err)
+	}
+	if err := os.WriteFile(commandPath, []byte("Run command"), 0o644); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	ctx := context.Background()
+	created := runAppJSON[map[string]any](t, ctx, []string{"session", "--db", dbPath, "create", "--title", "Command Reply"})
+	sessionID := created["id"].(string)
+
+	assistant := runAppJSON[map[string]any](t, ctx, []string{
+		"session", "--db", dbPath, "command",
+		"--directory", root,
+		sessionID,
+		"run",
+	})
+	info, ok := assistant["info"].(map[string]any)
+	if !ok || info["role"] != "assistant" {
+		t.Fatalf("assistant info = %#v, want assistant", assistant["info"])
+	}
+	parts, ok := assistant["parts"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("assistant parts = %#v, want text and finish", assistant["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok || part["text"] != "command reply" {
+		t.Fatalf("assistant first part = %#v, want command reply", parts[0])
+	}
+}
+
 func TestRunSessionPromptRejectsTextAndTextFileTogether(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/RecoveryAshes/opencode/internal/config"
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/domain/session/retry"
 	"github.com/RecoveryAshes/opencode/internal/integration"
@@ -47,6 +48,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return sessionCommand(ctx, args[1:], stdout, stderr)
 	case "retry-delay":
 		return retryDelay(args[1:], stdout, stderr)
+	case "commands":
+		return commands(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "tools":
@@ -174,6 +177,8 @@ func sessionCommand(ctx context.Context, args []string, stdout io.Writer, stderr
 		return sessionMessages(ctx, messageRepo, fs.Args()[1:], stdout, stderr)
 	case "prompt":
 		return sessionPrompt(ctx, messageRepo, fs.Args()[1:], stdout, stderr)
+	case "command":
+		return sessionRunCommand(ctx, messageRepo, fs.Args()[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown session command: %s\n", fs.Arg(0))
 		return 2
@@ -376,6 +381,70 @@ func sessionPrompt(ctx context.Context, repo server.MessageRepository, args []st
 	return writeJSON(stdout, result)
 }
 
+func sessionRunCommand(ctx context.Context, repo server.MessageRepository, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("session command", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover command files")
+	argument := fs.String("argument", "", "raw slash-command arguments")
+	agent := fs.String("agent", "build", "fallback agent name")
+	model := fs.String("model", "", "fallback provider/model id")
+	noReply := fs.Bool("no-reply", false, "store the rendered command prompt without running an assistant reply")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode session [--db PATH] command [--directory DIR] [--argument TEXT] [--no-reply] SESSION_ID COMMAND")
+		return 2
+	}
+	id, err := session.ParseID(fs.Arg(0))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid session id: %v\n", err)
+		return 2
+	}
+	rendered, err := config.ExecuteCommand(ctx, config.CommandInput{
+		Name:      fs.Arg(1),
+		Argument:  *argument,
+		Directory: *directory,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "execute command failed: %v\n", err)
+		return 1
+	}
+	agentName := defaultAppString(rendered.Agent, *agent)
+	providerID, modelID := rendered.Provider, rendered.Model
+	if providerID == "" || modelID == "" {
+		providerID, modelID = parseProviderModel(*model)
+	}
+	result, err := repo.CreatePrompt(ctx, id, session.PromptInput{
+		Agent:   agentName,
+		Model:   &session.ModelRef{ProviderID: providerID, ModelID: modelID},
+		NoReply: *noReply,
+		Parts: []session.Part{{
+			Type: "text",
+			Data: map[string]any{
+				"text": rendered.Prompt,
+				"metadata": map[string]any{
+					"command":   rendered.Command.Name,
+					"arguments": rendered.Argument,
+				},
+			},
+		}},
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "create command prompt failed: %v\n", err)
+		return 1
+	}
+	if !*noReply {
+		assistant, err := runtime.NewPromptRuntime(repo).Reply(ctx, id, result)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "create assistant reply failed: %v\n", err)
+			return 1
+		}
+		return writeJSON(stdout, assistant)
+	}
+	return writeJSON(stdout, result)
+}
+
 func readPromptText(text string, textFile string, stdin io.Reader) (string, error) {
 	if textFile == "" {
 		return text, nil
@@ -386,6 +455,24 @@ func readPromptText(text string, textFile string, stdin io.Reader) (string, erro
 	}
 	data, err := os.ReadFile(textFile)
 	return string(data), err
+}
+
+func parseProviderModel(model string) (string, string) {
+	if model == "" {
+		return "openai-compatible", "gpt-4o-mini"
+	}
+	provider, modelID, ok := strings.Cut(model, "/")
+	if !ok {
+		return "openai-compatible", model
+	}
+	return provider, modelID
+}
+
+func defaultAppString(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func writeJSON(stdout io.Writer, value any) int {
@@ -446,6 +533,25 @@ func tools(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func commands(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover command files")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode commands [--directory DIR]")
+		return 2
+	}
+	result, err := config.LoadCommands(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "load commands failed: %v\n", err)
+		return 1
+	}
+	return writeJSON(stdout, result)
 }
 
 func tool(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -517,6 +623,7 @@ commands:
   version
   serve [--hostname HOST] [--port PORT] [--db PATH]
   session [--db PATH] COMMAND
+  commands [--directory DIR]
   providers
   tools
   tool [--directory DIR] [--params JSON | --params-file PATH] NAME
