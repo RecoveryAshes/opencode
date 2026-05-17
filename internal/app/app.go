@@ -110,7 +110,7 @@ func runPrompt(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 		return 2
 	}
 
-	sessionRepo, messageRepo, closeRepo, err := openRepositories(*dbPath)
+	sessionRepo, messageRepo, _, closeRepo, err := openRepositories(*dbPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
 		return 1
@@ -166,7 +166,7 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 		return 2
 	}
 
-	sessionRepo, messageRepo, closeRepo, err := openRepositories(*dbPath)
+	sessionRepo, messageRepo, syncStore, closeRepo, err := openRepositories(*dbPath)
 	if err != nil {
 		if _, writeErr := fmt.Fprintf(stderr, "open db failed: %v\n", err); writeErr != nil {
 			return 1
@@ -181,6 +181,7 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 		Version:  version,
 		Sessions: sessionRepo,
 		Messages: messageRepo,
+		Sync:     syncStore,
 	})
 	if err != nil {
 		if _, writeErr := fmt.Fprintf(stderr, "serve failed: %v\n", err); writeErr != nil {
@@ -201,20 +202,20 @@ func serve(ctx context.Context, args []string, stdout io.Writer, stderr io.Write
 	return 0
 }
 
-func openRepositories(dbPath string) (server.SessionRepository, server.MessageRepository, func(), error) {
+func openRepositories(dbPath string) (server.SessionRepository, server.MessageRepository, *integration.SyncStore, func(), error) {
 	resolved, err := resolveDBPath(dbPath)
 	if err != nil {
-		return nil, nil, func() {}, err
+		return nil, nil, nil, func() {}, err
 	}
 	if resolved == "" {
 		store := storage.NewMemorySessionStore()
-		return store, store, func() {}, nil
+		return store, store, integration.NewSyncStore(), func() {}, nil
 	}
 	store, err := storage.OpenSQLiteSessionStore(resolved)
 	if err != nil {
-		return nil, nil, func() {}, err
+		return nil, nil, nil, func() {}, err
 	}
-	return store, store, func() {
+	return store, store, integration.NewSyncStoreWithPersistence(store), func() {
 		_ = store.Close()
 	}, nil
 }
@@ -244,7 +245,7 @@ func sessionCommand(ctx context.Context, args []string, stdout io.Writer, stderr
 		return 2
 	}
 
-	sessionRepo, messageRepo, closeRepo, err := openRepositories(*dbPath)
+	sessionRepo, messageRepo, _, closeRepo, err := openRepositories(*dbPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "open db failed: %v\n", err)
 		return 1

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	syncdomain "github.com/RecoveryAshes/opencode/internal/domain/sync"
 	_ "modernc.org/sqlite"
 )
 
@@ -289,12 +290,15 @@ func (store *SQLiteSessionStore) configure(ctx context.Context) error {
 		sessionSchema,
 		messageSchema,
 		partSchema,
+		eventSequenceSchema,
+		eventSchema,
 		`CREATE INDEX IF NOT EXISTS session_project_idx ON session(project_id)`,
 		`CREATE INDEX IF NOT EXISTS session_workspace_idx ON session(workspace_id)`,
 		`CREATE INDEX IF NOT EXISTS session_parent_idx ON session(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx ON message(session_id, time_created, id)`,
 		`CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part(message_id, id)`,
 		`CREATE INDEX IF NOT EXISTS part_session_idx ON part(session_id)`,
+		`CREATE INDEX IF NOT EXISTS event_aggregate_seq_idx ON event(aggregate_id, seq)`,
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("configure sqlite: %w", err)
@@ -311,6 +315,79 @@ id, worktree, name, time_created, time_updated, sandboxes
 		return fmt.Errorf("ensure project: %w", err)
 	}
 	return nil
+}
+
+// AppendEvents stores sync events using the legacy event/event_sequence schema.
+func (store *SQLiteSessionStore) AppendEvents(aggregateID string, events []syncdomain.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin sync append: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, event := range events {
+		rowAggregateID := event.AggregateID
+		if rowAggregateID == "" {
+			rowAggregateID = aggregateID
+		}
+		data, err := json.Marshal(event.Data)
+		if err != nil {
+			return fmt.Errorf("marshal sync event: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO event_sequence (aggregate_id, seq) VALUES (?, ?)`, rowAggregateID, -1); err != nil {
+			return fmt.Errorf("ensure event sequence: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO event (id, aggregate_id, seq, type, data) VALUES (?, ?, ?, ?, ?)`, event.ID, rowAggregateID, event.Seq, event.Type, string(data)); err != nil {
+			return fmt.Errorf("insert sync event: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE event_sequence SET seq = CASE WHEN seq < ? THEN ? ELSE seq END WHERE aggregate_id = ?`, event.Seq, event.Seq, rowAggregateID); err != nil {
+			return fmt.Errorf("update event sequence: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sync append: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// EventsAfter returns sync events newer than the supplied aggregate sequence map.
+func (store *SQLiteSessionStore) EventsAfter(cursor map[string]int64) ([]syncdomain.HistoryEvent, error) {
+	rows, err := store.db.QueryContext(context.Background(), `SELECT id, aggregate_id, seq, type, data FROM event ORDER BY seq ASC, aggregate_id ASC, id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list sync events: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	result := []syncdomain.HistoryEvent{}
+	for rows.Next() {
+		var item syncdomain.HistoryEvent
+		var raw string
+		if err := rows.Scan(&item.ID, &item.AggregateID, &item.Seq, &item.Type, &raw); err != nil {
+			return nil, fmt.Errorf("scan sync event: %w", err)
+		}
+		if after, ok := cursor[item.AggregateID]; ok && item.Seq <= after {
+			continue
+		}
+		if err := json.Unmarshal([]byte(raw), &item.Data); err != nil {
+			return nil, fmt.Errorf("decode sync event: %w", err)
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sync events: %w", err)
+	}
+	return result, nil
 }
 
 // Messages returns messages in creation order.
@@ -852,4 +929,19 @@ time_created integer NOT NULL,
 time_updated integer NOT NULL,
 data text NOT NULL,
 CONSTRAINT fk_part_message_id_message_id_fk FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE
+)`
+
+const eventSequenceSchema = `CREATE TABLE IF NOT EXISTS event_sequence (
+aggregate_id text NOT NULL PRIMARY KEY,
+seq integer NOT NULL,
+owner_id text
+)`
+
+const eventSchema = `CREATE TABLE IF NOT EXISTS event (
+id text PRIMARY KEY,
+aggregate_id text NOT NULL,
+seq integer NOT NULL,
+type text NOT NULL,
+data text NOT NULL,
+CONSTRAINT fk_event_aggregate_id_event_sequence_aggregate_id_fk FOREIGN KEY (aggregate_id) REFERENCES event_sequence(aggregate_id) ON DELETE CASCADE
 )`

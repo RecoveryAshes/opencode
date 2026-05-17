@@ -6,25 +6,15 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	syncdomain "github.com/RecoveryAshes/opencode/internal/domain/sync"
 )
 
 // SyncEvent is the serialized sync event contract.
-type SyncEvent struct {
-	ID          string         `json:"id"`
-	AggregateID string         `json:"aggregateID"`
-	Seq         int64          `json:"seq"`
-	Type        string         `json:"type"`
-	Data        map[string]any `json:"data"`
-}
+type SyncEvent = syncdomain.Event
 
 // SyncHistoryEvent is the storage row returned by /sync/history.
-type SyncHistoryEvent struct {
-	ID          string         `json:"id"`
-	AggregateID string         `json:"aggregate_id"`
-	Seq         int64          `json:"seq"`
-	Type        string         `json:"type"`
-	Data        map[string]any `json:"data"`
-}
+type SyncHistoryEvent = syncdomain.HistoryEvent
 
 // SyncReplayInput is the /sync/replay payload.
 type SyncReplayInput struct {
@@ -47,13 +37,20 @@ type SyncStore struct {
 	mu        sync.RWMutex
 	events    map[string][]SyncEvent
 	ownerByID map[string]string
+	persist   syncdomain.Store
 }
 
 // NewSyncStore creates an empty sync event log.
 func NewSyncStore() *SyncStore {
+	return NewSyncStoreWithPersistence(nil)
+}
+
+// NewSyncStoreWithPersistence creates a sync event log backed by optional storage.
+func NewSyncStoreWithPersistence(persist syncdomain.Store) *SyncStore {
 	return &SyncStore{
 		events:    map[string][]SyncEvent{},
 		ownerByID: map[string]string{},
+		persist:   persist,
 	}
 }
 
@@ -92,24 +89,36 @@ func (store *SyncStore) Replay(_ context.Context, input SyncReplayInput) (SyncRe
 		}
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	existing := store.events[source]
-	latest := int64(-1)
-	if len(existing) > 0 {
-		latest = existing[len(existing)-1].Seq
-	}
-	for _, event := range input.Events {
-		if event.Seq <= latest {
-			continue
+	appended := []SyncEvent{}
+	if err := func() error {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		existing := store.events[source]
+		latest := int64(-1)
+		if len(existing) > 0 {
+			latest = existing[len(existing)-1].Seq
 		}
-		if event.Seq != latest+1 {
-			return SyncReplayResult{}, fmt.Errorf("sequence mismatch for aggregate %q: expected %d, got %d", source, latest+1, event.Seq)
+		for _, event := range input.Events {
+			if event.Seq <= latest {
+				continue
+			}
+			if event.Seq != latest+1 {
+				return fmt.Errorf("sequence mismatch for aggregate %q: expected %d, got %d", source, latest+1, event.Seq)
+			}
+			existing = append(existing, event)
+			appended = append(appended, event)
+			latest = event.Seq
 		}
-		existing = append(existing, event)
-		latest = event.Seq
+		store.events[source] = existing
+		return nil
+	}(); err != nil {
+		return SyncReplayResult{}, err
 	}
-	store.events[source] = existing
+	if store.persist != nil && len(appended) > 0 {
+		if err := store.persist.AppendEvents(source, appended); err != nil {
+			return SyncReplayResult{}, err
+		}
+	}
 	return SyncReplayResult{SessionID: source}, nil
 }
 
@@ -122,7 +131,6 @@ func (store *SyncStore) Steal(_ context.Context, workspaceID string, sessionID s
 		return SyncSessionInput{}, fmt.Errorf("workspace is required")
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	store.ownerByID[sessionID] = workspaceID
 	next := SyncEvent{
 		ID:          fmt.Sprintf("evt_sync_%d", len(store.events[sessionID])+1),
@@ -137,11 +145,20 @@ func (store *SyncStore) Steal(_ context.Context, workspaceID string, sessionID s
 		},
 	}
 	store.events[sessionID] = append(store.events[sessionID], next)
+	store.mu.Unlock()
+	if store.persist != nil {
+		if err := store.persist.AppendEvents(sessionID, []SyncEvent{next}); err != nil {
+			return SyncSessionInput{}, err
+		}
+	}
 	return SyncSessionInput{SessionID: sessionID}, nil
 }
 
 // History returns all events newer than the client-provided sequence map.
 func (store *SyncStore) History(_ context.Context, cursor map[string]int64) ([]SyncHistoryEvent, error) {
+	if store.persist != nil {
+		return store.persist.EventsAfter(cursor)
+	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	result := []SyncHistoryEvent{}

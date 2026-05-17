@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
+	syncdomain "github.com/RecoveryAshes/opencode/internal/domain/sync"
 )
 
 func TestSQLiteSessionStoreCreateListUpdateRemove(t *testing.T) {
@@ -110,6 +111,58 @@ func TestSQLiteSessionSchemaMatchesCoreLegacyColumns(t *testing.T) {
 		if !columns[column] {
 			t.Fatalf("session column %q missing", column)
 		}
+	}
+}
+
+func TestSQLiteSyncEventStore(t *testing.T) {
+	store, err := OpenSQLiteSessionStore(filepath.Join(t.TempDir(), "opencode.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteSessionStore() error = %v", err)
+	}
+	defer closeStore(t, store)
+
+	events := []syncdomain.Event{{
+		ID:          "evt_1",
+		AggregateID: "ses_sql_sync",
+		Seq:         0,
+		Type:        "session.created.1",
+		Data:        map[string]any{"sessionID": "ses_sql_sync"},
+	}, {
+		ID:          "evt_2",
+		AggregateID: "ses_sql_sync",
+		Seq:         1,
+		Type:        "session.updated.1",
+		Data:        map[string]any{"sessionID": "ses_sql_sync", "info": map[string]any{"title": "updated"}},
+	}}
+	if err := store.AppendEvents("ses_sql_sync", events); err != nil {
+		t.Fatalf("AppendEvents() error = %v", err)
+	}
+	if err := store.AppendEvents("ses_sql_sync", events[:1]); err != nil {
+		t.Fatalf("AppendEvents() duplicate error = %v", err)
+	}
+
+	history, err := store.EventsAfter(map[string]int64{})
+	if err != nil {
+		t.Fatalf("EventsAfter() error = %v", err)
+	}
+	if len(history) != 2 || history[0].ID != "evt_1" || history[1].Data["sessionID"] != "ses_sql_sync" {
+		t.Fatalf("history = %#v, want inserted events", history)
+	}
+
+	history, err = store.EventsAfter(map[string]int64{"ses_sql_sync": 0})
+	if err != nil {
+		t.Fatalf("EventsAfter(cursor) error = %v", err)
+	}
+	if len(history) != 1 || history[0].ID != "evt_2" {
+		t.Fatalf("cursor history = %#v, want evt_2", history)
+	}
+
+	var seq int
+	if err := store.db.QueryRow(`SELECT seq FROM event_sequence WHERE aggregate_id = ?`, "ses_sql_sync").Scan(&seq); err != nil {
+		t.Fatalf("read event_sequence: %v", err)
+	}
+	if seq != 1 {
+		t.Fatalf("event_sequence seq = %d, want 1", seq)
 	}
 }
 
