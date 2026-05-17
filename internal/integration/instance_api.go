@@ -367,7 +367,7 @@ func ListSkills(directory string) ([]SkillInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := []SkillInfo{}
+	skills := map[string]SkillInfo{}
 	paths := append([]string{}, cfg.Discovery.Skills...)
 	for _, root := range configuredSkillRoots(directory, cfg.Info) {
 		matches, err := skillFiles(root)
@@ -393,8 +393,12 @@ func ListSkills(directory string) ([]SkillInfo, error) {
 			return nil, err
 		}
 		if skill.Name != "" {
-			result = append(result, skill)
+			skills[skill.Name] = skill
 		}
+	}
+	result := make([]SkillInfo, 0, len(skills))
+	for _, skill := range skills {
+		result = append(result, skill)
 	}
 	slices.SortFunc(result, func(a SkillInfo, b SkillInfo) int { return strings.Compare(a.Name, b.Name) })
 	return result, nil
@@ -843,7 +847,7 @@ func parseSkillFile(path string) (SkillInfo, error) {
 	}
 	name := meta["name"]
 	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		return SkillInfo{}, nil
 	}
 	return SkillInfo{Name: name, Description: meta["description"], Location: path, Content: strings.TrimSpace(content)}, nil
 }

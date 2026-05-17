@@ -169,6 +169,12 @@ func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
 	if !strings.Contains(skillResult.Output, `<skill_content name="review">`) {
 		t.Fatalf("skill output = %q", skillResult.Output)
 	}
+	if strings.Contains(skillResult.Output, "---\nname: review") {
+		t.Fatalf("skill output includes frontmatter = %q", skillResult.Output)
+	}
+	if !strings.Contains(skillResult.Output, "Base directory for this skill: file://") {
+		t.Fatalf("skill output missing file URL base directory = %q", skillResult.Output)
+	}
 
 	todoResult, err := Execute(context.Background(), Request{
 		Name: "todowrite",
@@ -453,6 +459,31 @@ func TestListSkillsIncludesConfiguredLocalPaths(t *testing.T) {
 	}
 	if len(skills) != 1 || skills[0].Name != "audit" || skills[0].Description != "Audit from configured path" {
 		t.Fatalf("skills = %#v, want configured audit skill", skills)
+	}
+
+	result, err := Execute(context.Background(), Request{
+		Name:      "skill",
+		Directory: root,
+		Params:    map[string]any{"name": "audit"},
+	})
+	if err != nil {
+		t.Fatalf("configured skill Execute() error = %v", err)
+	}
+	if !strings.Contains(result.Output, `<skill_content name="audit">`) || !strings.Contains(result.Output, "Audit configured path.") {
+		t.Fatalf("configured skill output = %q", result.Output)
+	}
+}
+
+func TestListSkillsSkipsMissingFrontmatterName(t *testing.T) {
+	root := t.TempDir()
+	writeIntegrationFile(t, filepath.Join(root, ".opencode", "skills", "missing", "SKILL.md"), "# Missing\n\nNo frontmatter.")
+
+	skills, err := ListSkills(root)
+	if err != nil {
+		t.Fatalf("ListSkills() error = %v", err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("skills = %#v, want no skills without frontmatter name", skills)
 	}
 }
 

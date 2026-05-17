@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -186,23 +187,19 @@ func skillTool(request Request) (Result, error) {
 		return Result{}, err
 	}
 	root := resolvePath(request.Directory, ".")
-	location, err := findSkill(root, name)
+	skill, err := findSkill(root, name)
 	if err != nil {
 		return Result{}, err
 	}
-	data, err := os.ReadFile(location)
-	if err != nil {
-		return Result{}, fmt.Errorf("read skill %s: %w", location, err)
-	}
-	dir := filepath.Dir(location)
+	dir := filepath.Dir(skill.Location)
 	files := sampledFiles(dir, 10)
 	output := []string{
-		fmt.Sprintf(`<skill_content name="%s">`, name),
-		"# Skill: " + name,
+		fmt.Sprintf(`<skill_content name="%s">`, skill.Name),
+		"# Skill: " + skill.Name,
 		"",
-		strings.TrimSpace(string(data)),
+		strings.TrimSpace(skill.Content),
 		"",
-		"Base directory for this skill: " + dir,
+		"Base directory for this skill: " + fileURLString(dir),
 		"Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
 		"Note: file list is sampled.",
 		"",
@@ -212,42 +209,36 @@ func skillTool(request Request) (Result, error) {
 		"</skill_content>",
 	}
 	return Result{
-		Title: "Loaded skill: " + name,
+		Title: "Loaded skill: " + skill.Name,
 		Metadata: map[string]any{
-			"name": name,
+			"name": skill.Name,
 			"dir":  dir,
 		},
 		Output: strings.Join(output, "\n"),
 	}, nil
 }
 
-func findSkill(root string, name string) (string, error) {
-	candidates := []string{
-		filepath.Join(root, ".opencode", "skill", name, "SKILL.md"),
-		filepath.Join(root, ".opencode", "skills", name, "SKILL.md"),
-		filepath.Join(root, ".opencode", "skill", name+".md"),
-		filepath.Join(root, ".opencode", "skills", name+".md"),
-	}
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
+func findSkill(root string, name string) (SkillInfo, error) {
+	skills, err := ListSkills(root)
+	if err != nil {
+		return SkillInfo{}, err
 	}
 	available := []string{}
-	for _, dir := range []string{filepath.Join(root, ".opencode", "skill"), filepath.Join(root, ".opencode", "skills")} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	for _, skill := range skills {
+		if skill.Name == name {
+			return skill, nil
 		}
-		for _, entry := range entries {
-			item := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
-			if entry.IsDir() {
-				item = entry.Name()
-			}
-			available = append(available, item)
-		}
+		available = append(available, skill.Name)
 	}
-	return "", fmt.Errorf("skill %q not found. Available skills: %s", name, strings.Join(available, ", "))
+	text := strings.Join(available, ", ")
+	if text == "" {
+		text = "none"
+	}
+	return SkillInfo{}, fmt.Errorf("skill %q not found. Available skills: %s", name, text)
+}
+
+func fileURLString(path string) string {
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
 }
 
 func sampledFiles(root string, limit int) []string {
