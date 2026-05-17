@@ -95,6 +95,12 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 		return repoOverviewTool(ctx, request)
 	case "todo", "todowrite":
 		return todoTool(request)
+	case "question":
+		return questionTool(request)
+	case "task":
+		return taskTool(request)
+	case "task_status":
+		return taskStatusTool(request)
 	default:
 		return Result{}, fmt.Errorf("tool %q is not implemented in Go yet", request.Name)
 	}

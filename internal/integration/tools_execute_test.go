@@ -187,6 +187,76 @@ func TestEditApplyPatchWebFetchSkillTodoAndRepoOverviewTools(t *testing.T) {
 	}
 }
 
+func TestQuestionTaskAndTaskStatusTools(t *testing.T) {
+	questionResult, err := Execute(context.Background(), Request{
+		Name: "question",
+		Params: map[string]any{
+			"questions": []map[string]any{{
+				"question": "Which branch?",
+				"options": []map[string]string{{
+					"label":       "go",
+					"description": "Use the Go branch",
+				}},
+			}},
+			"answers": []any{[]any{"go"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("question Execute() error = %v", err)
+	}
+	if questionResult.Title != "Asked 1 question" || !strings.Contains(questionResult.Output, `"Which branch?"="go"`) {
+		t.Fatalf("question result = %#v", questionResult)
+	}
+
+	taskResult, err := Execute(context.Background(), Request{
+		Name: "task",
+		Params: map[string]any{
+			"description":   "Inspect providers",
+			"prompt":        "Find remaining provider gaps",
+			"subagent_type": "explorer",
+			"task_id":       "task_manual",
+			"result":        "Provider gaps summarized.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("task Execute() error = %v", err)
+	}
+	if taskResult.Metadata["task_id"] != "task_manual" || !strings.Contains(taskResult.Output, "<task_result>\nProvider gaps summarized.\n</task_result>") {
+		t.Fatalf("task result = %#v", taskResult)
+	}
+
+	backgroundResult, err := Execute(context.Background(), Request{
+		Name: "task",
+		Params: map[string]any{
+			"description":   "Background scan",
+			"prompt":        "Scan while I work",
+			"subagent_type": "explorer",
+			"background":    true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("background task Execute() error = %v", err)
+	}
+	if backgroundResult.Metadata["state"] != "running" || !strings.Contains(backgroundResult.Output, "state: running") {
+		t.Fatalf("background task result = %#v", backgroundResult)
+	}
+
+	statusResult, err := Execute(context.Background(), Request{
+		Name: "task_status",
+		Params: map[string]any{
+			"task_id": "task_manual",
+			"state":   "completed",
+			"result":  "Provider gaps summarized.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("task_status Execute() error = %v", err)
+	}
+	if statusResult.Metadata["state"] != "completed" || !strings.Contains(statusResult.Output, "task_id: task_manual") {
+		t.Fatalf("task_status result = %#v", statusResult)
+	}
+}
+
 func TestParseRepositoryReferenceSupportsGitSSHShorthand(t *testing.T) {
 	got, err := parseRepositoryReference("git@github.com:RecoveryAshes/opencode.git")
 	if err != nil {
