@@ -152,6 +152,113 @@ func TestRunToolRejectsParamsAndParamsFileTogether(t *testing.T) {
 	}
 }
 
+func TestRunAgentListJSONDiscoversConfiguredAndMarkdownAgents(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	configContent := strings.Join([]string{
+		"{",
+		`  "agent": {`,
+		`    "reviewer": {`,
+		`      "description": "Review configured changes",`,
+		`      "mode": "subagent",`,
+		`      "model": "openai-compatible/local-model",`,
+		`      "permission": {"edit": "deny"}`,
+		"    }",
+		"  }",
+		"}",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, "opencode.jsonc"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	agentPath := filepath.Join(root, ".opencode", "agents", "nested", "writer.md")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	agentContent := strings.Join([]string{
+		"---",
+		"description: Write release notes",
+		"mode: all",
+		"---",
+		"Write concise release notes.",
+	}, "\n")
+	if err := os.WriteFile(agentPath, []byte(agentContent), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"agent", "--directory", root, "--json", "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var agents []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &agents); err != nil {
+		t.Fatalf("decode agents JSON: %v\nstdout=%s", err, stdout.String())
+	}
+	names := map[string]map[string]any{}
+	for _, agent := range agents {
+		names[agent["name"].(string)] = agent
+	}
+	if names["build"]["native"] != true {
+		t.Fatalf("build agent = %#v, want native built-in", names["build"])
+	}
+	reviewer := names["reviewer"]
+	if reviewer["description"] != "Review configured changes" || reviewer["mode"] != "subagent" {
+		t.Fatalf("reviewer = %#v, want configured metadata", reviewer)
+	}
+	model := reviewer["model"].(map[string]any)
+	if model["providerID"] != "openai-compatible" || model["modelID"] != "local-model" {
+		t.Fatalf("reviewer model = %#v, want parsed provider/model", model)
+	}
+	writer := names["nested/writer"]
+	if writer["description"] != "Write release notes" || !strings.Contains(writer["prompt"].(string), "release notes") {
+		t.Fatalf("writer = %#v, want markdown metadata and prompt", writer)
+	}
+}
+
+func TestRunAgentListTextOrdersNativeAgentsFirst(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	agentPath := filepath.Join(root, ".opencode", "agent", "aaa.md")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(agentPath, []byte("---\nmode: all\n---\nCustom prompt."), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"agent", "--directory", root, "list"}, &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	buildIndex := strings.Index(output, "build (primary)")
+	customIndex := strings.Index(output, "aaa (all)")
+	if buildIndex < 0 || customIndex < 0 || buildIndex > customIndex {
+		t.Fatalf("agent list output = %q, want native build before custom aaa", output)
+	}
+	if !strings.Contains(output, `  {`) || !strings.Contains(output, `"*"`) {
+		t.Fatalf("agent list output = %q, want indented permission JSON", output)
+	}
+}
+
+func TestRunAgentGetMissing(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", filepath.Join(root, "home"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(context.Background(), []string{"agent", "--directory", root, "get", "missing"}, &stdout, &stderr, "test")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "agent not found: missing") {
+		t.Fatalf("stderr = %q, want missing agent error", stderr.String())
+	}
+}
+
 func TestRunSessionLifecycleWithSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "opencode.db")
 	ctx := context.Background()

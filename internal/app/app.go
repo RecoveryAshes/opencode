@@ -68,6 +68,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 		return exportCommand(ctx, args[1:], stdout, stderr)
 	case "import":
 		return importCommand(ctx, args[1:], stdout, stderr)
+	case "agent":
+		return agentCommand(args[1:], stdout, stderr)
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
@@ -862,6 +864,90 @@ func tools(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func agentCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	directory := fs.String("directory", ".", "directory used to discover agent files")
+	jsonOutput := fs.Bool("json", false, "write agent data JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: opencode agent [--directory DIR] [--json] COMMAND")
+		return 2
+	}
+	agents, err := integration.ListAgents(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "list agents failed: %v\n", err)
+		return 1
+	}
+	sortAgentsForCLI(agents)
+	switch fs.Arg(0) {
+	case "list":
+		if fs.NArg() != 1 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode agent [--directory DIR] [--json] list")
+			return 2
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, agents)
+		}
+		for _, agent := range agents {
+			if _, err := fmt.Fprintf(stdout, "%s (%s)\n", agent.Name, agent.Mode); err != nil {
+				return 1
+			}
+			data, err := json.MarshalIndent(agent.Permission, "  ", "  ")
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "encode agent permission failed: %v\n", err)
+				return 1
+			}
+			if _, err := fmt.Fprintf(stdout, "  %s\n", data); err != nil {
+				return 1
+			}
+		}
+		return 0
+	case "get":
+		if fs.NArg() != 2 {
+			_, _ = fmt.Fprintln(stderr, "usage: opencode agent [--directory DIR] [--json] get NAME")
+			return 2
+		}
+		name := fs.Arg(1)
+		for _, agent := range agents {
+			if agent.Name != name {
+				continue
+			}
+			if *jsonOutput {
+				return writeJSON(stdout, agent)
+			}
+			if _, err := fmt.Fprintf(stdout, "%s (%s)\n", agent.Name, agent.Mode); err != nil {
+				return 1
+			}
+			if agent.Description != "" {
+				if _, err := fmt.Fprintf(stdout, "%s\n", agent.Description); err != nil {
+					return 1
+				}
+			}
+			return 0
+		}
+		_, _ = fmt.Fprintf(stderr, "agent not found: %s\n", name)
+		return 2
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown agent command: %s\n", fs.Arg(0))
+		return 2
+	}
+}
+
+func sortAgentsForCLI(agents []integration.AgentInfo) {
+	slices.SortFunc(agents, func(a integration.AgentInfo, b integration.AgentInfo) int {
+		if a.Native != b.Native {
+			if a.Native {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+}
+
 func commands(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1442,6 +1528,7 @@ commands:
   debug file COMMAND
   export [--db PATH] [--sanitize] [SESSION_ID]
   import [--db PATH] FILE
+  agent [--directory DIR] [--json] COMMAND
   providers [--json] [--directory DIR] [--worktree DIR]
   models [--verbose] [--refresh] [--directory DIR] [--worktree DIR] [PROVIDER]
   tools
