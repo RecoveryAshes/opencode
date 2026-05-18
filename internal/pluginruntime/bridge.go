@@ -115,8 +115,12 @@ async function main() {
     }
     for (const hooks of loaded) {
       try {
-        if (req.config && typeof hooks.config === "function") {
-          await hooks.config(req.config)
+        const configTarget = req.hook === "config.apply" && output.config ? output.config : req.config
+        if (configTarget && typeof hooks.config === "function") {
+          await hooks.config(configTarget)
+        }
+        if (req.hook === "config.apply") {
+          continue
         }
         if (req.hook === "auth.methods") {
           const auth = publicAuthMethods(hooks.auth)

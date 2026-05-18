@@ -24,6 +24,19 @@ import (
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "opencode-server-test-home-*")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	_ = os.Setenv("OPENCODE_TEST_HOME", home)
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
 func TestHealth(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
 	defer server.Close()
@@ -1319,6 +1332,62 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	}
 	if authError["name"] != "ProviderAuthOauthMissing" {
 		t.Fatalf("provider callback error = %#v, want ProviderAuthOauthMissing", authError)
+	}
+}
+
+func TestProviderHTTPAPIUsesPluginConfigHook(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	home := t.TempDir()
+	root := filepath.Join(home, "repo")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("OPENCODE_TEST_HOME", home)
+	plugin := filepath.Join(root, ".opencode", "plugin", "provider.ts")
+	writeServerFile(t, plugin, strings.Join([]string{
+		"export default {",
+		"  id: 'demo.provider',",
+		"  server: async () => ({",
+		"    config(cfg) {",
+		"      cfg.enabled_providers = ['demo']",
+		"      cfg.provider ??= {}",
+		"      cfg.provider.demo = {",
+		"        name: 'Demo Provider',",
+		"        models: { chat: { name: 'Demo Chat', limit: { context: 1000, output: 100 } } }",
+		"      }",
+		"    }",
+		"  })",
+		"}",
+		"",
+	}, "\n"))
+
+	server := httptest.NewServer(NewHandler(Options{Version: "test"}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/provider?directory=" + urlQueryEscape(root))
+	if err != nil {
+		t.Fatalf("GET /provider error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /provider status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode provider response: %v", err)
+	}
+	all, ok := body["all"].([]any)
+	if !ok || len(all) != 1 {
+		t.Fatalf("providers = %#v, want plugin provider only", body["all"])
+	}
+	provider := all[0].(map[string]any)
+	if provider["id"] != "demo" || provider["name"] != "Demo Provider" {
+		t.Fatalf("provider = %#v, want demo provider from config hook", provider)
+	}
+	defaults := body["default"].(map[string]any)
+	if defaults["demo"] != "chat" {
+		t.Fatalf("default = %#v, want demo chat", defaults)
 	}
 }
 

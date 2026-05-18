@@ -211,6 +211,60 @@ func TestRuntimeRunsChatHooks(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunsConfigHook(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	root := t.TempDir()
+	plugin := filepath.Join(root, "config-plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default {",
+		"  id: 'demo.config',",
+		"  server: async () => ({",
+		"    config(cfg) {",
+		"      cfg.provider ??= {}",
+		"      cfg.provider.demo = { name: 'Demo Provider', models: { chat: { name: 'Demo Chat' } } }",
+		"      cfg.enabled_providers = ['demo']",
+		"    }",
+		"  })",
+		"}",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := config.Info{"plugin_origins": []any{map[string]any{
+		"spec":   fileURL(plugin),
+		"source": filepath.Join(root, "opencode.json"),
+		"scope":  "local",
+	}}}
+	runtime := New(info, root, root)
+	mutated, err := runtime.ApplyConfigHook(context.Background())
+	if err != nil {
+		t.Fatalf("ApplyConfigHook() error = %v", err)
+	}
+	providers := mutated["provider"].(map[string]any)
+	demo := providers["demo"].(map[string]any)
+	if demo["name"] != "Demo Provider" {
+		t.Fatalf("provider = %#v, want plugin provider", demo)
+	}
+	if !anyStringSliceEqual(mutated["enabled_providers"], []string{"demo"}) {
+		t.Fatalf("enabled_providers = %#v, want demo", mutated["enabled_providers"])
+	}
+}
+
 func fileURL(path string) string {
 	return "file://" + filepath.ToSlash(path)
+}
+
+func anyStringSliceEqual(value any, want []string) bool {
+	items, ok := value.([]any)
+	if !ok || len(items) != len(want) {
+		return false
+	}
+	for index, item := range items {
+		if item != want[index] {
+			return false
+		}
+	}
+	return true
 }

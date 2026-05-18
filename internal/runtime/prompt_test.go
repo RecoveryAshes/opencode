@@ -21,6 +21,19 @@ type fakeChatClient struct {
 	responses []llm.ChatResponse
 }
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "opencode-runtime-test-home-*")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	_ = os.Setenv("OPENCODE_TEST_HOME", home)
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
 func (client *fakeChatClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	client.request = request
 	client.requests = append(client.requests, request)
@@ -339,6 +352,73 @@ func TestPromptRuntimeUsesConfiguredCustomProvider(t *testing.T) {
 	}
 	if assistant.Info.ProviderID != "custom-ai" || assistant.Info.ModelID != "friendly" {
 		t.Fatalf("assistant info = %#v, want public custom provider model", assistant.Info)
+	}
+}
+
+func TestPromptRuntimeUsesPluginConfigProvider(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	plugin := filepath.Join(root, "provider-plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default {",
+		"  id: 'demo.provider',",
+		"  server: async () => ({",
+		"    config(cfg) {",
+		"      cfg.provider ??= {}",
+		"      cfg.provider.demo = {",
+		"        name: 'Demo Provider',",
+		"        npm: '@ai-sdk/openai-compatible',",
+		"        api: 'https://demo.example/v1',",
+		"        models: { chat: { name: 'Demo Chat', tool_call: true, limit: { context: 1000, output: 100 } } }",
+		"      }",
+		"      cfg.model = 'demo/chat'",
+		"    }",
+		"  })",
+		"}",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := map[string]any{
+		"plugin_origins": []any{map[string]any{
+			"spec":   "file://" + filepath.ToSlash(plugin),
+			"source": filepath.Join(root, "opencode.json"),
+			"scope":  "local",
+		}},
+	}
+	store := storage.NewMemorySessionStore()
+	sessionInfo, err := store.Create(ctx, session.CreateInput{Title: "plugin provider"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, sessionInfo.ID, session.PromptInput{
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{
+		Messages: store,
+		Client:   client,
+		CWD:      root,
+		Root:     root,
+		Config:   info,
+		Plugins:  pluginruntime.New(info, root, root),
+	}
+
+	assistant, err := runtime.Reply(ctx, sessionInfo.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.ProviderID != "demo" || client.request.Model != "chat" || client.request.BaseURL != "https://demo.example/v1" {
+		t.Fatalf("provider request = %#v, want plugin config provider", client.request)
+	}
+	if assistant.Info.ProviderID != "demo" || assistant.Info.ModelID != "chat" {
+		t.Fatalf("assistant info = %#v, want plugin config model", assistant.Info)
 	}
 }
 

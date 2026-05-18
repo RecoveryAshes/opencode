@@ -579,7 +579,11 @@ func configProviders() http.HandlerFunc {
 		if err != nil {
 			return nil, statusFromError(err), err
 		}
-		return llm.ConfigProviders(cfg.Info), http.StatusOK, nil
+		info, err := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree")).ApplyConfigHook(r.Context())
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		return llm.ConfigProviders(info), http.StatusOK, nil
 	})
 }
 
@@ -592,7 +596,11 @@ func providersList() http.HandlerFunc {
 		if err != nil {
 			return nil, statusFromError(err), err
 		}
-		return llm.ListProviders(cfg.Info), http.StatusOK, nil
+		info, err := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree")).ApplyConfigHook(r.Context())
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		return llm.ListProviders(info), http.StatusOK, nil
 	})
 }
 
@@ -622,7 +630,11 @@ func providerByPath() http.HandlerFunc {
 			if err != nil {
 				return nil, statusFromError(err), err
 			}
-			plugins := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree"))
+			info, err := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree")).ApplyConfigHook(r.Context())
+			if err != nil {
+				return nil, statusFromError(err), err
+			}
+			plugins := pluginruntime.New(info, requestDirectory(r), r.URL.Query().Get("worktree"))
 			methods, err := plugins.AuthMethods(r.Context())
 			return methods, statusFromError(err), err
 		}
@@ -652,7 +664,11 @@ func providerByPath() http.HandlerFunc {
 		if err != nil {
 			return nil, statusFromError(err), err
 		}
-		plugins := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree"))
+		info, err := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree")).ApplyConfigHook(r.Context())
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		plugins := pluginruntime.New(info, requestDirectory(r), r.URL.Query().Get("worktree"))
 		methodNumber, _ := numberFromAny(payload.Method)
 		authorization, api, handled, err := plugins.AuthorizeProvider(r.Context(), parts[0], int(methodNumber), payload.Inputs)
 		if err != nil {

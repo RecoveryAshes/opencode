@@ -98,7 +98,7 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 		messages = lowerTranscript([]session.WithParts{userMessage})
 	}
 
-	providerConfig, err := runtime.providerConfig()
+	providerConfig, err := runtime.providerConfig(ctx)
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -220,9 +220,9 @@ func providerHookContext(info config.Info, request llm.ChatRequest, model sessio
 	}
 }
 
-func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
+func (runtime *PromptRuntime) providerConfig(ctx context.Context) (config.Info, error) {
 	if runtime.Config != nil {
-		return runtime.Config, nil
+		return runtime.pluginRuntime(runtime.Config).ApplyConfigHook(ctx)
 	}
 	directory := defaultString(runtime.CWD, ".")
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
@@ -232,7 +232,7 @@ func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
 	if err != nil {
 		return nil, err
 	}
-	return loaded.Info, nil
+	return pluginruntime.New(loaded.Info, directory, defaultString(runtime.Root, directory)).ApplyConfigHook(ctx)
 }
 
 func (runtime *PromptRuntime) pluginRuntime(info config.Info) *pluginruntime.Runtime {
