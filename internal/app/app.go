@@ -86,7 +86,7 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer,
 	case "providers":
 		return providers(args[1:], stdout, stderr)
 	case "models":
-		return models(args[1:], stdout, stderr)
+		return models(ctx, args[1:], stdout, stderr)
 	case "tools":
 		return tools(args[1:], stdout, stderr)
 	case "tool":
@@ -843,7 +843,7 @@ func providers(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-func models(args []string, stdout io.Writer, stderr io.Writer) int {
+func models(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("models", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	verbose := fs.Bool("verbose", false, "include model metadata JSON after each model id")
@@ -858,7 +858,13 @@ func models(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	if *refresh {
-		_, _ = fmt.Fprintln(stderr, "warning: --refresh is not needed in the Go provider registry")
+		if err := llm.RefreshModelsCatalog(ctx, true); err != nil {
+			_, _ = fmt.Fprintf(stderr, "refresh models cache failed: %v\n", err)
+			return 1
+		}
+		if _, err := fmt.Fprintln(stdout, "Models cache refreshed"); err != nil {
+			return 1
+		}
 	}
 	cfg, err := config.Load(config.LoadOptions{
 		Directory: *directory,

@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +46,53 @@ func writeModelsDevFixture(t *testing.T, content string) string {
 	return path
 }
 
+func isolateModelsDevCatalog(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("OPENCODE_MODELS_URL", "")
+	t.Setenv("OPENCODE_MODELS_PATH", "")
+	t.Setenv("OPENCODE_DISABLE_MODELS_FETCH", "1")
+	t.Setenv("OPENCODE_CLIENT", "")
+	defaultModelsDevCatalog.mu.Lock()
+	defaultModelsDevCatalog.cacheKey = ""
+	defaultModelsDevCatalog.raw = nil
+	defaultModelsDevCatalog.mu.Unlock()
+	t.Cleanup(func() {
+		defaultModelsDevCatalog.mu.Lock()
+		defaultModelsDevCatalog.cacheKey = ""
+		defaultModelsDevCatalog.raw = nil
+		defaultModelsDevCatalog.mu.Unlock()
+	})
+	return root
+}
+
+func modelsDevFixture(provider string) string {
+	return `{
+		"` + provider + `": {
+			"id": "` + provider + `",
+			"name": "Fixture AI",
+			"env": ["FIXTURE_API_KEY"],
+			"npm": "@fixture/sdk",
+			"api": "https://fixture.example/v1",
+			"models": {
+				"fixture-pro": {
+					"id": "fixture-pro",
+					"name": "Fixture Pro",
+					"attachment": false,
+					"reasoning": false,
+					"temperature": true,
+					"tool_call": true,
+					"release_date": "2026-01-02",
+					"modalities": {"input":["text"],"output":["text"]},
+					"limit": {"context": 128000, "output": 4096},
+					"cost": {"input": 1, "output": 2}
+				}
+			}
+		}
+	}`
+}
+
 func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 	got := map[string]bool{}
 	for _, id := range ProviderIDs() {
@@ -58,6 +107,7 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 }
 
 func TestListProvidersLoadsModelsDevPath(t *testing.T) {
+	isolateModelsDevCatalog(t)
 	path := writeModelsDevFixture(t, `{
 		"fixture-ai": {
 			"id": "fixture-ai",
@@ -128,6 +178,7 @@ func TestListProvidersLoadsModelsDevPath(t *testing.T) {
 }
 
 func TestListProvidersLoadsModelsDevExperimentalModes(t *testing.T) {
+	isolateModelsDevCatalog(t)
 	path := writeModelsDevFixture(t, `{
 		"fixture-ai": {
 			"id": "fixture-ai",
@@ -179,6 +230,7 @@ func TestListProvidersLoadsModelsDevExperimentalModes(t *testing.T) {
 }
 
 func TestListProvidersModelsDevPathMergesConfigOverrides(t *testing.T) {
+	isolateModelsDevCatalog(t)
 	path := writeModelsDevFixture(t, `{
 		"fixture-ai": {
 			"id": "fixture-ai",
@@ -229,6 +281,7 @@ func TestListProvidersModelsDevPathMergesConfigOverrides(t *testing.T) {
 }
 
 func TestListProvidersMissingModelsDevPathFallsBackToStaticCatalog(t *testing.T) {
+	isolateModelsDevCatalog(t)
 	t.Setenv("OPENCODE_MODELS_PATH", filepath.Join(t.TempDir(), "missing.json"))
 
 	result := ListProviders(config.Info{"enabled_providers": []any{"openai"}})
@@ -237,7 +290,116 @@ func TestListProvidersMissingModelsDevPathFallsBackToStaticCatalog(t *testing.T)
 	}
 }
 
+func TestListProvidersLoadsModelsDevCacheFile(t *testing.T) {
+	isolateModelsDevCatalog(t)
+	cachePath := modelsDevCacheFile()
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte(modelsDevFixture("cache-ai")), 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	result := ListProviders(config.Info{"enabled_providers": []any{"cache-ai"}})
+	if len(result.All) != 1 || result.All[0].ID != "cache-ai" || result.All[0].Models["fixture-pro"].Name != "Fixture Pro" {
+		t.Fatalf("providers = %#v, want models.dev cache provider", result.All)
+	}
+}
+
+func TestListProvidersLoadsModelsDevSnapshotFallback(t *testing.T) {
+	isolateModelsDevCatalog(t)
+
+	result := ListProviders(config.Info{"enabled_providers": []any{"openai"}})
+	if len(result.All) != 1 || result.All[0].ID != "openai" {
+		t.Fatalf("providers = %#v, want openai from snapshot", result.All)
+	}
+	if _, ok := result.All[0].Models["gpt-4o"]; !ok {
+		t.Fatalf("openai models = %#v, want snapshot model", result.All[0].Models)
+	}
+}
+
+func TestRefreshModelsCatalogFetchesAndCachesModelsDev(t *testing.T) {
+	isolateModelsDevCatalog(t)
+	t.Setenv("OPENCODE_DISABLE_MODELS_FETCH", "")
+	t.Setenv("OPENCODE_CLIENT", "test-client")
+
+	var gotPath string
+	var gotUserAgent string
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(modelsDevFixture("remote-ai")))
+	}))
+	defer remote.Close()
+	t.Setenv("OPENCODE_MODELS_URL", remote.URL)
+
+	if err := RefreshModelsCatalog(t.Context(), true); err != nil {
+		t.Fatalf("RefreshModelsCatalog() error = %v", err)
+	}
+	if gotPath != "/api.json" {
+		t.Fatalf("path = %q, want /api.json", gotPath)
+	}
+	if gotUserAgent != "opencode/go/dev/test-client" {
+		t.Fatalf("user agent = %q, want Go models.dev agent", gotUserAgent)
+	}
+	result := ListProviders(config.Info{"enabled_providers": []any{"remote-ai"}})
+	if len(result.All) != 1 || result.All[0].ID != "remote-ai" {
+		t.Fatalf("providers = %#v, want remote-ai", result.All)
+	}
+	cacheData, err := os.ReadFile(modelsDevCacheFile())
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	if !strings.Contains(string(cacheData), "remote-ai") {
+		t.Fatalf("cache = %q, want remote-ai catalog", string(cacheData))
+	}
+}
+
+func TestModelsDevCustomURLUsesSHA1CacheName(t *testing.T) {
+	isolateModelsDevCatalog(t)
+	t.Setenv("OPENCODE_MODELS_URL", "https://fixture.models.example")
+
+	got := filepath.Base(modelsDevCacheFile())
+	want := "models-" + sha1Hex("https://fixture.models.example") + ".json"
+	if got != want {
+		t.Fatalf("cache name = %q, want %q", got, want)
+	}
+}
+
+func TestRefreshModelsCatalogSkipsFreshCache(t *testing.T) {
+	isolateModelsDevCatalog(t)
+	t.Setenv("OPENCODE_DISABLE_MODELS_FETCH", "")
+	t.Setenv("OPENCODE_MODELS_URL", "https://fresh-cache.example")
+	cachePath := modelsDevCacheFile()
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte(modelsDevFixture("fresh-ai")), 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	remoteCalled := false
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		remoteCalled = true
+		_, _ = w.Write([]byte(modelsDevFixture("remote-ai")))
+	}))
+	defer remote.Close()
+
+	if err := RefreshModelsCatalog(t.Context(), false); err != nil {
+		t.Fatalf("RefreshModelsCatalog() error = %v", err)
+	}
+	if remoteCalled {
+		t.Fatalf("remote was called despite fresh cache")
+	}
+	result := ListProviders(config.Info{"enabled_providers": []any{"fresh-ai"}})
+	if len(result.All) != 1 || result.All[0].ID != "fresh-ai" {
+		t.Fatalf("providers = %#v, want fresh cache provider", result.All)
+	}
+}
+
 func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
+	isolateModelsDevCatalog(t)
 	result := ListProviders(config.Info{
 		"enabled_providers":  []any{"anthropic", "custom-ai"},
 		"disabled_providers": []any{"openai"},

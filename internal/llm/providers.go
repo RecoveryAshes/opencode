@@ -2,10 +2,9 @@
 package llm
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -162,10 +161,16 @@ func ConfigProviders(info config.Info) ConfigProvidersResult {
 	}
 }
 
+// RefreshModelsCatalog refreshes the models.dev cache used to populate provider
+// metadata. On refresh failure it preserves the best available local catalog.
+func RefreshModelsCatalog(ctx context.Context, force bool) error {
+	return refreshModelsDevCatalog(ctx, force)
+}
+
 func filteredProviders(info config.Info) []PublicProvider {
 	enabled := stringSetFromConfig(info["enabled_providers"])
 	disabled := stringSetFromConfig(info["disabled_providers"])
-	catalog := modelsDevProvidersFromEnv()
+	catalog := modelsDevProviders()
 	custom := configuredProviders(info)
 
 	result := []PublicProvider{}
@@ -219,38 +224,6 @@ func filteredProviders(info config.Info) []PublicProvider {
 			public = mergePublicProvider(public, override)
 		}
 		result = append(result, public)
-	}
-	return result
-}
-
-func modelsDevProvidersFromEnv() map[string]PublicProvider {
-	path := strings.TrimSpace(os.Getenv("OPENCODE_MODELS_PATH"))
-	if path == "" {
-		return map[string]PublicProvider{}
-	}
-	return modelsDevProvidersFromPath(path)
-}
-
-func modelsDevProvidersFromPath(path string) map[string]PublicProvider {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return map[string]PublicProvider{}
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return map[string]PublicProvider{}
-	}
-	result := map[string]PublicProvider{}
-	for id, value := range raw {
-		record, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		provider := providerFromModelsDev(id, record)
-		if provider.ID == "" {
-			continue
-		}
-		result[provider.ID] = provider
 	}
 	return result
 }

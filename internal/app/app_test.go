@@ -1825,8 +1825,10 @@ func isolateAppConfig(t *testing.T, root string) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("OPENCODE_TEST_HOME", home)
 	t.Setenv("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+	t.Setenv("OPENCODE_DISABLE_MODELS_FETCH", "1")
 	t.Chdir(root)
 }
 
