@@ -48,6 +48,7 @@ type Request struct {
 	Name      string         `json:"name"`
 	Params    map[string]any `json:"params"`
 	Directory string         `json:"directory,omitempty"`
+	Env       map[string]string
 }
 
 // Result is the stable execution response returned by migrated Go tools.
@@ -571,6 +572,9 @@ func shellTool(ctx context.Context, request Request) (Result, error) {
 	shell, args := shellCommand(command)
 	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.Dir = cwd
+	if len(request.Env) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), request.Env)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -601,6 +605,27 @@ func shellTool(ctx context.Context, request Request) (Result, error) {
 		},
 		Output: output,
 	}, nil
+}
+
+func mergeEnv(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := map[string]int{}
+	result := append([]string{}, base...)
+	for index, item := range result {
+		key, _, _ := strings.Cut(item, "=")
+		seen[key] = index
+	}
+	for key, value := range extra {
+		item := key + "=" + value
+		if index, ok := seen[key]; ok {
+			result[index] = item
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func requireString(params map[string]any, key string) (string, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/pluginruntime"
 )
 
 // ChatClient is the LLM boundary required by prompt execution.
@@ -28,6 +29,7 @@ type PromptRuntime struct {
 	CWD      string
 	Root     string
 	Config   config.Info
+	Plugins  *pluginruntime.Runtime
 	// MaxToolIterations caps provider/tool feedback loops for one assistant turn.
 	MaxToolIterations int
 }
@@ -101,7 +103,13 @@ func (runtime *PromptRuntime) Reply(ctx context.Context, sessionID session.ID, u
 		return session.WithParts{}, err
 	}
 	model, configuredDefault := modelRef(userMessage, providerConfig, userMessage.Info.Agent, transcript)
-	response, tools, usage, effectiveModel, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, localToolDefinitions(userMessage.Info.Tools), providerConfig, configuredDefault)
+	plugins := runtime.pluginRuntime(providerConfig)
+	definitions := localToolDefinitions(userMessage.Info.Tools)
+	definitions, err = plugins.ApplyToolDefinitions(ctx, definitions)
+	if err != nil {
+		return session.WithParts{}, err
+	}
+	response, tools, usage, effectiveModel, err := runtime.runProviderLoop(ctx, sessionID, client, messages, model, userMessage.Info.Agent, definitions, providerConfig, configuredDefault)
 	if err != nil {
 		return session.WithParts{}, err
 	}
@@ -187,6 +195,16 @@ func (runtime *PromptRuntime) providerConfig() (config.Info, error) {
 		return nil, err
 	}
 	return loaded.Info, nil
+}
+
+func (runtime *PromptRuntime) pluginRuntime(info config.Info) *pluginruntime.Runtime {
+	if runtime.Plugins != nil {
+		return runtime.Plugins
+	}
+	directory := defaultString(runtime.CWD, mustGetwd())
+	worktree := defaultString(runtime.Root, directory)
+	runtime.Plugins = pluginruntime.New(info, directory, worktree)
+	return runtime.Plugins
 }
 
 func configuredProviderChatRequest(messages []llm.Message, info config.Info, model session.ModelRef) (llm.ChatRequest, bool) {
@@ -896,24 +914,52 @@ func (runtime *PromptRuntime) executeToolCalls(ctx context.Context, sessionID se
 	}
 	directory := defaultString(runtime.CWD, mustGetwd())
 	result := make([]session.ToolExecution, 0, len(calls))
+	plugins := runtime.pluginRuntime(runtime.Config)
 	for _, call := range calls {
 		start := session.NowMillis()
+		args := cloneRuntimeAnyMap(call.Arguments)
 		execution := session.ToolExecution{
 			CallID:    defaultString(call.ID, call.Name),
 			Tool:      call.Name,
-			Input:     call.Arguments,
+			Input:     args,
 			Raw:       call.Raw,
 			StartTime: start,
+		}
+		effectiveArgs, hookErr := plugins.BeforeToolExecute(ctx, call.Name, string(sessionID), execution.CallID, args)
+		if hookErr != nil {
+			execution.EndTime = session.NowMillis()
+			execution.Error = hookErr.Error()
+			result = append(result, execution)
+			continue
+		}
+		execution.Input = effectiveArgs
+		extraEnv := map[string]string(nil)
+		if integration.CanonicalToolName(call.Name) == "bash" {
+			env, envErr := plugins.ShellEnv(ctx, directory, string(sessionID), execution.CallID)
+			if envErr != nil {
+				execution.EndTime = session.NowMillis()
+				execution.Error = envErr.Error()
+				result = append(result, execution)
+				continue
+			}
+			extraEnv = env
 		}
 		output, err := integration.Execute(ctx, integration.Request{
 			Name:      call.Name,
 			Directory: directory,
-			Params:    call.Arguments,
+			Params:    effectiveArgs,
+			Env:       extraEnv,
 		})
 		execution.EndTime = session.NowMillis()
 		if err != nil {
 			execution.Error = err.Error()
 		} else {
+			output, err = plugins.AfterToolExecute(ctx, call.Name, string(sessionID), execution.CallID, effectiveArgs, output)
+			if err != nil {
+				execution.Error = err.Error()
+				result = append(result, execution)
+				continue
+			}
 			execution.Title = output.Title
 			execution.Output = output.Output
 			execution.Metadata = output.Metadata

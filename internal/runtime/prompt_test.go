@@ -3,12 +3,14 @@ package runtime
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/pluginruntime"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
 
@@ -1128,6 +1130,99 @@ func TestPromptRuntimeExecutesToolCalls(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeRunsPluginToolHooks(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "patched.txt"), []byte("patched plugin content\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	plugin := filepath.Join(root, "plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default async () => ({",
+		"  'tool.definition': (input, output) => {",
+		"    if (input.toolID === 'read') output.description = 'plugin read description'",
+		"  },",
+		"  'tool.execute.before': (input, output) => {",
+		"    if (input.tool === 'read') output.args.filePath = 'patched.txt'",
+		"  },",
+		"  'tool.execute.after': (input, output) => {",
+		"    if (input.tool === 'read') { output.output += '\\nplugin after'; output.metadata.plugin = true }",
+		"  },",
+		"})",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := map[string]any{
+		"plugin_origins": []any{map[string]any{
+			"spec":   "file://" + filepath.ToSlash(plugin),
+			"source": filepath.Join(root, "opencode.json"),
+			"scope":  "local",
+		}},
+	}
+	store := storage.NewMemorySessionStore()
+	sessionInfo, err := store.Create(ctx, session.CreateInput{Title: "plugins"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, sessionInfo.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "read with plugin"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{
+		responses: []llm.ChatResponse{
+			{
+				FinishReason: "tool-calls",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_1",
+					Name:      "read",
+					Arguments: map[string]any{"filePath": "input.txt"},
+					Raw:       `{"filePath":"input.txt"}`,
+				}},
+			},
+			{Text: "done", FinishReason: "stop"},
+		},
+	}
+	runtime := &PromptRuntime{
+		Messages: store,
+		Client:   client,
+		CWD:      root,
+		Root:     root,
+		Config:   info,
+		Plugins:  pluginruntime.New(info, root, root),
+	}
+
+	assistant, err := runtime.Reply(ctx, sessionInfo.ID, user)
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	readTool := toolByNameForTest(client.request.Tools, "read")
+	if readTool.Description != "plugin read description" {
+		t.Fatalf("read tool definition = %#v, want plugin description", readTool)
+	}
+	if len(assistant.Parts) < 2 || assistant.Parts[1].Type != "tool" {
+		t.Fatalf("assistant parts = %#v, want tool part", assistant.Parts)
+	}
+	tool := assistant.Parts[1]
+	state, ok := tool.Data["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("state = %#v, want object", tool.Data["state"])
+	}
+	if !strings.Contains(stringValue(state["output"]), "patched plugin content") || !strings.Contains(stringValue(state["output"]), "plugin after") {
+		t.Fatalf("state output = %#v, want plugin-mutated read output", state["output"])
+	}
+	input, ok := state["input"].(map[string]any)
+	if !ok || input["filePath"] != "patched.txt" {
+		t.Fatalf("state input = %#v, want plugin-mutated args", state["input"])
+	}
+}
+
 func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()
@@ -1342,6 +1437,15 @@ func TestToolResultMessageSanitizesProviderText(t *testing.T) {
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func toolByNameForTest(tools []llm.ToolDefinition, name string) llm.ToolDefinition {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	return llm.ToolDefinition{}
 }
 
 func anyStringSliceEqual(value any, want []string) bool {

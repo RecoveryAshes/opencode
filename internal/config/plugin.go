@@ -357,6 +357,11 @@ func pluginOriginsFromInfo(info Info) []PluginOrigin {
 	return result
 }
 
+// PluginOrigins returns the derived plugin provenance stored by Load.
+func PluginOrigins(info Info) []PluginOrigin {
+	return pluginOriginsFromInfo(info)
+}
+
 func mergePluginOrigins(existing []PluginOrigin, source string, scope string, specs []PluginSpec) []PluginOrigin {
 	if len(specs) == 0 {
 		return existing
