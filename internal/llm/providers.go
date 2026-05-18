@@ -913,10 +913,15 @@ func providerName(id string) string {
 
 func providerEnvVars(id string) []string {
 	env := map[string][]string{
-		"openai":                {"OPENAI_API_KEY"},
-		"anthropic":             {"ANTHROPIC_API_KEY"},
-		"google":                {"GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"},
-		"google-vertex":         {"GOOGLE_VERTEX_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"},
+		"openai":        {"OPENAI_API_KEY"},
+		"anthropic":     {"ANTHROPIC_API_KEY"},
+		"google":        {"GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"},
+		"google-vertex": {"GOOGLE_VERTEX_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"},
+		"google-vertex-anthropic": {
+			"GOOGLE_VERTEX_PROJECT",
+			"GOOGLE_VERTEX_LOCATION",
+			"GOOGLE_APPLICATION_CREDENTIALS",
+		},
 		"azure":                 {"AZURE_OPENAI_API_KEY", "AZURE_OPENAI_RESOURCE_NAME"},
 		"amazon-bedrock":        {"AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_PROFILE"},
 		"openrouter":            {"OPENROUTER_API_KEY"},
@@ -1235,6 +1240,24 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			TokenSource:    googleTokenSource{},
 		}
 		return profile.chatRequest(messages, modelID), nil
+	case "google-vertex-anthropic":
+		project := googleVertexProject()
+		if project == "" {
+			return ChatRequest{}, fmt.Errorf("google-vertex-anthropic provider requires GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT")
+		}
+		location := googleVertexAnthropicLocation()
+		profile := anthropicProfile{
+			ProviderID:     "google-vertex-anthropic",
+			DefaultBaseURL: googleVertexAnthropicBaseURL(project, location),
+			BaseURLEnvVars: []string{"OPENCODE_GOOGLE_VERTEX_ANTHROPIC_BASE_URL", "GOOGLE_VERTEX_ANTHROPIC_BASE_URL"},
+			ModelEnvVars:   []string{"OPENCODE_GOOGLE_VERTEX_ANTHROPIC_MODEL", "GOOGLE_VERTEX_ANTHROPIC_MODEL"},
+			DefaultModel:   "claude-sonnet-4-6@default",
+			Headers:        map[string]string{"anthropic-version": "2023-06-01"},
+			AuthHeader:     "Authorization",
+			AuthScheme:     "Bearer",
+			TokenSource:    googleTokenSource{},
+		}
+		return profile.chatRequest(messages, modelID), nil
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
 	}
@@ -1348,6 +1371,7 @@ var providers = []Provider{
 	{ID: "anthropic", Name: "Anthropic", Protocols: []string{"messages"}},
 	{ID: "google", Name: "Gemini", Protocols: []string{"generate-content"}},
 	{ID: "google-vertex", Name: "Vertex AI", Protocols: []string{"generate-content"}},
+	{ID: "google-vertex-anthropic", Name: "Vertex (Anthropic)", Protocols: []string{"messages"}},
 	{ID: "azure", Name: "Azure OpenAI", Protocols: []string{"responses", "chat-completions"}},
 	{ID: "amazon-bedrock", Name: "Amazon Bedrock", Protocols: []string{"converse", "invoke-model"}},
 	{ID: "opencode", Name: "OpenCode Zen", Protocols: []string{"openai-compatible"}},
@@ -1417,18 +1441,24 @@ type anthropicProfile struct {
 	ModelEnvVars   []string
 	DefaultModel   string
 	Headers        map[string]string
+	AuthHeader     string
+	AuthScheme     string
+	TokenSource    TokenSource
 }
 
 func (profile anthropicProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	authHeader := defaultString(profile.AuthHeader, "x-api-key")
 	return ChatRequest{
-		ProviderID: profile.ProviderID,
-		Protocol:   "anthropic-messages",
-		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
-		APIKey:     firstEnv(profile.APIKeyEnvVars...),
-		AuthHeader: "x-api-key",
-		Headers:    cloneStringMap(profile.Headers),
-		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
-		Messages:   messages,
+		ProviderID:  profile.ProviderID,
+		Protocol:    "anthropic-messages",
+		BaseURL:     defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:      firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader:  authHeader,
+		AuthScheme:  profile.AuthScheme,
+		Headers:     cloneStringMap(profile.Headers),
+		Model:       defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:    messages,
+		TokenSource: profile.TokenSource,
 	}
 }
 

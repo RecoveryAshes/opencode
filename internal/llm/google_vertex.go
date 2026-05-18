@@ -38,6 +38,16 @@ func googleVertexLocation() string {
 	return defaultString(firstEnv("OPENCODE_GOOGLE_VERTEX_LOCATION", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"), defaultVertexLocation)
 }
 
+func googleVertexAnthropicLocation() string {
+	return defaultString(firstEnv(
+		"OPENCODE_GOOGLE_VERTEX_ANTHROPIC_LOCATION",
+		"GOOGLE_VERTEX_ANTHROPIC_LOCATION",
+		"GOOGLE_VERTEX_LOCATION",
+		"GOOGLE_CLOUD_LOCATION",
+		"VERTEX_LOCATION",
+	), "global")
+}
+
 func googleVertexEndpoint(location string) string {
 	if location == "global" {
 		return "aiplatform.googleapis.com"
@@ -48,4 +58,9 @@ func googleVertexEndpoint(location string) string {
 func googleVertexGeminiBaseURL(project string, location string) string {
 	location = defaultString(strings.TrimSpace(location), defaultVertexLocation)
 	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s/publishers/google", googleVertexEndpoint(location), project, location)
+}
+
+func googleVertexAnthropicBaseURL(project string, location string) string {
+	location = defaultString(strings.TrimSpace(location), "global")
+	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s/publishers/anthropic", googleVertexEndpoint(location), project, location)
 }

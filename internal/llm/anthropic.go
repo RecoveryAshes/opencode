@@ -73,7 +73,9 @@ func (client *AnthropicClient) Chat(ctx context.Context, request ChatRequest) (C
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Anthropic request: %w", err)
 	}
-	applyAnthropicHeaders(httpRequest, request)
+	if err := applyAnthropicHeaders(ctx, httpRequest, request); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -368,7 +370,7 @@ func mapAnthropicFinishReason(reason string) string {
 	}
 }
 
-func applyAnthropicHeaders(httpRequest *http.Request, request ChatRequest) {
+func applyAnthropicHeaders(ctx context.Context, httpRequest *http.Request, request ChatRequest) error {
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "text/event-stream, application/json")
 	httpRequest.Header.Set("anthropic-version", "2023-06-01")
@@ -381,6 +383,16 @@ func applyAnthropicHeaders(httpRequest *http.Request, request ChatRequest) {
 	if request.APIKey != "" {
 		httpRequest.Header.Set(defaultString(request.AuthHeader, "x-api-key"), request.APIKey)
 	}
+	if request.TokenSource != nil {
+		token, err := request.TokenSource.Token(ctx)
+		if err != nil {
+			return fmt.Errorf("load Anthropic bearer token: %w", err)
+		}
+		if strings.TrimSpace(token) != "" {
+			httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		}
+	}
+	return nil
 }
 
 func defaultInt(value *int, fallback int) int {

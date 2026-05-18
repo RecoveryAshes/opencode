@@ -148,6 +148,29 @@ func TestAnthropicChatSendsToolDefinitions(t *testing.T) {
 	}
 }
 
+func TestAnthropicChatSendsBearerTokenSource(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Fatalf("authorization = %q, want Vertex bearer token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewAnthropicClient().Chat(t.Context(), ChatRequest{
+		ProviderID:  "google-vertex-anthropic",
+		Protocol:    "anthropic-messages",
+		BaseURL:     mock.URL,
+		Model:       "claude-sonnet-4-6@default",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		TokenSource: staticTokenSource("vertex-token"),
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestProviderChatClientRoutesAnthropic(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

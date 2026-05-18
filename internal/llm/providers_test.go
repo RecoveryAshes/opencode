@@ -40,7 +40,7 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		got[id] = true
 	}
 
-	for _, id := range []string{"openai", "anthropic", "google", "azure", "amazon-bedrock", "opencode", "openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
+	for _, id := range []string{"openai", "anthropic", "google", "google-vertex", "google-vertex-anthropic", "azure", "amazon-bedrock", "opencode", "openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
@@ -803,6 +803,54 @@ func TestResolveChatRequestGoogleVertexRequiresProject(t *testing.T) {
 	t.Setenv("GCLOUD_PROJECT", "")
 
 	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex", "gemini-2.5-flash")
+	if err == nil || !strings.Contains(err.Error(), "GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT") {
+		t.Fatalf("ResolveChatRequest() error = %v, want project requirement", err)
+	}
+}
+
+func TestResolveChatRequestGoogleVertexAnthropic(t *testing.T) {
+	t.Setenv("GOOGLE_VERTEX_PROJECT", "anthropic-project")
+	t.Setenv("GOOGLE_VERTEX_ANTHROPIC_LOCATION", "europe-west1")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex-anthropic", "")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "anthropic-messages" ||
+		got.BaseURL != "https://europe-west1-aiplatform.googleapis.com/v1/projects/anthropic-project/locations/europe-west1/publishers/anthropic" ||
+		got.APIKey != "" ||
+		got.AuthHeader != "Authorization" ||
+		got.AuthScheme != "Bearer" ||
+		got.Model != "claude-sonnet-4-6@default" ||
+		got.Headers["anthropic-version"] != "2023-06-01" ||
+		got.TokenSource == nil {
+		t.Fatalf("request = %#v, want Vertex Anthropic request", got)
+	}
+}
+
+func TestResolveChatRequestGoogleVertexAnthropicUsesGlobalDefault(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "anthropic-global")
+	t.Setenv("GOOGLE_VERTEX_LOCATION", "")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("VERTEX_LOCATION", "")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex-anthropic", "claude-haiku-4-5@20251001")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.BaseURL != "https://aiplatform.googleapis.com/v1/projects/anthropic-global/locations/global/publishers/anthropic" ||
+		got.Model != "claude-haiku-4-5@20251001" {
+		t.Fatalf("request = %#v, want Vertex Anthropic default location", got)
+	}
+}
+
+func TestResolveChatRequestGoogleVertexAnthropicRequiresProject(t *testing.T) {
+	t.Setenv("GOOGLE_VERTEX_PROJECT", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GCP_PROJECT", "")
+	t.Setenv("GCLOUD_PROJECT", "")
+
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex-anthropic", "claude-sonnet-4-6@default")
 	if err == nil || !strings.Contains(err.Error(), "GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT") {
 		t.Fatalf("ResolveChatRequest() error = %v, want project requirement", err)
 	}
