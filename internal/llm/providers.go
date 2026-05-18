@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/RecoveryAshes/opencode/internal/auth"
 	"github.com/RecoveryAshes/opencode/internal/config"
 )
 
@@ -1256,6 +1257,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 	providerID = defaultString(providerID, "openai-compatible")
 	if profile, ok := openAICompatibleProfiles[providerID]; ok {
 		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
 		if request.BaseURL == "" {
 			return ChatRequest{}, fmt.Errorf("%s provider requires a base URL environment variable", providerID)
 		}
@@ -1273,7 +1275,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			AuthHeader:     "Authorization",
 			AuthScheme:     "Bearer",
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "azure":
 		profile := responsesProfile{
 			ProviderID:     "azure",
@@ -1288,7 +1292,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		if profile.DefaultBaseURL == "" {
 			return ChatRequest{}, fmt.Errorf("azure provider requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "anthropic":
 		profile := anthropicProfile{
 			ProviderID:     "anthropic",
@@ -1299,7 +1305,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			DefaultModel:   "claude-sonnet-4-5",
 			Headers:        map[string]string{"anthropic-version": "2023-06-01"},
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "google":
 		profile := geminiProfile{
 			ProviderID:     "google",
@@ -1313,7 +1321,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			ModelEnvVars: []string{"OPENCODE_GOOGLE_MODEL", "GOOGLE_GENERATIVE_AI_MODEL", "GEMINI_MODEL"},
 			DefaultModel: "gemini-2.5-flash",
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "amazon-bedrock":
 		profile := bedrockProfile{
 			ProviderID:     "amazon-bedrock",
@@ -1327,6 +1337,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			Credentials:    bedrockCredentialsFromEnv(),
 		}
 		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
 		if request.APIKey == "" && request.AWSCredentials == nil && request.AWSProfile == "" && !bedrockDefaultCredentialChainConfigured() {
 			return ChatRequest{}, fmt.Errorf("amazon-bedrock provider requires AWS_BEARER_TOKEN_BEDROCK or AWS credentials")
 		}
@@ -1347,6 +1358,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			Headers:      cloudflareAIGatewayHeaders(),
 		}
 		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
 		if request.BaseURL == "" {
 			return ChatRequest{}, fmt.Errorf("cloudflare-ai-gateway provider requires CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_AI_GATEWAY_BASE_URL")
 		}
@@ -1366,6 +1378,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			AuthScheme:   "Bearer",
 		}
 		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
 		if request.BaseURL == "" {
 			return ChatRequest{}, fmt.Errorf("cloudflare-workers-ai provider requires CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_WORKERS_AI_BASE_URL")
 		}
@@ -1379,7 +1392,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			ModelEnvVars:   []string{"OPENCODE_COHERE_MODEL", "COHERE_MODEL"},
 			DefaultModel:   "command-a-03-2025",
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "vercel":
 		profile := openAIProfile{
 			ProviderID:     "vercel",
@@ -1394,7 +1409,9 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 				"x-title":      "opencode",
 			},
 		}
-		return profile.chatRequest(messages, modelID), nil
+		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
+		return request, nil
 	case "google-vertex":
 		project := googleVertexProject()
 		if project == "" {
@@ -1442,6 +1459,7 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			AuthScheme:     "Bearer",
 		}
 		request := profile.chatRequest(messages, modelID)
+		applyStoredCredential(&request, profile.APIKeyEnvVars, profile.BaseURLEnvVars, profile.ModelEnvVars)
 		request.Options = mergeProviderAnyMap(request.Options, sapAICoreOptions())
 		if request.APIKey == "" {
 			return ChatRequest{}, fmt.Errorf("sap-ai-core provider requires AICORE_SERVICE_KEY")
@@ -1449,6 +1467,68 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		return request, nil
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
+	}
+}
+
+func applyStoredCredential(request *ChatRequest, apiKeyEnvVars []string, baseURLEnvVars []string, modelEnvVars []string) {
+	if request == nil || request.ProviderID == "" {
+		return
+	}
+	if firstEnv(apiKeyEnvVars...) != "" {
+		return
+	}
+	account, err := auth.DefaultStore().Active(request.ProviderID)
+	if err != nil || account == nil {
+		return
+	}
+	switch account.Credential.Type {
+	case "api":
+		if strings.TrimSpace(account.Credential.Key) != "" {
+			request.APIKey = account.Credential.Key
+		}
+	case "oauth":
+		if strings.TrimSpace(account.Credential.Access) != "" {
+			request.APIKey = account.Credential.Access
+		}
+	default:
+		return
+	}
+	applyStoredCredentialMetadata(request, account.Credential.Metadata, firstEnv(baseURLEnvVars...) != "", firstEnv(modelEnvVars...) != "")
+}
+
+func applyStoredCredentialMetadata(request *ChatRequest, metadata map[string]string, hasBaseURLEnv bool, hasModelEnv bool) {
+	if len(metadata) == 0 {
+		return
+	}
+	for key, value := range metadata {
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "baseurl", "base_url", "url":
+			if !hasBaseURLEnv {
+				request.BaseURL = value
+			}
+		case "model", "modelid", "model_id":
+			if request.Model == "" && !hasModelEnv {
+				request.Model = value
+			}
+		case "authheader", "auth_header":
+			request.AuthHeader = value
+		case "authscheme", "auth_scheme":
+			request.AuthScheme = value
+		default:
+			header, ok := strings.CutPrefix(key, "header:")
+			if !ok {
+				header, ok = strings.CutPrefix(key, "headers.")
+			}
+			if ok && header != "" {
+				if request.Headers == nil {
+					request.Headers = map[string]string{}
+				}
+				request.Headers[header] = value
+			}
+		}
 	}
 }
 

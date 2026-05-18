@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/RecoveryAshes/opencode/internal/auth"
 )
 
 const (
@@ -101,6 +103,15 @@ func gitLabChatRequest(messages []Message, modelID string) (ChatRequest, error) 
 		return ChatRequest{}, fmt.Errorf("gitlab workflow models require the GitLab workflow protocol, which is not migrated yet")
 	}
 	apiKey := firstEnv("OPENCODE_GITLAB_TOKEN", "GITLAB_TOKEN", "OPENCODE_GITLAB_API_KEY", "GITLAB_API_KEY")
+	account, _ := auth.DefaultStore().Active("gitlab")
+	if apiKey == "" && account != nil {
+		switch account.Credential.Type {
+		case "api":
+			apiKey = account.Credential.Key
+		case "oauth":
+			apiKey = account.Credential.Access
+		}
+	}
 	if apiKey == "" {
 		return ChatRequest{}, fmt.Errorf("gitlab provider requires GITLAB_TOKEN")
 	}
@@ -108,6 +119,9 @@ func gitLabChatRequest(messages []Message, modelID string) (ChatRequest, error) 
 	aiGatewayURL := defaultString(firstEnv("OPENCODE_GITLAB_AI_GATEWAY_URL", "GITLAB_AI_GATEWAY_URL"), defaultGitLabAIGatewayURL)
 	flags := gitLabFeatureFlags()
 	headers := gitLabAIGatewayHeaders()
+	if account != nil {
+		mergeGitLabStoredMetadata(&instanceURL, &aiGatewayURL, headers, account.Credential.Metadata)
+	}
 	source := gitLabDirectAccessTokenSource{
 		InstanceURL:  instanceURL,
 		APIKey:       apiKey,
@@ -142,6 +156,28 @@ func gitLabChatRequest(messages []Message, modelID string) (ChatRequest, error) 
 		}, nil
 	default:
 		return ChatRequest{}, fmt.Errorf("gitlab model %q is not supported", modelID)
+	}
+}
+
+func mergeGitLabStoredMetadata(instanceURL *string, aiGatewayURL *string, headers map[string]string, metadata map[string]string) {
+	for key, value := range metadata {
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "instanceurl", "instance_url", "gitlab_instance_url":
+			*instanceURL = value
+		case "aigatewayurl", "ai_gateway_url", "gitlab_ai_gateway_url":
+			*aiGatewayURL = value
+		default:
+			header, ok := strings.CutPrefix(key, "header:")
+			if !ok {
+				header, ok = strings.CutPrefix(key, "headers.")
+			}
+			if ok && header != "" {
+				headers[header] = value
+			}
+		}
 	}
 }
 

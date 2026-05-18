@@ -1304,6 +1304,31 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	if apiAuth["type"] != "success" || apiAuth["key"] != "secret-key" || apiAuth["metadata"].(map[string]any)["source"] != "plugin" {
 		t.Fatalf("provider authorize = %#v, want plugin api auth result", apiAuth)
 	}
+	authFile := readServerJSON(t, filepath.Join(home, ".local", "share", "opencode", "auth-v2.json"))
+	if authFile["version"] != float64(2) {
+		t.Fatalf("auth-v2 version = %#v, want 2", authFile["version"])
+	}
+	active := authFile["active"].(map[string]any)
+	accountID, ok := active["local-ai"].(string)
+	if !ok || accountID == "" {
+		t.Fatalf("auth-v2 active = %#v, want local-ai account", active)
+	}
+	accounts := authFile["accounts"].(map[string]any)
+	account := accounts[accountID].(map[string]any)
+	credential := account["credential"].(map[string]any)
+	if account["serviceID"] != "local-ai" ||
+		credential["type"] != "api" ||
+		credential["key"] != "secret-key" ||
+		credential["metadata"].(map[string]any)["source"] != "plugin" {
+		t.Fatalf("auth-v2 account = %#v, want persisted local-ai api credential", account)
+	}
+	legacyAuth := readServerJSON(t, filepath.Join(home, ".local", "share", "opencode", "auth.json"))
+	legacyCredential := legacyAuth["local-ai"].(map[string]any)
+	if legacyCredential["type"] != "api" ||
+		legacyCredential["key"] != "secret-key" ||
+		legacyCredential["metadata"].(map[string]any)["source"] != "plugin" {
+		t.Fatalf("legacy auth = %#v, want mirrored local-ai api credential", legacyAuth)
+	}
 
 	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":1}`))
 	if err != nil {

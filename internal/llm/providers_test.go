@@ -934,6 +934,80 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestUsesAuthV2CredentialFallback(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "share"))
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENCODE_OPENROUTER_API_KEY", "")
+	if err := os.MkdirAll(filepath.Join(root, "share", "opencode"), 0o700); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "share", "opencode", "auth-v2.json"), []byte(`{
+		"version": 2,
+		"accounts": {
+			"acc_test": {
+				"id": "acc_test",
+				"serviceID": "openrouter",
+				"description": "default",
+				"credential": {
+					"type": "api",
+					"key": "stored-key",
+					"metadata": {
+						"baseURL": "https://stored.openrouter.test/v1",
+						"header:X-Stored": "yes"
+					}
+				}
+			}
+		},
+		"active": {"openrouter": "acc_test"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth-v2: %v", err)
+	}
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "openrouter", "stored-model")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.APIKey != "stored-key" ||
+		got.BaseURL != "https://stored.openrouter.test/v1" ||
+		got.Headers["X-Stored"] != "yes" ||
+		got.Model != "stored-model" {
+		t.Fatalf("request = %#v, want AuthV2 credential fallback", got)
+	}
+}
+
+func TestResolveChatRequestEnvOverridesAuthV2Credential(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "share"))
+	t.Setenv("OPENROUTER_API_KEY", "env-key")
+	t.Setenv("OPENROUTER_BASE_URL", "https://env.openrouter.test/v1")
+	if err := os.MkdirAll(filepath.Join(root, "share", "opencode"), 0o700); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "share", "opencode", "auth-v2.json"), []byte(`{
+		"version": 2,
+		"accounts": {
+			"acc_test": {
+				"id": "acc_test",
+				"serviceID": "openrouter",
+				"description": "default",
+				"credential": {"type": "api", "key": "stored-key", "metadata": {"baseURL": "https://stored.example/v1"}}
+			}
+		},
+		"active": {"openrouter": "acc_test"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth-v2: %v", err)
+	}
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "openrouter", "model")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.APIKey != "env-key" || got.BaseURL != "https://env.openrouter.test/v1" {
+		t.Fatalf("request = %#v, want env credential precedence", got)
+	}
+}
+
 func TestResolveChatRequestMigratedProviderHeaders(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1445,6 +1519,54 @@ func TestResolveChatRequestGitLabAgenticAnthropic(t *testing.T) {
 		got.Headers["anthropic-beta"] != "context-1m-2025-08-07" ||
 		!strings.Contains(got.Headers["User-Agent"], "gitlab-ai-provider/6.6.0") {
 		t.Fatalf("request = %#v, want GitLab Anthropic proxy request", got)
+	}
+}
+
+func TestResolveChatRequestGitLabUsesAuthV2Credential(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "share"))
+	t.Setenv("GITLAB_TOKEN", "")
+	if err := os.MkdirAll(filepath.Join(root, "share", "opencode"), 0o700); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "share", "opencode", "auth-v2.json"), []byte(`{
+		"version": 2,
+		"accounts": {
+			"acc_gitlab": {
+				"id": "acc_gitlab",
+				"serviceID": "gitlab",
+				"description": "default",
+				"credential": {
+					"type": "oauth",
+					"access": "stored-gitlab-token",
+					"refresh": "refresh",
+					"expires": 9999999999,
+					"metadata": {
+						"instanceURL": "https://gitlab.example",
+						"aiGatewayURL": "https://ai.example",
+						"header:X-GitLab": "stored"
+					}
+				}
+			}
+		},
+		"active": {"gitlab": "acc_gitlab"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth-v2: %v", err)
+	}
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab", "duo-chat-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	source, ok := got.TokenSource.(gitLabDirectAccessTokenSource)
+	if !ok {
+		t.Fatalf("token source = %#v, want GitLab direct access token source", got.TokenSource)
+	}
+	if source.APIKey != "stored-gitlab-token" ||
+		source.InstanceURL != "https://gitlab.example" ||
+		got.BaseURL != "https://ai.example/ai/v1/proxy/anthropic" ||
+		got.Headers["X-GitLab"] != "stored" {
+		t.Fatalf("request/source = %#v/%#v, want AuthV2 GitLab credential", got, source)
 	}
 }
 

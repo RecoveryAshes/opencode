@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	providerauth "github.com/RecoveryAshes/opencode/internal/auth"
 	"github.com/RecoveryAshes/opencode/internal/config"
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
@@ -681,6 +682,16 @@ func providerByPath() http.HandlerFunc {
 			return authorization, http.StatusOK, nil
 		}
 		if api != nil {
+			if api.Type == "success" && api.Key != "" {
+				_, err := providerauth.DefaultStore().SetActive(parts[0], providerauth.Credential{
+					Type:     "api",
+					Key:      api.Key,
+					Metadata: api.Metadata,
+				}, "default")
+				if err != nil {
+					return nil, statusFromError(err), err
+				}
+			}
 			return api, http.StatusOK, nil
 		}
 		return nil, http.StatusOK, nil
