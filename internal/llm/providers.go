@@ -1219,7 +1219,22 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 		}
 		return profile.chatRequest(messages, modelID), nil
 	case "google-vertex":
-		return ChatRequest{}, fmt.Errorf("%s provider uses a non-OpenAI chat protocol that has not been migrated yet", providerID)
+		project := googleVertexProject()
+		if project == "" {
+			return ChatRequest{}, fmt.Errorf("google-vertex provider requires GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT")
+		}
+		location := googleVertexLocation()
+		profile := geminiProfile{
+			ProviderID:     "google-vertex",
+			DefaultBaseURL: googleVertexGeminiBaseURL(project, location),
+			BaseURLEnvVars: []string{"OPENCODE_GOOGLE_VERTEX_BASE_URL", "GOOGLE_VERTEX_BASE_URL"},
+			ModelEnvVars:   []string{"OPENCODE_GOOGLE_VERTEX_MODEL", "GOOGLE_VERTEX_MODEL"},
+			DefaultModel:   "gemini-2.5-flash",
+			AuthHeader:     "Authorization",
+			AuthScheme:     "Bearer",
+			TokenSource:    googleTokenSource{},
+		}
+		return profile.chatRequest(messages, modelID), nil
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
 	}
@@ -1308,17 +1323,23 @@ type geminiProfile struct {
 	APIKeyEnvVars  []string
 	ModelEnvVars   []string
 	DefaultModel   string
+	AuthHeader     string
+	AuthScheme     string
+	TokenSource    TokenSource
 }
 
 func (profile geminiProfile) chatRequest(messages []Message, modelID string) ChatRequest {
+	authHeader := defaultString(profile.AuthHeader, "x-goog-api-key")
 	return ChatRequest{
-		ProviderID: profile.ProviderID,
-		Protocol:   "gemini",
-		BaseURL:    defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
-		APIKey:     firstEnv(profile.APIKeyEnvVars...),
-		AuthHeader: "x-goog-api-key",
-		Model:      defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
-		Messages:   messages,
+		ProviderID:  profile.ProviderID,
+		Protocol:    "gemini",
+		BaseURL:     defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
+		APIKey:      firstEnv(profile.APIKeyEnvVars...),
+		AuthHeader:  authHeader,
+		AuthScheme:  profile.AuthScheme,
+		Model:       defaultString(modelID, defaultString(firstEnv(profile.ModelEnvVars...), profile.DefaultModel)),
+		Messages:    messages,
+		TokenSource: profile.TokenSource,
 	}
 }
 

@@ -1,12 +1,19 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type staticTokenSource string
+
+func (source staticTokenSource) Token(context.Context) (string, error) {
+	return string(source), nil
+}
 
 func TestGeminiChatRequestAndResponse(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +185,32 @@ func TestGeminiChatSendsToolDefinitions(t *testing.T) {
 				"required":   []string{"filePath"},
 			},
 		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
+func TestGeminiChatSendsBearerTokenSource(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Fatalf("authorization = %q, want Vertex bearer token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+			"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+		}`))
+	}))
+	defer mock.Close()
+
+	_, err := NewGeminiClient().Chat(t.Context(), ChatRequest{
+		ProviderID:  "google-vertex",
+		Protocol:    "gemini",
+		BaseURL:     mock.URL,
+		Model:       "gemini-2.5-flash",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		TokenSource: staticTokenSource("vertex-token"),
 	})
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)

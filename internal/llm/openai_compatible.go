@@ -49,10 +49,17 @@ type ChatRequest struct {
 	TopK           *int
 	MaxTokens      *int
 	Options        map[string]any
+	TokenSource    TokenSource
 	AWSRegion      string
 	AWSProfile     string
 	AWSCredentials *AWSCredentials
 	Tools          []ToolDefinition
+}
+
+// TokenSource returns a bearer token for providers that use runtime
+// credentials instead of a static API key.
+type TokenSource interface {
+	Token(context.Context) (string, error)
 }
 
 // Usage is token accounting returned by OpenAI-compatible providers.

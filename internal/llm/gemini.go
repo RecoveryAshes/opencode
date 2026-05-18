@@ -68,7 +68,9 @@ func (client *GeminiClient) Chat(ctx context.Context, request ChatRequest) (Chat
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Gemini request: %w", err)
 	}
-	applyGeminiHeaders(httpRequest, request)
+	if err := applyGeminiHeaders(ctx, httpRequest, request); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -326,7 +328,7 @@ func mapGeminiFinishReason(reason string) string {
 	}
 }
 
-func applyGeminiHeaders(httpRequest *http.Request, request ChatRequest) {
+func applyGeminiHeaders(ctx context.Context, httpRequest *http.Request, request ChatRequest) error {
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "text/event-stream, application/json")
 	for key, value := range request.Headers {
@@ -338,6 +340,16 @@ func applyGeminiHeaders(httpRequest *http.Request, request ChatRequest) {
 	if request.APIKey != "" {
 		httpRequest.Header.Set(defaultString(request.AuthHeader, "x-goog-api-key"), request.APIKey)
 	}
+	if request.TokenSource != nil {
+		token, err := request.TokenSource.Token(ctx)
+		if err != nil {
+			return fmt.Errorf("load Gemini bearer token: %w", err)
+		}
+		if strings.TrimSpace(token) != "" {
+			httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		}
+	}
+	return nil
 }
 
 func geminiEndpoint(baseURL string, model string) (string, error) {

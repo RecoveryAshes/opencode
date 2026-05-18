@@ -762,6 +762,52 @@ func TestResolveChatRequestGemini(t *testing.T) {
 	}
 }
 
+func TestResolveChatRequestGoogleVertex(t *testing.T) {
+	t.Setenv("GOOGLE_VERTEX_PROJECT", "test-project")
+	t.Setenv("GOOGLE_VERTEX_LOCATION", "europe-west4")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex", "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "gemini" ||
+		got.BaseURL != "https://europe-west4-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west4/publishers/google" ||
+		got.APIKey != "" ||
+		got.AuthHeader != "Authorization" ||
+		got.AuthScheme != "Bearer" ||
+		got.Model != "gemini-2.5-pro" ||
+		got.TokenSource == nil {
+		t.Fatalf("request = %#v, want Vertex Gemini request", got)
+	}
+}
+
+func TestResolveChatRequestGoogleVertexGlobalLocation(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "global-project")
+	t.Setenv("VERTEX_LOCATION", "global")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex", "")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.BaseURL != "https://aiplatform.googleapis.com/v1/projects/global-project/locations/global/publishers/google" ||
+		got.Model != "gemini-2.5-flash" ||
+		got.TokenSource == nil {
+		t.Fatalf("request = %#v, want global Vertex endpoint", got)
+	}
+}
+
+func TestResolveChatRequestGoogleVertexRequiresProject(t *testing.T) {
+	t.Setenv("GOOGLE_VERTEX_PROJECT", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GCP_PROJECT", "")
+	t.Setenv("GCLOUD_PROJECT", "")
+
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "google-vertex", "gemini-2.5-flash")
+	if err == nil || !strings.Contains(err.Error(), "GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT") {
+		t.Fatalf("ResolveChatRequest() error = %v, want project requirement", err)
+	}
+}
+
 func TestResolveChatRequestBedrockBearer(t *testing.T) {
 	clearBedrockAuthEnv(t)
 	t.Setenv("AWS_REGION", "eu-west-1")
