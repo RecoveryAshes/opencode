@@ -68,6 +68,39 @@ async function serverHooks(plugin, req) {
   return hooks.filter(Boolean)
 }
 
+function publicAuthMethods(auth) {
+  if (!auth || !auth.provider || !Array.isArray(auth.methods)) return undefined
+  return {
+    provider: auth.provider,
+    methods: auth.methods.map((method) => ({
+      type: method.type,
+      label: method.label,
+      ...(Array.isArray(method.prompts)
+        ? {
+            prompts: method.prompts.map((prompt) => {
+              if (prompt.type === "select") {
+                return {
+                  type: "select",
+                  key: prompt.key,
+                  message: prompt.message,
+                  options: prompt.options ?? [],
+                  ...(prompt.when ? { when: prompt.when } : {}),
+                }
+              }
+              return {
+                type: "text",
+                key: prompt.key,
+                message: prompt.message,
+                ...(prompt.placeholder ? { placeholder: prompt.placeholder } : {}),
+                ...(prompt.when ? { when: prompt.when } : {}),
+              }
+            }),
+          }
+        : {}),
+    })),
+  }
+}
+
 async function main() {
   const raw = await new Response(Bun.stdin.stream()).text()
   const req = JSON.parse(raw || "{}")
@@ -84,6 +117,31 @@ async function main() {
       try {
         if (req.config && typeof hooks.config === "function") {
           await hooks.config(req.config)
+        }
+        if (req.hook === "auth.methods") {
+          const auth = publicAuthMethods(hooks.auth)
+          if (auth) {
+            output.methods ??= {}
+            output.methods[auth.provider] = auth.methods
+          }
+          continue
+        }
+        if (req.hook === "auth.authorize") {
+          const auth = hooks.auth
+          if (!auth || auth.provider !== req.input.providerID) continue
+          const method = auth.methods?.[req.input.method]
+          if (!method) continue
+          if (method.type === "oauth") {
+            const result = await method.authorize(req.input.inputs)
+            output.authorization = result
+              ? { url: result.url, method: result.method, instructions: result.instructions }
+              : null
+            continue
+          }
+          if (method.type === "api") {
+            output.authorization = method.authorize ? await method.authorize(req.input.inputs) : null
+            continue
+          }
         }
         const fn = hooks[req.hook]
         if (typeof fn !== "function") continue

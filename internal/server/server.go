@@ -19,6 +19,7 @@ import (
 	"github.com/RecoveryAshes/opencode/internal/domain/session"
 	"github.com/RecoveryAshes/opencode/internal/integration"
 	"github.com/RecoveryAshes/opencode/internal/llm"
+	"github.com/RecoveryAshes/opencode/internal/pluginruntime"
 	"github.com/RecoveryAshes/opencode/internal/runtime"
 	"github.com/RecoveryAshes/opencode/internal/storage"
 )
@@ -595,33 +596,6 @@ func providersList() http.HandlerFunc {
 	})
 }
 
-type providerAuthMethod struct {
-	Type    string               `json:"type"`
-	Label   string               `json:"label"`
-	Prompts []providerAuthPrompt `json:"prompts,omitempty"`
-}
-
-type providerAuthPrompt struct {
-	Type        string                 `json:"type"`
-	Key         string                 `json:"key"`
-	Message     string                 `json:"message"`
-	Placeholder string                 `json:"placeholder,omitempty"`
-	Options     []providerAuthOption   `json:"options,omitempty"`
-	When        *providerAuthCondition `json:"when,omitempty"`
-}
-
-type providerAuthOption struct {
-	Label string `json:"label"`
-	Value string `json:"value"`
-	Hint  string `json:"hint,omitempty"`
-}
-
-type providerAuthCondition struct {
-	Key   string `json:"key"`
-	Op    string `json:"op"`
-	Value string `json:"value"`
-}
-
 type providerAuthAPIError struct {
 	Name string                   `json:"name"`
 	Data providerAuthAPIErrorData `json:"data"`
@@ -644,10 +618,13 @@ func providerByPath() http.HandlerFunc {
 			if r.Method != http.MethodGet {
 				return nil, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method)
 			}
-			if _, err := loadRequestConfig(r); err != nil {
+			cfg, err := loadRequestConfig(r)
+			if err != nil {
 				return nil, statusFromError(err), err
 			}
-			return map[string][]providerAuthMethod{}, http.StatusOK, nil
+			plugins := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree"))
+			methods, err := plugins.AuthMethods(r.Context())
+			return methods, statusFromError(err), err
 		}
 
 		parts := strings.Split(rest, "/")
@@ -668,10 +645,29 @@ func providerByPath() http.HandlerFunc {
 		if _, ok := numberFromAny(payload.Method); !ok {
 			return providerAuthError("BadRequest", providerAuthAPIErrorData{ProviderID: parts[0], Field: "method", Kind: "Body", Message: "method must be a number"}), http.StatusBadRequest, nil
 		}
-		return providerAuthError("ProviderAuthOauthMissing", providerAuthAPIErrorData{
-			ProviderID: parts[0],
-			Message:    "provider OAuth hooks are not available in the Go sidecar yet",
-		}), http.StatusBadRequest, nil
+		if parts[2] == "callback" {
+			return providerAuthError("ProviderAuthOauthMissing", providerAuthAPIErrorData{ProviderID: parts[0]}), http.StatusBadRequest, nil
+		}
+		cfg, err := loadRequestConfig(r)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		plugins := pluginruntime.New(cfg.Info, requestDirectory(r), r.URL.Query().Get("worktree"))
+		methodNumber, _ := numberFromAny(payload.Method)
+		authorization, api, handled, err := plugins.AuthorizeProvider(r.Context(), parts[0], int(methodNumber), payload.Inputs)
+		if err != nil {
+			return nil, statusFromError(err), err
+		}
+		if !handled {
+			return providerAuthError("ProviderAuthOauthMissing", providerAuthAPIErrorData{ProviderID: parts[0]}), http.StatusBadRequest, nil
+		}
+		if authorization != nil {
+			return authorization, http.StatusOK, nil
+		}
+		if api != nil {
+			return api, http.StatusOK, nil
+		}
+		return nil, http.StatusOK, nil
 	})
 }
 

@@ -92,6 +92,65 @@ func TestRuntimeRunsToolHooks(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunsProviderAuthHooks(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	root := t.TempDir()
+	plugin := filepath.Join(root, "auth-plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default async () => ({",
+		"  auth: {",
+		"    provider: 'local-ai',",
+		"    methods: [{",
+		"      type: 'api',",
+		"      label: 'Local API key',",
+		"      prompts: [{ type: 'text', key: 'apiKey', message: 'API key', placeholder: 'sk-local' }],",
+		"      authorize: async (inputs) => ({ type: 'success', key: inputs.apiKey, metadata: { source: 'plugin' } })",
+		"    }, {",
+		"      type: 'oauth',",
+		"      label: 'Browser OAuth',",
+		"      authorize: async () => ({ url: 'https://auth.example/start', method: 'code', instructions: 'Paste code', callback: async () => ({ type: 'failed' }) })",
+		"    }]",
+		"  }",
+		"})",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := config.Info{"plugin_origins": []any{map[string]any{
+		"spec":   fileURL(plugin),
+		"source": filepath.Join(root, "opencode.json"),
+		"scope":  "local",
+	}}}
+	runtime := New(info, root, root)
+	ctx := context.Background()
+
+	methods, err := runtime.AuthMethods(ctx)
+	if err != nil {
+		t.Fatalf("AuthMethods() error = %v", err)
+	}
+	if len(methods["local-ai"]) != 2 || methods["local-ai"][0].Label != "Local API key" || methods["local-ai"][0].Prompts[0].Placeholder != "sk-local" {
+		t.Fatalf("methods = %#v, want plugin auth methods", methods)
+	}
+
+	oauth, api, handled, err := runtime.AuthorizeProvider(ctx, "local-ai", 0, map[string]string{"apiKey": "secret-key"})
+	if err != nil {
+		t.Fatalf("AuthorizeProvider(api) error = %v", err)
+	}
+	if !handled || oauth != nil || api == nil || api.Type != "success" || api.Key != "secret-key" || api.Metadata["source"] != "plugin" {
+		t.Fatalf("api auth = oauth:%#v api:%#v handled:%v, want api success", oauth, api, handled)
+	}
+
+	oauth, api, handled, err = runtime.AuthorizeProvider(ctx, "local-ai", 1, nil)
+	if err != nil {
+		t.Fatalf("AuthorizeProvider(oauth) error = %v", err)
+	}
+	if !handled || api != nil || oauth == nil || oauth.URL != "https://auth.example/start" || oauth.Method != "code" {
+		t.Fatalf("oauth auth = oauth:%#v api:%#v handled:%v, want oauth authorization", oauth, api, handled)
+	}
+}
+
 func fileURL(path string) string {
 	return "file://" + filepath.ToSlash(path)
 }

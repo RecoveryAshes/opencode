@@ -1150,6 +1150,25 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("OPENCODE_TEST_HOME", home)
+	authPlugin := filepath.Join(root, ".opencode", "plugin", "provider-auth.ts")
+	writeServerFile(t, authPlugin, strings.Join([]string{
+		"export default async () => ({",
+		"  auth: {",
+		"    provider: 'local-ai',",
+		"    methods: [{",
+		"      type: 'api',",
+		"      label: 'Local API key',",
+		"      prompts: [{ type: 'text', key: 'apiKey', message: 'API key', placeholder: 'sk-local' }],",
+		"      authorize: async (inputs) => ({ type: 'success', key: inputs.apiKey, metadata: { source: 'plugin' } })",
+		"    }, {",
+		"      type: 'oauth',",
+		"      label: 'Browser OAuth',",
+		"      authorize: async () => ({ url: 'https://auth.example/start', method: 'code', instructions: 'Paste code', callback: async () => ({ type: 'failed' }) })",
+		"    }]",
+		"  }",
+		"})",
+		"",
+	}, "\n"))
 	writeServerFile(t, filepath.Join(root, "opencode.jsonc"), `{
 		"enabled_providers": ["anthropic", "local-ai"],
 		"provider": {
@@ -1226,8 +1245,17 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&authMethods); err != nil {
 		t.Fatalf("decode provider auth methods: %v", err)
 	}
-	if len(authMethods) != 0 {
-		t.Fatalf("auth methods = %#v, want empty until plugin auth hooks migrate", authMethods)
+	localAuth, ok := authMethods["local-ai"].([]any)
+	if !ok || len(localAuth) != 2 {
+		t.Fatalf("auth methods = %#v, want local-ai plugin methods", authMethods)
+	}
+	firstMethod := localAuth[0].(map[string]any)
+	if firstMethod["type"] != "api" || firstMethod["label"] != "Local API key" {
+		t.Fatalf("first auth method = %#v, want api method", firstMethod)
+	}
+	prompts := firstMethod["prompts"].([]any)
+	if prompts[0].(map[string]any)["placeholder"] != "sk-local" {
+		t.Fatalf("auth prompts = %#v, want placeholder", prompts)
 	}
 
 	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":"bad"}`))
@@ -1246,19 +1274,36 @@ func TestProviderHTTPAPIUsesConfigFilters(t *testing.T) {
 		t.Fatalf("provider authorize invalid error = %#v, want BadRequest", authError)
 	}
 
-	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":0}`))
+	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":0,"inputs":{"apiKey":"secret-key"}}`))
 	if err != nil {
 		t.Fatalf("POST /provider/id/oauth/authorize error = %v", err)
 	}
 	defer closeBody(t, resp)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("provider authorize status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("provider authorize status = %d, want 200", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&authError); err != nil {
-		t.Fatalf("decode provider authorize error: %v", err)
+	var apiAuth map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&apiAuth); err != nil {
+		t.Fatalf("decode provider authorize: %v", err)
 	}
-	if authError["name"] != "ProviderAuthOauthMissing" || authError["data"].(map[string]any)["providerID"] != "local-ai" {
-		t.Fatalf("provider authorize error = %#v, want ProviderAuthOauthMissing", authError)
+	if apiAuth["type"] != "success" || apiAuth["key"] != "secret-key" || apiAuth["metadata"].(map[string]any)["source"] != "plugin" {
+		t.Fatalf("provider authorize = %#v, want plugin api auth result", apiAuth)
+	}
+
+	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/authorize?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":1}`))
+	if err != nil {
+		t.Fatalf("POST /provider/id/oauth/authorize oauth error = %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("provider oauth authorize status = %d, want 200", resp.StatusCode)
+	}
+	var oauthAuth map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&oauthAuth); err != nil {
+		t.Fatalf("decode provider oauth authorize: %v", err)
+	}
+	if oauthAuth["url"] != "https://auth.example/start" || oauthAuth["method"] != "code" {
+		t.Fatalf("provider oauth authorize = %#v, want authorization response", oauthAuth)
 	}
 
 	resp, err = http.Post(server.URL+"/provider/local-ai/oauth/callback?directory="+urlQueryEscape(root), "application/json", strings.NewReader(`{"method":0,"code":"abc"}`))
