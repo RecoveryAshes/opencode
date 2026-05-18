@@ -374,15 +374,6 @@ func applyAnthropicHeaders(ctx context.Context, httpRequest *http.Request, reque
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "text/event-stream, application/json")
 	httpRequest.Header.Set("anthropic-version", "2023-06-01")
-	for key, value := range request.Headers {
-		if key == "" || value == "" {
-			continue
-		}
-		httpRequest.Header.Set(key, value)
-	}
-	if request.APIKey != "" {
-		httpRequest.Header.Set(defaultString(request.AuthHeader, "x-api-key"), request.APIKey)
-	}
 	if request.TokenSource != nil {
 		token, err := request.TokenSource.Token(ctx)
 		if err != nil {
@@ -391,6 +382,15 @@ func applyAnthropicHeaders(ctx context.Context, httpRequest *http.Request, reque
 		if strings.TrimSpace(token) != "" {
 			httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
 		}
+	}
+	for key, value := range request.Headers {
+		if key == "" || value == "" {
+			continue
+		}
+		httpRequest.Header.Set(key, value)
+	}
+	if request.APIKey != "" {
+		httpRequest.Header.Set(defaultString(request.AuthHeader, "x-api-key"), request.APIKey)
 	}
 	return nil
 }

@@ -198,6 +198,33 @@ func TestOpenAICompatibleChatSupportsProviderSpecificAuthAndQuery(t *testing.T) 
 	}
 }
 
+func TestOpenAICompatibleChatSendsBearerTokenSource(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer source-token" {
+			t.Fatalf("authorization = %q, want bearer token source", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer mock.Close()
+
+	got, err := NewOpenAICompatibleClient().Chat(t.Context(), ChatRequest{
+		BaseURL:     mock.URL,
+		Model:       "mock-model",
+		TokenSource: staticTokenSource("source-token"),
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Text != "ok" {
+		t.Fatalf("Chat() = %#v, want ok", got)
+	}
+}
+
 func TestOpenAICompatibleChatParsesToolCalls(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

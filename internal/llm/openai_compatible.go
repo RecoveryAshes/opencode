@@ -159,7 +159,9 @@ func (client *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequ
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat request: %w", err)
 	}
-	applyOpenAICompatibleHeaders(httpRequest, request, "application/json")
+	if err := applyOpenAICompatibleHeaders(httpRequest, request, "application/json"); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -235,7 +237,9 @@ func (client *OpenAICompatibleClient) ChatStream(ctx context.Context, request Ch
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build chat stream request: %w", err)
 	}
-	applyOpenAICompatibleHeaders(httpRequest, streamRequest, "text/event-stream")
+	if err := applyOpenAICompatibleHeaders(httpRequest, streamRequest, "text/event-stream"); err != nil {
+		return ChatResponse{}, err
+	}
 	httpClient := client.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -537,28 +541,37 @@ func chatEndpoint(baseURL string, queryParams map[string]string) (string, error)
 	return parsed.String(), nil
 }
 
-func applyOpenAICompatibleHeaders(httpRequest *http.Request, request ChatRequest, accept string) {
+func applyOpenAICompatibleHeaders(httpRequest *http.Request, request ChatRequest, accept string) error {
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", accept)
+	if request.TokenSource != nil {
+		token, err := request.TokenSource.Token(httpRequest.Context())
+		if err != nil {
+			return fmt.Errorf("load bearer token: %w", err)
+		}
+		if strings.TrimSpace(token) != "" {
+			httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		}
+	}
 	for key, value := range request.Headers {
 		if key == "" || value == "" {
 			continue
 		}
 		httpRequest.Header.Set(key, value)
 	}
-	if request.APIKey == "" {
-		return
+	if request.APIKey != "" {
+		header := defaultString(request.AuthHeader, "Authorization")
+		scheme := request.AuthScheme
+		if scheme == "" && strings.EqualFold(header, "Authorization") {
+			scheme = "Bearer"
+		}
+		value := request.APIKey
+		if scheme != "" {
+			value = scheme + " " + value
+		}
+		httpRequest.Header.Set(header, value)
 	}
-	header := defaultString(request.AuthHeader, "Authorization")
-	scheme := request.AuthScheme
-	if scheme == "" && strings.EqualFold(header, "Authorization") {
-		scheme = "Bearer"
-	}
-	value := request.APIKey
-	if scheme != "" {
-		value = scheme + " " + value
-	}
-	httpRequest.Header.Set(header, value)
+	return nil
 }
 
 func firstEnv(names ...string) string {

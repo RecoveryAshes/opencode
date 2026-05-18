@@ -84,7 +84,9 @@ func (client *ResponsesClient) Chat(ctx context.Context, request ChatRequest) (C
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Responses request: %w", err)
 	}
-	applyOpenAICompatibleHeaders(httpRequest, request, "application/json")
+	if err := applyOpenAICompatibleHeaders(httpRequest, request, "application/json"); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {

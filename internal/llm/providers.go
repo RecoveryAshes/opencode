@@ -1117,7 +1117,9 @@ func providerEnvVars(id string) []string {
 		"cloudflare-workers-ai": {"CLOUDFLARE_WORKERS_AI_TOKEN", "CLOUDFLARE_API_KEY"},
 		"github-copilot":        {"GITHUB_TOKEN", "GITHUB_COPILOT_API_KEY"},
 		"digitalocean":          {"DIGITALOCEAN_API_KEY", "DIGITALOCEAN_ACCESS_TOKEN"},
+		"gitlab":                {"GITLAB_TOKEN"},
 		"gitlab-duo":            {"GITLAB_DUO_API_KEY"},
+		"sap-ai-core":           {"AICORE_SERVICE_KEY"},
 		"venice":                {"VENICE_API_KEY"},
 		"openai-compatible":     {"OPENAI_API_KEY"},
 	}
@@ -1428,6 +1430,23 @@ func ResolveChatRequest(messages []Message, providerID string, modelID string) (
 			TokenSource:    googleTokenSource{},
 		}
 		return profile.chatRequest(messages, modelID), nil
+	case "gitlab":
+		return gitLabChatRequest(messages, modelID)
+	case "sap-ai-core":
+		profile := openAIProfile{
+			ProviderID:     "sap-ai-core",
+			BaseURLEnvVars: []string{"OPENCODE_AICORE_BASE_URL", "AICORE_BASE_URL"},
+			APIKeyEnvVars:  []string{"OPENCODE_AICORE_SERVICE_KEY", "AICORE_SERVICE_KEY"},
+			ModelEnvVars:   []string{"OPENCODE_AICORE_MODEL", "AICORE_MODEL"},
+			AuthHeader:     "Authorization",
+			AuthScheme:     "Bearer",
+		}
+		request := profile.chatRequest(messages, modelID)
+		request.Options = mergeProviderAnyMap(request.Options, sapAICoreOptions())
+		if request.APIKey == "" {
+			return ChatRequest{}, fmt.Errorf("sap-ai-core provider requires AICORE_SERVICE_KEY")
+		}
+		return request, nil
 	default:
 		return ChatRequest{}, fmt.Errorf("unknown provider %q", providerID)
 	}
@@ -1567,7 +1586,9 @@ var providers = []Provider{
 	{ID: "cloudflare-workers-ai", Name: "Cloudflare Workers AI", Protocols: []string{"openai-compatible"}},
 	{ID: "github-copilot", Name: "GitHub Copilot", Protocols: []string{"openai-compatible"}},
 	{ID: "digitalocean", Name: "DigitalOcean", Protocols: []string{"openai-compatible"}},
+	{ID: "gitlab", Name: "GitLab Duo", Protocols: []string{"gitlab-agentic", "gitlab-workflow"}},
 	{ID: "gitlab-duo", Name: "GitLab Duo", Protocols: []string{"openai-compatible"}},
+	{ID: "sap-ai-core", Name: "SAP AI Core", Protocols: []string{"openai-compatible"}},
 	{ID: "venice", Name: "Venice", Protocols: []string{"openai-compatible"}},
 	{ID: "openai-compatible", Name: "OpenAI Compatible", Protocols: []string{"openai-compatible"}},
 }
@@ -1950,6 +1971,17 @@ func cloudflareAIGatewayHeaders() map[string]string {
 		return nil
 	}
 	return map[string]string{"cf-aig-authorization": "Bearer " + token}
+}
+
+func sapAICoreOptions() map[string]any {
+	result := map[string]any{}
+	if deploymentID := firstEnv("OPENCODE_AICORE_DEPLOYMENT_ID", "AICORE_DEPLOYMENT_ID"); deploymentID != "" {
+		result["deploymentId"] = deploymentID
+	}
+	if resourceGroup := firstEnv("OPENCODE_AICORE_RESOURCE_GROUP", "AICORE_RESOURCE_GROUP"); resourceGroup != "" {
+		result["resourceGroup"] = resourceGroup
+	}
+	return result
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

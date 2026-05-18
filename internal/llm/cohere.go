@@ -66,7 +66,9 @@ func (client *CohereClient) Chat(ctx context.Context, request ChatRequest) (Chat
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("build Cohere request: %w", err)
 	}
-	applyOpenAICompatibleHeaders(httpRequest, request, "application/json")
+	if err := applyOpenAICompatibleHeaders(httpRequest, request, "application/json"); err != nil {
+		return ChatResponse{}, err
+	}
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {

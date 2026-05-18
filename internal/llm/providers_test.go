@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,7 +101,7 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		got[id] = true
 	}
 
-	for _, id := range []string{"openai", "anthropic", "google", "google-vertex", "google-vertex-anthropic", "azure", "amazon-bedrock", "opencode", "openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
+	for _, id := range []string{"openai", "anthropic", "google", "google-vertex", "google-vertex-anthropic", "azure", "amazon-bedrock", "opencode", "openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "gitlab", "sap-ai-core", "openai-compatible"} {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
@@ -1423,6 +1425,121 @@ func TestResolveChatRequestGitLabDuoWithBaseURL(t *testing.T) {
 		got.APIKey != "duo-token" ||
 		got.Model != "duo-chat-sonnet-4-5" {
 		t.Fatalf("request = %#v, want GitLab Duo request", got)
+	}
+}
+
+func TestResolveChatRequestGitLabAgenticAnthropic(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "gitlab-token")
+	t.Setenv("GITLAB_INSTANCE_URL", "https://gitlab.example")
+	t.Setenv("GITLAB_AI_GATEWAY_URL", "https://cloud.gitlab.example")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab", "duo-chat-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "anthropic-messages" ||
+		got.BaseURL != "https://cloud.gitlab.example/ai/v1/proxy/anthropic" ||
+		got.Model != "claude-sonnet-4-6" ||
+		got.APIKey != "" ||
+		got.TokenSource == nil ||
+		got.Headers["anthropic-beta"] != "context-1m-2025-08-07" ||
+		!strings.Contains(got.Headers["User-Agent"], "gitlab-ai-provider/6.6.0") {
+		t.Fatalf("request = %#v, want GitLab Anthropic proxy request", got)
+	}
+}
+
+func TestResolveChatRequestGitLabAgenticOpenAI(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "gitlab-token")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab", "duo-chat-gpt-5-4-nano")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://cloud.gitlab.com/ai/v1/proxy/openai/v1" ||
+		got.Model != "gpt-5.4-nano" ||
+		got.TokenSource == nil {
+		t.Fatalf("request = %#v, want GitLab OpenAI proxy request", got)
+	}
+}
+
+func TestResolveChatRequestGitLabWorkflowExplicitlyUnsupported(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "gitlab-token")
+
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "gitlab", "duo-workflow-sonnet-4-6")
+	if err == nil || !strings.Contains(err.Error(), "workflow protocol") {
+		t.Fatalf("ResolveChatRequest() error = %v, want workflow protocol gap", err)
+	}
+}
+
+func TestGitLabDirectAccessTokenSource(t *testing.T) {
+	var gotAuth string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": "direct-token",
+			"headers": map[string]string{
+				"x-gitlab-realm": "realm",
+				"x-api-key":      "strip-me",
+			},
+		})
+	}))
+	defer server.Close()
+	headers := map[string]string{}
+	source := gitLabDirectAccessTokenSource{
+		InstanceURL:  server.URL,
+		APIKey:       "oauth-token",
+		FeatureFlags: gitLabFeatureFlags(),
+		Headers:      headers,
+	}
+
+	token, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token() error = %v", err)
+	}
+	if token != "direct-token" || gotAuth != "Bearer oauth-token" {
+		t.Fatalf("token/auth = %q/%q, want direct token and bearer auth", token, gotAuth)
+	}
+	flags, ok := gotBody["feature_flags"].(map[string]any)
+	if !ok || flags["duo_agent_platform"] != true || flags["duo_agent_platform_agentic_chat"] != true {
+		t.Fatalf("body = %#v, want GitLab feature flags", gotBody)
+	}
+	if headers["x-gitlab-realm"] != "realm" {
+		t.Fatalf("headers = %#v, want direct-access headers merged", headers)
+	}
+	if _, ok := headers["x-api-key"]; ok {
+		t.Fatalf("headers = %#v, did not want x-api-key forwarded", headers)
+	}
+}
+
+func TestResolveChatRequestSapAICore(t *testing.T) {
+	t.Setenv("AICORE_SERVICE_KEY", "service-key")
+	t.Setenv("AICORE_BASE_URL", "https://sap.example/v1")
+	t.Setenv("AICORE_DEPLOYMENT_ID", "deployment")
+	t.Setenv("AICORE_RESOURCE_GROUP", "resource-group")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "sap-ai-core", "anthropic--claude-4.6-opus")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://sap.example/v1" ||
+		got.APIKey != "service-key" ||
+		got.Model != "anthropic--claude-4.6-opus" ||
+		got.Options["deploymentId"] != "deployment" ||
+		got.Options["resourceGroup"] != "resource-group" {
+		t.Fatalf("request = %#v, want SAP AI Core request", got)
+	}
+}
+
+func TestResolveChatRequestSapAICoreRequiresServiceKey(t *testing.T) {
+	_, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "sap-ai-core", "model")
+	if err == nil || !strings.Contains(err.Error(), "AICORE_SERVICE_KEY") {
+		t.Fatalf("ResolveChatRequest() error = %v, want service key requirement", err)
 	}
 }
 
