@@ -40,7 +40,7 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		got[id] = true
 	}
 
-	for _, id := range []string{"openai", "anthropic", "google", "azure", "amazon-bedrock", "openrouter", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
+	for _, id := range []string{"openai", "anthropic", "google", "azure", "amazon-bedrock", "opencode", "openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "github-copilot", "cloudflare-ai-gateway", "cloudflare-workers-ai", "openai-compatible"} {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
@@ -169,6 +169,60 @@ func TestListProvidersAppliesConfigFiltersAndCustomModels(t *testing.T) {
 	}
 	if _, ok := result.Default["openai"]; ok {
 		t.Fatalf("default includes disabled openai: %#v", result.Default)
+	}
+}
+
+func TestListProvidersIncludesMigratedProviderHeaders(t *testing.T) {
+	result := ListProviders(config.Info{
+		"enabled_providers": []any{"openrouter", "llmgateway", "nvidia", "kilo", "zenmux", "cerebras"},
+	})
+	providers := map[string]PublicProvider{}
+	for _, provider := range result.All {
+		providers[provider.ID] = provider
+	}
+
+	tests := map[string]map[string]string{
+		"openrouter": {
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
+		"llmgateway": {
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+			"X-Source":     "opencode",
+		},
+		"nvidia": {
+			"HTTP-Referer":            "https://opencode.ai/",
+			"X-Title":                 "opencode",
+			"X-BILLING-INVOKE-ORIGIN": "OpenCode",
+		},
+		"kilo": {
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
+		"zenmux": {
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
+		"cerebras": {
+			"X-Cerebras-3rd-Party-Integration": "opencode",
+		},
+	}
+	for id, want := range tests {
+		t.Run(id, func(t *testing.T) {
+			rawHeaders, ok := providers[id].Options["headers"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s headers = %#v, want provider headers", id, providers[id].Options["headers"])
+			}
+			if len(rawHeaders) != len(want) {
+				t.Fatalf("%s headers = %#v, want %#v", id, rawHeaders, want)
+			}
+			for key, value := range want {
+				if rawHeaders[key] != value {
+					t.Fatalf("%s headers[%q] = %#v, want %q", id, key, rawHeaders[key], value)
+				}
+			}
+		})
 	}
 }
 
@@ -418,6 +472,14 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 			apiKeyEnv: "OPENROUTER_API_KEY",
 		},
 		{
+			name:      "llmgateway",
+			provider:  "llmgateway",
+			envKey:    "LLMGATEWAY_BASE_URL",
+			envValue:  "https://local.llmgateway.test/v1",
+			baseURL:   "https://local.llmgateway.test/v1",
+			apiKeyEnv: "LLMGATEWAY_API_KEY",
+		},
+		{
 			name:      "xai",
 			provider:  "xai",
 			envKey:    "XAI_BASE_URL",
@@ -473,6 +535,30 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 			baseURL:   "https://local.perplexity.test",
 			apiKeyEnv: "PERPLEXITY_API_KEY",
 		},
+		{
+			name:      "nvidia",
+			provider:  "nvidia",
+			envKey:    "NVIDIA_BASE_URL",
+			envValue:  "https://local.nvidia.test/v1",
+			baseURL:   "https://local.nvidia.test/v1",
+			apiKeyEnv: "NVIDIA_API_KEY",
+		},
+		{
+			name:      "kilo",
+			provider:  "kilo",
+			envKey:    "KILO_BASE_URL",
+			envValue:  "https://local.kilo.test/api/gateway",
+			baseURL:   "https://local.kilo.test/api/gateway",
+			apiKeyEnv: "KILO_API_KEY",
+		},
+		{
+			name:      "zenmux",
+			provider:  "zenmux",
+			envKey:    "ZENMUX_BASE_URL",
+			envValue:  "https://local.zenmux.test/api/v1",
+			baseURL:   "https://local.zenmux.test/api/v1",
+			apiKeyEnv: "ZENMUX_API_KEY",
+		},
 	}
 
 	for _, test := range tests {
@@ -491,6 +577,111 @@ func TestResolveChatRequestOpenAICompatibleProfiles(t *testing.T) {
 				t.Fatalf("auth = %q/%q, want bearer authorization", got.AuthHeader, got.AuthScheme)
 			}
 		})
+	}
+}
+
+func TestResolveChatRequestMigratedProviderHeaders(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		headers  map[string]string
+	}{
+		{
+			name:     "openrouter",
+			provider: "openrouter",
+			headers: map[string]string{
+				"HTTP-Referer": "https://opencode.ai/",
+				"X-Title":      "opencode",
+			},
+		},
+		{
+			name:     "llmgateway",
+			provider: "llmgateway",
+			headers: map[string]string{
+				"HTTP-Referer": "https://opencode.ai/",
+				"X-Title":      "opencode",
+				"X-Source":     "opencode",
+			},
+		},
+		{
+			name:     "nvidia",
+			provider: "nvidia",
+			headers: map[string]string{
+				"HTTP-Referer":            "https://opencode.ai/",
+				"X-Title":                 "opencode",
+				"X-BILLING-INVOKE-ORIGIN": "OpenCode",
+			},
+		},
+		{
+			name:     "kilo",
+			provider: "kilo",
+			headers: map[string]string{
+				"HTTP-Referer": "https://opencode.ai/",
+				"X-Title":      "opencode",
+			},
+		},
+		{
+			name:     "zenmux",
+			provider: "zenmux",
+			headers: map[string]string{
+				"HTTP-Referer": "https://opencode.ai/",
+				"X-Title":      "opencode",
+			},
+		},
+		{
+			name:     "cerebras",
+			provider: "cerebras",
+			headers: map[string]string{
+				"X-Cerebras-3rd-Party-Integration": "opencode",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, test.provider, "mock-model")
+			if err != nil {
+				t.Fatalf("ResolveChatRequest() error = %v", err)
+			}
+			if len(got.Headers) != len(test.headers) {
+				t.Fatalf("headers = %#v, want %#v", got.Headers, test.headers)
+			}
+			for key, value := range test.headers {
+				if got.Headers[key] != value {
+					t.Fatalf("headers[%q] = %q, want %q in %#v", key, got.Headers[key], value, got.Headers)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveChatRequestOpencodeUsesPublicFallback(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "opencode", "")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.ProviderID != "opencode" ||
+		got.Protocol != "openai-compatible" ||
+		got.BaseURL != "https://opencode.ai/zen/v1" ||
+		got.APIKey != "public" ||
+		got.Model != "big-pickle" {
+		t.Fatalf("request = %#v, want OpenCode Zen public profile", got)
+	}
+}
+
+func TestResolveChatRequestOpencodeUsesConfiguredAPIKey(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "zen-key")
+	t.Setenv("OPENCODE_ZEN_BASE_URL", "https://local.zen.test/v1")
+	t.Setenv("OPENCODE_MODEL", "gpt-5.3-codex")
+
+	got, err := ResolveChatRequest([]Message{{Role: "user", Content: "hello"}}, "opencode", "")
+	if err != nil {
+		t.Fatalf("ResolveChatRequest() error = %v", err)
+	}
+	if got.BaseURL != "https://local.zen.test/v1" || got.APIKey != "zen-key" || got.Model != "gpt-5.3-codex" {
+		t.Fatalf("request = %#v, want configured OpenCode Zen profile", got)
 	}
 }
 

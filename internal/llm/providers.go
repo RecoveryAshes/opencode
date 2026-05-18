@@ -250,9 +250,26 @@ func publicProvider(provider Provider) PublicProvider {
 		Name:    provider.Name,
 		Source:  "custom",
 		Env:     providerEnvVars(provider.ID),
-		Options: map[string]any{},
+		Options: defaultProviderOptions(provider.ID),
 		Models:  models,
 	}
+}
+
+func defaultProviderOptions(id string) map[string]any {
+	headers := map[string]string{}
+	if profile, ok := openAICompatibleProfiles[id]; ok {
+		for key, value := range profile.Headers {
+			headers[key] = value
+		}
+	}
+	if len(headers) == 0 {
+		return map[string]any{}
+	}
+	resultHeaders := map[string]any{}
+	for key, value := range headers {
+		resultHeaders[key] = value
+	}
+	return map[string]any{"headers": resultHeaders}
 }
 
 func mergePublicProvider(base PublicProvider, override PublicProvider) PublicProvider {
@@ -916,6 +933,11 @@ func providerEnvVars(id string) []string {
 		"together":              {"TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"},
 		"alibaba":               {"ALIBABA_API_KEY", "DASHSCOPE_API_KEY"},
 		"vercel":                {"VERCEL_API_KEY", "AI_GATEWAY_API_KEY"},
+		"llmgateway":            {"LLMGATEWAY_API_KEY"},
+		"nvidia":                {"NVIDIA_API_KEY"},
+		"kilo":                  {"KILO_API_KEY"},
+		"zenmux":                {"ZENMUX_API_KEY"},
+		"opencode":              {"OPENCODE_API_KEY"},
 		"cloudflare-ai-gateway": {"CLOUDFLARE_API_TOKEN", "CF_AIG_TOKEN"},
 		"cloudflare-workers-ai": {"CLOUDFLARE_WORKERS_AI_TOKEN", "CLOUDFLARE_API_KEY"},
 		"github-copilot":        {"GITHUB_TOKEN", "GITHUB_COPILOT_API_KEY"},
@@ -1307,7 +1329,9 @@ var providers = []Provider{
 	{ID: "google-vertex", Name: "Vertex AI", Protocols: []string{"generate-content"}},
 	{ID: "azure", Name: "Azure OpenAI", Protocols: []string{"responses", "chat-completions"}},
 	{ID: "amazon-bedrock", Name: "Amazon Bedrock", Protocols: []string{"converse", "invoke-model"}},
+	{ID: "opencode", Name: "OpenCode Zen", Protocols: []string{"openai-compatible"}},
 	{ID: "openrouter", Name: "OpenRouter", Protocols: []string{"openai-compatible"}},
+	{ID: "llmgateway", Name: "LLM Gateway", Protocols: []string{"openai-compatible"}},
 	{ID: "xai", Name: "xAI", Protocols: []string{"openai-compatible"}},
 	{ID: "groq", Name: "Groq", Protocols: []string{"openai-compatible"}},
 	{ID: "mistral", Name: "Mistral", Protocols: []string{"openai-compatible"}},
@@ -1321,6 +1345,9 @@ var providers = []Provider{
 	{ID: "together", Name: "Together AI", Protocols: []string{"openai-compatible"}},
 	{ID: "alibaba", Name: "Alibaba", Protocols: []string{"openai-compatible"}},
 	{ID: "vercel", Name: "Vercel AI Gateway", Protocols: []string{"ai-gateway"}},
+	{ID: "nvidia", Name: "Nvidia", Protocols: []string{"openai-compatible"}},
+	{ID: "kilo", Name: "Kilo Gateway", Protocols: []string{"openai-compatible"}},
+	{ID: "zenmux", Name: "ZenMux", Protocols: []string{"openai-compatible"}},
 	{ID: "cloudflare-ai-gateway", Name: "Cloudflare AI Gateway", Protocols: []string{"openai-compatible"}},
 	{ID: "cloudflare-workers-ai", Name: "Cloudflare Workers AI", Protocols: []string{"openai-compatible"}},
 	{ID: "github-copilot", Name: "GitHub Copilot", Protocols: []string{"openai-compatible"}},
@@ -1335,6 +1362,7 @@ type openAIProfile struct {
 	DefaultBaseURL string
 	BaseURLEnvVars []string
 	APIKeyEnvVars  []string
+	DefaultAPIKey  string
 	ModelEnvVars   []string
 	DefaultModel   string
 	AuthHeader     string
@@ -1348,7 +1376,7 @@ func (profile openAIProfile) chatRequest(messages []Message, modelID string) Cha
 		ProviderID:  profile.ProviderID,
 		Protocol:    "openai-compatible",
 		BaseURL:     defaultString(firstEnv(profile.BaseURLEnvVars...), profile.DefaultBaseURL),
-		APIKey:      firstEnv(profile.APIKeyEnvVars...),
+		APIKey:      defaultString(firstEnv(profile.APIKeyEnvVars...), profile.DefaultAPIKey),
 		AuthHeader:  profile.AuthHeader,
 		AuthScheme:  profile.AuthScheme,
 		Headers:     cloneStringMap(profile.Headers),
@@ -1394,6 +1422,17 @@ var openAICompatibleProfiles = map[string]openAIProfile{
 		AuthHeader:     "Authorization",
 		AuthScheme:     "Bearer",
 	},
+	"opencode": {
+		ProviderID:     "opencode",
+		DefaultBaseURL: "https://opencode.ai/zen/v1",
+		BaseURLEnvVars: []string{"OPENCODE_ZEN_BASE_URL"},
+		APIKeyEnvVars:  []string{"OPENCODE_API_KEY"},
+		DefaultAPIKey:  "public",
+		ModelEnvVars:   []string{"OPENCODE_MODEL"},
+		DefaultModel:   "big-pickle",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+	},
 	"openrouter": {
 		ProviderID:     "openrouter",
 		DefaultBaseURL: "https://openrouter.ai/api/v1",
@@ -1402,6 +1441,25 @@ var openAICompatibleProfiles = map[string]openAIProfile{
 		ModelEnvVars:   []string{"OPENCODE_OPENROUTER_MODEL", "OPENROUTER_MODEL"},
 		AuthHeader:     "Authorization",
 		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
+	},
+	"llmgateway": {
+		ProviderID:     "llmgateway",
+		DefaultBaseURL: "https://api.llmgateway.io/v1",
+		BaseURLEnvVars: []string{"OPENCODE_LLMGATEWAY_BASE_URL", "LLMGATEWAY_BASE_URL"},
+		APIKeyEnvVars:  []string{"OPENCODE_LLMGATEWAY_API_KEY", "LLMGATEWAY_API_KEY"},
+		ModelEnvVars:   []string{"OPENCODE_LLMGATEWAY_MODEL", "LLMGATEWAY_MODEL"},
+		DefaultModel:   "gpt-4o-mini-search-preview",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+			"X-Source":     "opencode",
+		},
 	},
 	"xai": {
 		ProviderID:     "xai",
@@ -1474,6 +1532,9 @@ var openAICompatibleProfiles = map[string]openAIProfile{
 		ModelEnvVars:   []string{"OPENCODE_CEREBRAS_MODEL", "CEREBRAS_MODEL"},
 		AuthHeader:     "Authorization",
 		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"X-Cerebras-3rd-Party-Integration": "opencode",
+		},
 	},
 	"deepinfra": {
 		ProviderID:     "deepinfra",
@@ -1561,6 +1622,49 @@ var openAICompatibleProfiles = map[string]openAIProfile{
 		ModelEnvVars:   []string{"OPENCODE_VENICE_MODEL", "VENICE_MODEL"},
 		AuthHeader:     "Authorization",
 		AuthScheme:     "Bearer",
+	},
+	"nvidia": {
+		ProviderID:     "nvidia",
+		DefaultBaseURL: "https://integrate.api.nvidia.com/v1",
+		BaseURLEnvVars: []string{"OPENCODE_NVIDIA_BASE_URL", "NVIDIA_BASE_URL"},
+		APIKeyEnvVars:  []string{"OPENCODE_NVIDIA_API_KEY", "NVIDIA_API_KEY"},
+		ModelEnvVars:   []string{"OPENCODE_NVIDIA_MODEL", "NVIDIA_MODEL"},
+		DefaultModel:   "upstage/solar-10_7b-instruct",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"HTTP-Referer":            "https://opencode.ai/",
+			"X-Title":                 "opencode",
+			"X-BILLING-INVOKE-ORIGIN": "OpenCode",
+		},
+	},
+	"kilo": {
+		ProviderID:     "kilo",
+		DefaultBaseURL: "https://api.kilo.ai/api/gateway",
+		BaseURLEnvVars: []string{"OPENCODE_KILO_BASE_URL", "KILO_BASE_URL"},
+		APIKeyEnvVars:  []string{"OPENCODE_KILO_API_KEY", "KILO_API_KEY"},
+		ModelEnvVars:   []string{"OPENCODE_KILO_MODEL", "KILO_MODEL"},
+		DefaultModel:   "rekaai/reka-edge",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
+	},
+	"zenmux": {
+		ProviderID:     "zenmux",
+		DefaultBaseURL: "https://zenmux.ai/api/v1",
+		BaseURLEnvVars: []string{"OPENCODE_ZENMUX_BASE_URL", "ZENMUX_BASE_URL"},
+		APIKeyEnvVars:  []string{"OPENCODE_ZENMUX_API_KEY", "ZENMUX_API_KEY"},
+		ModelEnvVars:   []string{"OPENCODE_ZENMUX_MODEL", "ZENMUX_MODEL"},
+		DefaultModel:   "deepseek/deepseek-chat",
+		AuthHeader:     "Authorization",
+		AuthScheme:     "Bearer",
+		Headers: map[string]string{
+			"HTTP-Referer": "https://opencode.ai/",
+			"X-Title":      "opencode",
+		},
 	},
 }
 
