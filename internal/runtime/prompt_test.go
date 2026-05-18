@@ -687,7 +687,7 @@ func TestPromptRuntimeAppliesAdditionalProviderTransformOptions(t *testing.T) {
 			check: func(t *testing.T, request llm.ChatRequest, _ session.ID) {
 				t.Helper()
 				thinking, ok := request.Options["thinking"].(map[string]any)
-				if request.Options["toolStreaming"] != false || !ok || thinking["type"] != "enabled" || thinking["budgetTokens"] != 5999 {
+				if request.Options["toolStreaming"] != false || !ok || thinking["type"] != "enabled" || numberValue(thinking["budgetTokens"]) != 5999 {
 					t.Fatalf("options = %#v, want Anthropic Kimi thinking defaults", request.Options)
 				}
 			},
@@ -1223,6 +1223,73 @@ func TestPromptRuntimeRunsPluginToolHooks(t *testing.T) {
 	}
 }
 
+func TestPromptRuntimeRunsPluginChatHooks(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	plugin := filepath.Join(root, "chat-plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default async () => ({",
+		"  'chat.params': (input, output) => {",
+		"    output.temperature = 0.31",
+		"    output.topP = 0.62",
+		"    output.topK = 9",
+		"    output.maxOutputTokens = 321",
+		"    output.options = { ...output.options, pluginAgent: input.agent, pluginModel: input.model.modelID }",
+		"  },",
+		"  'chat.headers': (_input, output) => { output.headers['X-Plugin-Chat'] = 'yes' },",
+		"})",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := map[string]any{
+		"plugin_origins": []any{map[string]any{
+			"spec":   "file://" + filepath.ToSlash(plugin),
+			"source": filepath.Join(root, "opencode.json"),
+			"scope":  "local",
+		}},
+	}
+	store := storage.NewMemorySessionStore()
+	sessionInfo, err := store.Create(ctx, session.CreateInput{Title: "chat hooks"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	user, err := store.CreatePrompt(ctx, sessionInfo.ID, session.PromptInput{
+		Model: &session.ModelRef{ProviderID: "openai-compatible", ModelID: "mock-model"},
+		Parts: []session.Part{{Type: "text", Data: map[string]any{"text": "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrompt() error = %v", err)
+	}
+	client := &fakeChatClient{}
+	runtime := &PromptRuntime{
+		Messages: store,
+		Client:   client,
+		CWD:      root,
+		Root:     root,
+		Config:   info,
+		Plugins:  pluginruntime.New(info, root, root),
+	}
+	if _, err := runtime.Reply(ctx, sessionInfo.ID, user); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if client.request.Temperature == nil || *client.request.Temperature != 0.31 ||
+		client.request.TopP == nil || *client.request.TopP != 0.62 ||
+		client.request.TopK == nil || *client.request.TopK != 9 ||
+		client.request.MaxTokens == nil || *client.request.MaxTokens != 321 {
+		t.Fatalf("provider request params = %#v, want plugin mutations", client.request)
+	}
+	if client.request.Options["pluginAgent"] != "build" || client.request.Options["pluginModel"] != "mock-model" {
+		t.Fatalf("provider options = %#v, want chat.params plugin options", client.request.Options)
+	}
+	if client.request.Headers["X-Plugin-Chat"] != "yes" {
+		t.Fatalf("provider headers = %#v, want chat.headers plugin header", client.request.Headers)
+	}
+}
+
 func TestPromptRuntimePersistsToolCallErrors(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemorySessionStore()
@@ -1437,6 +1504,17 @@ func TestToolResultMessageSanitizesProviderText(t *testing.T) {
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func numberValue(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case float64:
+		return typed
+	default:
+		return 0
+	}
 }
 
 func toolByNameForTest(tools []llm.ToolDefinition, name string) llm.ToolDefinition {

@@ -163,6 +163,28 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 			}
 		}
 		applyConfiguredProviderOptions(&request, providerConfig, model, agentName, sessionID)
+		plugins := runtime.pluginRuntime(providerConfig)
+		chat := pluginruntime.ChatContext{
+			SessionID: string(sessionID),
+			Agent:     defaultString(agentName, "build"),
+			Model: map[string]any{
+				"providerID": model.ProviderID,
+				"modelID":    model.ModelID,
+				"id":         request.Model,
+				"variant":    model.Variant,
+			},
+			Provider: providerHookContext(providerConfig, request, model),
+			Message: map[string]any{
+				"sessionID": string(sessionID),
+				"agent":     defaultString(agentName, "build"),
+			},
+		}
+		if err := plugins.ApplyChatParams(ctx, &request, chat); err != nil {
+			return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+		}
+		if err := plugins.ApplyChatHeaders(ctx, &request, chat); err != nil {
+			return llm.ChatResponse{}, nil, llm.Usage{}, session.ModelRef{}, err
+		}
 		request.Tools = providerToolDefinitions(definitions, request.ProviderID, request.Model)
 		next, err := client.Chat(ctx, request)
 		if err != nil {
@@ -179,6 +201,22 @@ func (runtime *PromptRuntime) runProviderLoop(ctx context.Context, sessionID ses
 			return response, tools, usage, model, nil
 		}
 		messages = append(messages, toolResultMessage(next, executed))
+	}
+}
+
+func providerHookContext(info config.Info, request llm.ChatRequest, model session.ModelRef) map[string]any {
+	rawProvider := map[string]any{}
+	if providers, ok := info["provider"].(map[string]any); ok {
+		rawProvider, _ = providers[model.ProviderID].(map[string]any)
+	}
+	options, _ := rawProvider["options"].(map[string]any)
+	return map[string]any{
+		"source": "config",
+		"info": map[string]any{
+			"id":   request.ProviderID,
+			"name": stringFromConfig(rawProvider["name"]),
+		},
+		"options": cloneRuntimeAnyMap(options),
 	}
 }
 

@@ -151,6 +151,66 @@ func TestRuntimeRunsProviderAuthHooks(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunsChatHooks(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is required for JS plugin hook execution")
+	}
+	root := t.TempDir()
+	plugin := filepath.Join(root, "chat-plugin.ts")
+	if err := os.WriteFile(plugin, []byte(strings.Join([]string{
+		"export default async () => ({",
+		"  'chat.params': (input, output) => {",
+		"    output.temperature = 0.42",
+		"    output.topP = 0.7",
+		"    output.topK = 12",
+		"    output.maxOutputTokens = 345",
+		"    output.options = { ...output.options, pluginOption: input.agent + ':' + input.model.modelID }",
+		"  },",
+		"  'chat.headers': (_input, output) => {",
+		"    output.headers['X-Plugin-Chat'] = 'enabled'",
+		"  },",
+		"})",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	info := config.Info{"plugin_origins": []any{map[string]any{
+		"spec":   fileURL(plugin),
+		"source": filepath.Join(root, "opencode.json"),
+		"scope":  "local",
+	}}}
+	runtime := New(info, root, root)
+	request := llm.ChatRequest{
+		Options: map[string]any{"existing": true},
+		Headers: map[string]string{"X-Existing": "yes"},
+	}
+	chat := ChatContext{
+		SessionID: "session",
+		Agent:     "build",
+		Model:     map[string]any{"providerID": "openai", "modelID": "gpt-test"},
+		Provider:  map[string]any{"source": "config"},
+		Message:   map[string]any{},
+	}
+	if err := runtime.ApplyChatParams(context.Background(), &request, chat); err != nil {
+		t.Fatalf("ApplyChatParams() error = %v", err)
+	}
+	if err := runtime.ApplyChatHeaders(context.Background(), &request, chat); err != nil {
+		t.Fatalf("ApplyChatHeaders() error = %v", err)
+	}
+	if request.Temperature == nil || *request.Temperature != 0.42 ||
+		request.TopP == nil || *request.TopP != 0.7 ||
+		request.TopK == nil || *request.TopK != 12 ||
+		request.MaxTokens == nil || *request.MaxTokens != 345 {
+		t.Fatalf("request params = %#v, want plugin mutations", request)
+	}
+	if request.Options["pluginOption"] != "build:gpt-test" || request.Options["existing"] != true {
+		t.Fatalf("options = %#v, want merged plugin option", request.Options)
+	}
+	if request.Headers["X-Plugin-Chat"] != "enabled" || request.Headers["X-Existing"] != "yes" {
+		t.Fatalf("headers = %#v, want plugin and existing headers", request.Headers)
+	}
+}
+
 func fileURL(path string) string {
 	return "file://" + filepath.ToSlash(path)
 }
