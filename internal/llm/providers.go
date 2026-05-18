@@ -2,8 +2,10 @@
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -163,6 +165,7 @@ func ConfigProviders(info config.Info) ConfigProvidersResult {
 func filteredProviders(info config.Info) []PublicProvider {
 	enabled := stringSetFromConfig(info["enabled_providers"])
 	disabled := stringSetFromConfig(info["disabled_providers"])
+	catalog := modelsDevProvidersFromEnv()
 	custom := configuredProviders(info)
 
 	result := []PublicProvider{}
@@ -174,15 +177,19 @@ func filteredProviders(info config.Info) []PublicProvider {
 			continue
 		}
 		public := publicProvider(provider)
+		if override, ok := catalog[provider.ID]; ok {
+			public = mergePublicProvider(public, override)
+		}
 		if override, ok := custom[provider.ID]; ok {
 			public = mergePublicProvider(public, override)
 		}
 		result = append(result, public)
+		delete(catalog, provider.ID)
 		delete(custom, provider.ID)
 	}
 
-	extraIDs := make([]string, 0, len(custom))
-	for id := range custom {
+	extraIDs := make([]string, 0, len(catalog)+len(custom))
+	for id := range catalog {
 		if len(enabled) > 0 && !enabled[id] {
 			continue
 		}
@@ -191,11 +198,109 @@ func filteredProviders(info config.Info) []PublicProvider {
 		}
 		extraIDs = append(extraIDs, id)
 	}
+	for id := range custom {
+		if len(enabled) > 0 && !enabled[id] {
+			continue
+		}
+		if disabled[id] {
+			continue
+		}
+		if _, ok := catalog[id]; ok {
+			continue
+		}
+		extraIDs = append(extraIDs, id)
+	}
 	sort.Strings(extraIDs)
 	for _, id := range extraIDs {
-		result = append(result, custom[id])
+		public, ok := catalog[id]
+		if !ok {
+			public = custom[id]
+		} else if override, ok := custom[id]; ok {
+			public = mergePublicProvider(public, override)
+		}
+		result = append(result, public)
 	}
 	return result
+}
+
+func modelsDevProvidersFromEnv() map[string]PublicProvider {
+	path := strings.TrimSpace(os.Getenv("OPENCODE_MODELS_PATH"))
+	if path == "" {
+		return map[string]PublicProvider{}
+	}
+	return modelsDevProvidersFromPath(path)
+}
+
+func modelsDevProvidersFromPath(path string) map[string]PublicProvider {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]PublicProvider{}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return map[string]PublicProvider{}
+	}
+	result := map[string]PublicProvider{}
+	for id, value := range raw {
+		record, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		provider := providerFromModelsDev(id, record)
+		if provider.ID == "" {
+			continue
+		}
+		result[provider.ID] = provider
+	}
+	return result
+}
+
+func providerFromModelsDev(id string, input map[string]any) PublicProvider {
+	providerID := stringFromAny(input["id"], id)
+	name := stringFromAny(input["name"], providerName(providerID))
+	env := stringSliceFromAny(input["env"])
+	if len(env) == 0 {
+		env = providerEnvVars(providerID)
+	}
+	models := map[string]PublicModel{}
+	if rawModels, ok := input["models"].(map[string]any); ok {
+		for key, raw := range rawModels {
+			modelRecord, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			model := modelFromConfig(providerID, key, input, modelRecord)
+			models[key] = model
+			for mode, rawMode := range modelsDevExperimentalModes(modelRecord) {
+				modeRecord, ok := rawMode.(map[string]any)
+				if !ok {
+					continue
+				}
+				modeModel := modelFromModelsDevMode(model, mode, modeRecord)
+				models[modeModel.ID] = modeModel
+			}
+		}
+	}
+	return PublicProvider{
+		ID:      providerID,
+		Name:    name,
+		Source:  "custom",
+		Env:     env,
+		Options: defaultProviderOptions(providerID),
+		Models:  models,
+	}
+}
+
+func modelsDevExperimentalModes(input map[string]any) map[string]any {
+	experimental, ok := input["experimental"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	modes, ok := experimental["modes"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return modes
 }
 
 func configuredProviders(info config.Info) map[string]PublicProvider {
@@ -375,6 +480,98 @@ func modelFromConfig(providerID string, modelID string, providerInput map[string
 	configVariants, disabledVariants := variantsFromConfig(input["variants"])
 	model.Variants = mergeModelVariants(defaultReasoningVariants(model), configVariants, disabledVariants)
 	return model
+}
+
+func modelFromModelsDevMode(base PublicModel, mode string, input map[string]any) PublicModel {
+	model := base
+	model.ID = base.ID + "-" + mode
+	model.Name = strings.TrimSpace(base.Name + " " + strings.ToUpper(mode[:1]) + mode[1:])
+	model.API = cloneProviderAnyMap(base.API)
+	model.Options = cloneProviderAnyMap(base.Options)
+	model.Headers = cloneStringMap(base.Headers)
+	model.Variants = cloneVariantMap(base.Variants)
+	if cost, ok := input["cost"].(map[string]any); ok {
+		model.Cost = mergeModelCost(model.Cost, costFromConfig(cost))
+	}
+	if provider, ok := input["provider"].(map[string]any); ok {
+		if body, ok := provider["body"].(map[string]any); ok {
+			model.Options = camelCaseProviderBody(body)
+		}
+		if headers, ok := provider["headers"].(map[string]any); ok {
+			model.Headers = stringMapFromAny(headers)
+		}
+		if api := stringFromAny(provider["api"], ""); api != "" {
+			model.API["url"] = api
+		}
+		if npm := stringFromAny(provider["npm"], ""); npm != "" {
+			model.API["npm"] = npm
+		}
+	}
+	model.Variants = mergeModelVariants(defaultReasoningVariants(model), nil, nil)
+	return model
+}
+
+func costFromConfig(cost map[string]any) Cost {
+	return Cost{
+		Input:  floatFromAny(cost["input"], 0),
+		Output: floatFromAny(cost["output"], 0),
+		Cache: CacheCost{
+			Read:  floatFromAny(cost["cache_read"], 0),
+			Write: floatFromAny(cost["cache_write"], 0),
+		},
+		Tiers:                costTiersFromConfig(cost["tiers"]),
+		ExperimentalOver200K: over200KCostFromConfig(cost["context_over_200k"]),
+	}
+}
+
+func mergeModelCost(base Cost, override Cost) Cost {
+	base.Input = override.Input
+	base.Output = override.Output
+	base.Cache = override.Cache
+	if override.Tiers != nil {
+		base.Tiers = override.Tiers
+	}
+	if override.ExperimentalOver200K != nil {
+		base.ExperimentalOver200K = override.ExperimentalOver200K
+	}
+	return base
+}
+
+func camelCaseProviderBody(input map[string]any) map[string]any {
+	result := map[string]any{}
+	for key, value := range input {
+		result[snakeToLowerCamel(key)] = value
+	}
+	return result
+}
+
+func snakeToLowerCamel(input string) string {
+	var output strings.Builder
+	upperNext := false
+	for _, r := range input {
+		if r == '_' {
+			upperNext = true
+			continue
+		}
+		if upperNext {
+			output.WriteString(strings.ToUpper(string(r)))
+			upperNext = false
+			continue
+		}
+		output.WriteRune(r)
+	}
+	return output.String()
+}
+
+func cloneVariantMap(input map[string]map[string]any) map[string]map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	result := make(map[string]map[string]any, len(input))
+	for key, value := range input {
+		result[key] = cloneProviderAnyMap(value)
+	}
+	return result
 }
 
 func defaultReasoningVariants(model PublicModel) map[string]map[string]any {

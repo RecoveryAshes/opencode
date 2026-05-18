@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +35,15 @@ func clearBedrockAuthEnv(t *testing.T) {
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
 }
 
+func writeModelsDevFixture(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write models fixture: %v", err)
+	}
+	return path
+}
+
 func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 	got := map[string]bool{}
 	for _, id := range ProviderIDs() {
@@ -44,6 +54,186 @@ func TestProviderInventoryIncludesMigrationTargets(t *testing.T) {
 		if !got[id] {
 			t.Fatalf("provider %q missing from inventory", id)
 		}
+	}
+}
+
+func TestListProvidersLoadsModelsDevPath(t *testing.T) {
+	path := writeModelsDevFixture(t, `{
+		"fixture-ai": {
+			"id": "fixture-ai",
+			"name": "Fixture AI",
+			"env": ["FIXTURE_API_KEY"],
+			"npm": "@fixture/sdk",
+			"api": "https://fixture.example/v1",
+			"models": {
+				"fixture-pro": {
+					"id": "fixture-pro-api",
+					"name": "Fixture Pro",
+					"family": "fixture",
+					"attachment": true,
+					"reasoning": true,
+					"temperature": true,
+					"tool_call": false,
+					"interleaved": {"field":"reasoning_content"},
+					"release_date": "2026-01-02",
+					"modalities": {"input":["text","image","pdf"],"output":["text"]},
+					"limit": {"context": 200000, "input": 128000, "output": 64000},
+					"cost": {
+						"input": 1.25,
+						"output": 2.5,
+						"cache_read": 0.1,
+						"cache_write": 0.2,
+						"context_over_200k": {"input": 3, "output": 4, "cache_read": 0.3, "cache_write": 0.4}
+					}
+				}
+			}
+		}
+	}`)
+	t.Setenv("OPENCODE_MODELS_PATH", path)
+
+	result := ListProviders(config.Info{"enabled_providers": []any{"fixture-ai"}})
+	if len(result.All) != 1 {
+		t.Fatalf("providers = %#v, want fixture-ai only", result.All)
+	}
+	provider := result.All[0]
+	if provider.ID != "fixture-ai" || provider.Name != "Fixture AI" || provider.Env[0] != "FIXTURE_API_KEY" {
+		t.Fatalf("provider = %#v, want models.dev provider fields", provider)
+	}
+	model := provider.Models["fixture-pro"]
+	if model.ID != "fixture-pro" ||
+		model.API["id"] != "fixture-pro-api" ||
+		model.API["url"] != "https://fixture.example/v1" ||
+		model.API["npm"] != "@fixture/sdk" ||
+		model.Name != "Fixture Pro" ||
+		model.Family != "fixture" ||
+		!model.Capabilities.Attachment ||
+		!model.Capabilities.Reasoning ||
+		model.Capabilities.Toolcall ||
+		model.Capabilities.Interleaved == nil ||
+		!model.Capabilities.Input.Image ||
+		!model.Capabilities.Input.PDF ||
+		model.Limit.Context != 200000 ||
+		model.Limit.Input != 128000 ||
+		model.Limit.Output != 64000 ||
+		model.Cost.Input != 1.25 ||
+		model.Cost.Cache.Write != 0.2 ||
+		model.Cost.ExperimentalOver200K == nil ||
+		model.Cost.ExperimentalOver200K.Cache.Write != 0.4 ||
+		model.ReleaseDate != "2026-01-02" {
+		t.Fatalf("model = %#v, want models.dev model mapping", model)
+	}
+	if result.Default["fixture-ai"] != "fixture-pro" {
+		t.Fatalf("default = %#v, want fixture-pro", result.Default)
+	}
+}
+
+func TestListProvidersLoadsModelsDevExperimentalModes(t *testing.T) {
+	path := writeModelsDevFixture(t, `{
+		"fixture-ai": {
+			"id": "fixture-ai",
+			"name": "Fixture AI",
+			"env": ["FIXTURE_API_KEY"],
+			"npm": "@fixture/sdk",
+			"api": "https://fixture.example/v1",
+			"models": {
+				"fixture-pro": {
+					"id": "fixture-pro",
+					"name": "Fixture Pro",
+					"attachment": false,
+					"reasoning": true,
+					"temperature": true,
+					"tool_call": true,
+					"release_date": "2026-01-02",
+					"modalities": {"input":["text"],"output":["text"]},
+					"limit": {"context": 128000, "output": 4096},
+					"cost": {"input": 1, "output": 2},
+					"experimental": {
+						"modes": {
+							"turbo": {
+								"cost": {"input": 0.5, "output": 1.5, "cache_read": 0.05},
+								"provider": {
+									"body": {"reasoning_effort":"low","max_output_tokens":1234},
+									"headers": {"X-Fixture":"turbo"}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	t.Setenv("OPENCODE_MODELS_PATH", path)
+
+	result := ListProviders(config.Info{"enabled_providers": []any{"fixture-ai"}})
+	model := result.All[0].Models["fixture-pro-turbo"]
+	if model.ID != "fixture-pro-turbo" ||
+		model.Name != "Fixture Pro Turbo" ||
+		model.Cost.Input != 0.5 ||
+		model.Cost.Output != 1.5 ||
+		model.Cost.Cache.Read != 0.05 ||
+		model.Options["reasoningEffort"] != "low" ||
+		model.Options["maxOutputTokens"] != float64(1234) ||
+		model.Headers["X-Fixture"] != "turbo" {
+		t.Fatalf("mode model = %#v, want experimental mode mapping", model)
+	}
+}
+
+func TestListProvidersModelsDevPathMergesConfigOverrides(t *testing.T) {
+	path := writeModelsDevFixture(t, `{
+		"fixture-ai": {
+			"id": "fixture-ai",
+			"name": "Fixture AI",
+			"env": ["FIXTURE_API_KEY"],
+			"models": {
+				"fixture-pro": {
+					"id": "fixture-pro",
+					"name": "Fixture Pro",
+					"attachment": false,
+					"reasoning": false,
+					"temperature": true,
+					"tool_call": true,
+					"release_date": "2026-01-02",
+					"modalities": {"input":["text"],"output":["text"]},
+					"limit": {"context": 128000, "output": 4096},
+					"cost": {"input": 1, "output": 2}
+				}
+			}
+		}
+	}`)
+	t.Setenv("OPENCODE_MODELS_PATH", path)
+
+	result := ListProviders(config.Info{
+		"enabled_providers": []any{"fixture-ai"},
+		"provider": map[string]any{
+			"fixture-ai": map[string]any{
+				"name": "Configured Fixture",
+				"options": map[string]any{
+					"baseURL": "https://configured.example/v1",
+				},
+				"models": map[string]any{
+					"local-model": map[string]any{"id": "local-api"},
+				},
+			},
+		},
+	})
+	provider := result.All[0]
+	if provider.Name != "Configured Fixture" || provider.Options["baseURL"] != "https://configured.example/v1" {
+		t.Fatalf("provider = %#v, want config override over models.dev", provider)
+	}
+	if _, ok := provider.Models["fixture-pro"]; !ok {
+		t.Fatalf("models = %#v, want models.dev model preserved", provider.Models)
+	}
+	if provider.Models["local-model"].API["id"] != "local-api" {
+		t.Fatalf("models = %#v, want config model merged", provider.Models)
+	}
+}
+
+func TestListProvidersMissingModelsDevPathFallsBackToStaticCatalog(t *testing.T) {
+	t.Setenv("OPENCODE_MODELS_PATH", filepath.Join(t.TempDir(), "missing.json"))
+
+	result := ListProviders(config.Info{"enabled_providers": []any{"openai"}})
+	if len(result.All) != 1 || result.All[0].ID != "openai" || len(result.All[0].Models) == 0 {
+		t.Fatalf("providers = %#v, want static openai fallback", result.All)
 	}
 }
 
